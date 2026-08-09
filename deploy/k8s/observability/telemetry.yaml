@@ -1,0 +1,299 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ratsnest-otel-collector
+  namespace: ratsnest
+  annotations:
+    ratsnest.io/queue-durability: per-replica-pvc
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc: { endpoint: 0.0.0.0:4317 }
+          http: { endpoint: 0.0.0.0:4318 }
+    processors:
+      memory_limiter:
+        check_interval: 5s
+        limit_mib: 384
+        spike_limit_mib: 96
+      attributes/redact:
+        actions:
+          - { key: http.request.header.authorization, action: delete }
+          - { key: http.request.header.cookie, action: delete }
+          - { key: http.response.header.set-cookie, action: delete }
+          - { key: http.request.body, action: delete }
+          - { key: http.response.body, action: delete }
+          - { key: db.statement, action: delete }
+          - { key: url.query, action: delete }
+          - { key: gen_ai.prompt, action: delete }
+          - { key: gen_ai.completion, action: delete }
+      batch:
+        send_batch_size: 1024
+        timeout: 5s
+    exporters:
+      prometheus:
+        endpoint: 0.0.0.0:9464
+        enable_open_metrics: true
+        resource_to_telemetry_conversion: { enabled: true }
+      otlphttp/tempo:
+        endpoint: ${env:TEMPO_OTLP_ENDPOINT}
+        headers:
+          Authorization: ${env:TEMPO_AUTHORIZATION}
+        tls: { insecure: false }
+        sending_queue: { enabled: true, queue_size: 2048, storage: file_storage }
+        retry_on_failure: { enabled: true, max_elapsed_time: 0s }
+      otlphttp/loki:
+        endpoint: ${env:LOKI_OTLP_ENDPOINT}
+        headers:
+          Authorization: ${env:LOKI_AUTHORIZATION}
+          X-Scope-OrgID: ${env:LOKI_TENANT_ID}
+        tls: { insecure: false }
+        sending_queue: { enabled: true, queue_size: 2048, storage: file_storage }
+        retry_on_failure: { enabled: true, max_elapsed_time: 0s }
+    extensions:
+      health_check: { endpoint: 0.0.0.0:13133 }
+      file_storage:
+        directory: /var/lib/otelcol/storage
+        compaction: { on_start: true }
+    service:
+      extensions: [health_check, file_storage]
+      telemetry:
+        metrics: { address: 0.0.0.0:8888 }
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, attributes/redact, batch]
+          exporters: [otlphttp/tempo]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, attributes/redact, batch]
+          exporters: [prometheus]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, attributes/redact, batch]
+          exporters: [otlphttp/loki]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ratsnest-observability-exporters
+  namespace: ratsnest
+data:
+  TEMPO_OTLP_ENDPOINT: https://tempo-distributor.observability.svc.cluster.local:4318
+  LOKI_OTLP_ENDPOINT: https://loki-gateway.observability.svc.cluster.local/otlp
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ratsnest-otel-collector
+  namespace: ratsnest
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ratsnest-otel-collector
+  namespace: ratsnest
+spec:
+  serviceName: ratsnest-otel-collector-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: { app: ratsnest-otel-collector }
+  template:
+    metadata:
+      labels: { app: ratsnest-otel-collector, app.kubernetes.io/part-of: ratsnestpro }
+    spec:
+      serviceAccountName: ratsnest-otel-collector
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels: { app: ratsnest-otel-collector }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          minDomains: 3
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: { app: ratsnest-otel-collector }
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: collector
+          image: otel/opentelemetry-collector-contrib:0.123.0
+          args: [--config=/conf/config.yaml]
+          env:
+            - name: TEMPO_OTLP_ENDPOINT
+              valueFrom: { configMapKeyRef: { name: ratsnest-observability-exporters, key: TEMPO_OTLP_ENDPOINT } }
+            - name: LOKI_OTLP_ENDPOINT
+              valueFrom: { configMapKeyRef: { name: ratsnest-observability-exporters, key: LOKI_OTLP_ENDPOINT } }
+            - name: TEMPO_AUTHORIZATION
+              valueFrom: { secretKeyRef: { name: ratsnest-observability-exporter-auth, key: TEMPO_AUTHORIZATION } }
+            - name: LOKI_AUTHORIZATION
+              valueFrom: { secretKeyRef: { name: ratsnest-observability-exporter-auth, key: LOKI_AUTHORIZATION } }
+            - name: LOKI_TENANT_ID
+              valueFrom: { secretKeyRef: { name: ratsnest-observability-exporter-auth, key: LOKI_TENANT_ID } }
+          ports:
+            - { name: otlp-grpc, containerPort: 4317 }
+            - { name: otlp-http, containerPort: 4318 }
+            - { name: prometheus, containerPort: 9464 }
+            - { name: self-metrics, containerPort: 8888 }
+            - { name: health, containerPort: 13133 }
+          readinessProbe:
+            httpGet: { path: /, port: health }
+          livenessProbe:
+            httpGet: { path: /, port: health }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          volumeMounts:
+            - { name: config, mountPath: /conf, readOnly: true }
+            - { name: queue, mountPath: /var/lib/otelcol/storage }
+      volumes:
+        - name: config
+          configMap: { name: ratsnest-otel-collector }
+  volumeClaimTemplates:
+    - metadata:
+        name: queue
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: { storage: 2Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratsnest-otel-collector-headless
+  namespace: ratsnest
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: { app: ratsnest-otel-collector }
+  ports:
+    - { name: otlp-grpc, port: 4317, targetPort: otlp-grpc }
+    - { name: otlp-http, port: 4318, targetPort: otlp-http }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratsnest-otel-collector
+  namespace: ratsnest
+  labels: { app: ratsnest-otel-collector }
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9464"
+spec:
+  selector: { app: ratsnest-otel-collector }
+  ports:
+    - { name: otlp-grpc, port: 4317, targetPort: otlp-grpc }
+    - { name: otlp-http, port: 4318, targetPort: otlp-http }
+    - { name: prometheus, port: 9464, targetPort: prometheus }
+    - { name: self-metrics, port: 8888, targetPort: self-metrics }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: ratsnest-otel-collector, namespace: ratsnest }
+spec:
+  minAvailable: 2
+  selector: { matchLabels: { app: ratsnest-otel-collector } }
+---
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: ratsnest-instrumentation
+  namespace: ratsnest
+spec:
+  exporter:
+    endpoint: http://ratsnest-otel-collector:4318
+  propagators: [tracecontext, baggage]
+  sampler:
+    type: parentbased_traceidratio
+    argument: "0.10"
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ratsnest-otel-collector
+  namespace: ratsnest
+  labels: { release: kube-prometheus-stack }
+spec:
+  jobLabel: app
+  selector:
+    matchLabels: { app: ratsnest-otel-collector }
+  endpoints:
+    - { port: prometheus, path: /metrics, interval: 30s, scrapeTimeout: 10s }
+    - { port: self-metrics, path: /metrics, interval: 30s, scrapeTimeout: 10s }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-otel-collector-ingress, namespace: ratsnest }
+spec:
+  podSelector: { matchLabels: { app: ratsnest-otel-collector } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/part-of: ratsnestpro }
+      ports:
+        - { protocol: TCP, port: 4317 }
+        - { protocol: TCP, port: 4318 }
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: monitoring }
+      ports:
+        - { protocol: TCP, port: 9464 }
+        - { protocol: TCP, port: 8888 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-restricted-apps-to-otel, namespace: ratsnest }
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - ratsnest-control-plane
+          - ratsnest-web
+          - ratsnest-agent-service
+          - ratsnest-temporal-worker
+          - ratsnest-kafka-audit-relay
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app: ratsnest-otel-collector } }
+      ports:
+        - { protocol: TCP, port: 4317 }
+        - { protocol: TCP, port: 4318 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-otel-collector-egress, namespace: ratsnest }
+spec:
+  podSelector: { matchLabels: { app: ratsnest-otel-collector } }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+      ports:
+        - { protocol: TCP, port: 80 }
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 4318 }
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }

@@ -1,0 +1,152 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratsnest-web
+  namespace: ratsnest
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: ratsnest-web }
+  template:
+    metadata:
+      labels: { app: ratsnest-web, app.kubernetes.io/part-of: ratsnestpro }
+    spec:
+      serviceAccountName: ratsnest-runtime
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: web
+          image: ghcr.io/ratsnestteam/ratsnest-web:replace-me
+          ports:
+            - { name: http, containerPort: 3000 }
+          env:
+            - name: CONTROL_PLANE_URL
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: CONTROL_PLANE_URL }
+            - name: WEB_TRUST_OIDC_PROXY_ACCESS_TOKEN
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: WEB_TRUST_OIDC_PROXY_ACCESS_TOKEN }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratsnest-web
+  namespace: ratsnest
+spec:
+  selector: { app: ratsnest-web }
+  ports:
+    - { name: http, port: 3000, targetPort: http }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratsnest-oidc-proxy
+  namespace: ratsnest
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: ratsnest-oidc-proxy }
+  template:
+    metadata:
+      labels: { app: ratsnest-oidc-proxy, app.kubernetes.io/part-of: ratsnestpro }
+    spec:
+      serviceAccountName: ratsnest-runtime
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: oauth2-proxy
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.1
+          ports:
+            - { name: http, containerPort: 4180 }
+          env:
+            - { name: OAUTH2_PROXY_PROVIDER, value: oidc }
+            - { name: OAUTH2_PROXY_HTTP_ADDRESS, value: "0.0.0.0:4180" }
+            - { name: OAUTH2_PROXY_UPSTREAMS, value: "http://ratsnest-web:3000" }
+            - { name: OAUTH2_PROXY_REVERSE_PROXY, value: "true" }
+            - { name: OAUTH2_PROXY_SET_XAUTHREQUEST, value: "true" }
+            - { name: OAUTH2_PROXY_PASS_USER_HEADERS, value: "true" }
+            - { name: OAUTH2_PROXY_PASS_ACCESS_TOKEN, value: "true" }
+            - { name: OAUTH2_PROXY_CODE_CHALLENGE_METHOD, value: S256 }
+            - { name: OAUTH2_PROXY_COOKIE_SECURE, value: "true" }
+            - { name: OAUTH2_PROXY_COOKIE_SAMESITE, value: lax }
+            - name: OAUTH2_PROXY_OIDC_ISSUER_URL
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: OAUTH2_PROXY_OIDC_ISSUER_URL }
+            - name: OAUTH2_PROXY_CLIENT_ID
+              valueFrom:
+                secretKeyRef: { name: ratsnest-oidc-secrets, key: OAUTH2_PROXY_CLIENT_ID }
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: { name: ratsnest-oidc-secrets, key: OAUTH2_PROXY_CLIENT_SECRET }
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef: { name: ratsnest-oidc-secrets, key: OAUTH2_PROXY_COOKIE_SECRET }
+            - name: OAUTH2_PROXY_REDIRECT_URL
+              valueFrom:
+                secretKeyRef: { name: ratsnest-oidc-secrets, key: OAUTH2_PROXY_REDIRECT_URL }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          readinessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 15
+            timeoutSeconds: 3
+          startupProbe:
+            httpGet: { path: /ping, port: http }
+            failureThreshold: 30
+            periodSeconds: 2
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratsnest-oidc-proxy
+  namespace: ratsnest
+spec:
+  selector: { app: ratsnest-oidc-proxy }
+  ports:
+    - { name: http, port: 4180, targetPort: http }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ratsnest
+  namespace: ratsnest
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "7200"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [ratsnest.example.com]
+      secretName: ratsnest-tls
+  rules:
+    - host: ratsnest.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ratsnest-oidc-proxy
+                port: { name: http }

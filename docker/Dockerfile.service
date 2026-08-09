@@ -1,0 +1,59 @@
+FROM python:3.13.14-slim
+
+WORKDIR /app
+
+ENV UV_PROJECT_ENVIRONMENT="/usr/local/"
+ENV UV_COMPILE_BYTECODE=1
+ENV KICAD_PYTHON="/usr/bin/python3"
+ENV FREEROUTING_EXE="/usr/local/bin/freerouting"
+
+ARG FREEROUTING_VERSION=2.2.4
+ARG FREEROUTING_SHA256=f5ed374182900ccc78e473518bbb9f6b869f4a07159495f663a76f52bb10523b
+
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=5 -o Acquire::https::Timeout=60 update \
+    && apt-get -o Acquire::Retries=5 -o Acquire::https::Timeout=60 \
+        install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        kicad \
+        kicad-footprints \
+        kicad-symbols \
+        openjdk-25-jre-headless \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/freerouting \
+    && curl --fail --location --silent --show-error \
+        "https://github.com/freerouting/freerouting/releases/download/v${FREEROUTING_VERSION}/freerouting-${FREEROUTING_VERSION}.jar" \
+        --output /opt/freerouting/freerouting.jar \
+    && echo "${FREEROUTING_SHA256}  /opt/freerouting/freerouting.jar" | sha256sum --check -
+
+COPY docker/freerouting /usr/local/bin/freerouting
+RUN chmod 0755 /usr/local/bin/freerouting
+
+COPY pyproject.toml .
+COPY uv.lock .
+RUN pip install --no-cache-dir uv==0.11.29
+RUN uv sync --frozen --no-install-project --no-dev
+
+COPY src/agents/ ./agents/
+COPY src/core/ ./core/
+COPY src/memory/ ./memory/
+COPY src/schema/ ./schema/
+COPY src/service/ ./service/
+COPY src/RatsNestPro-main/RatsNestPro-main/pyproject.toml /opt/ratsnestpro/pyproject.toml
+COPY src/RatsNestPro-main/RatsNestPro-main/README.md /opt/ratsnestpro/README.md
+COPY src/RatsNestPro-main/RatsNestPro-main/src/ratsnestpro/ /opt/ratsnestpro/src/ratsnestpro/
+RUN uv pip install --system --no-deps --editable /opt/ratsnestpro
+COPY src/run_service.py .
+
+RUN groupadd --gid 10001 ratsnest \
+    && useradd --uid 10001 --gid ratsnest --create-home --shell /usr/sbin/nologin ratsnest \
+    && mkdir -p /data/ratsnestpro \
+    && chown -R ratsnest:ratsnest /data/ratsnestpro /home/ratsnest
+
+ENV HOME=/home/ratsnest
+USER 10001:10001
+
+CMD ["python", "run_service.py"]

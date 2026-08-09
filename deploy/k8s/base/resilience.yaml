@@ -1,0 +1,161 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: ratsnest-control-plane, namespace: ratsnest }
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app: ratsnest-control-plane } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: ratsnest-agent-service, namespace: ratsnest }
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app: ratsnest-agent-service } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: ratsnest-web, namespace: ratsnest }
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app: ratsnest-web } }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: ratsnest-control-plane, namespace: ratsnest }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: ratsnest-control-plane }
+  minReplicas: 2
+  maxReplicas: 20
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: ratsnest-agent-service, namespace: ratsnest }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: ratsnest-agent-service }
+  minReplicas: 2
+  maxReplicas: 12
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: ratsnest-web, namespace: ratsnest }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: ratsnest-web }
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny-ingress, namespace: ratsnest }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-ingress-to-oidc-proxy, namespace: ratsnest }
+spec:
+  podSelector: { matchLabels: { app: ratsnest-oidc-proxy } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - { protocol: TCP, port: 4180 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-oidc-proxy-to-web, namespace: ratsnest }
+spec:
+  podSelector: { matchLabels: { app: ratsnest-web } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: ratsnest-oidc-proxy } }
+      ports:
+        - { protocol: TCP, port: 3000 }
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app: ratsnest-control-plane } }
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 9090 }
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-web-to-control-plane, namespace: ratsnest }
+spec:
+  podSelector: { matchLabels: { app: ratsnest-control-plane } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: ratsnest-web } }
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-control-plane-to-agent-service, namespace: ratsnest }
+spec:
+  podSelector: { matchLabels: { app: ratsnest-agent-service } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: ratsnest-control-plane } }
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: restrict-control-plane-egress, namespace: ratsnest }
+spec:
+  podSelector: { matchLabels: { app: ratsnest-control-plane } }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app: ratsnest-agent-service } }
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 9090 }
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: ratsnest-data }
+      ports:
+        - { protocol: TCP, port: 5432 }
+        - { protocol: TCP, port: 9093 }
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - ipBlock: { cidr: 0.0.0.0/0 }
+      ports:
+        - { protocol: TCP, port: 443 }

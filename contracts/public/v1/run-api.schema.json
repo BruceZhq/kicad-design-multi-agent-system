@@ -1,0 +1,312 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ratsnest.team/contracts/public/v1/run-api.schema.json",
+  "title": "Run API v1",
+  "$defs": {
+    "teamMemberRequest": {
+      "type": "object",
+      "required": ["roleId", "name", "responsibility"],
+      "properties": {
+        "roleId": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "\\S"
+        },
+        "responsibility": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "\\S"
+        }
+      },
+      "additionalProperties": false
+    },
+    "capabilityProfileSelector": {
+      "type": "object",
+      "required": ["id", "version"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+(?:\\.[0-9]+)?$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "capabilityProfileSnapshot": {
+      "type": "object",
+      "required": ["id", "version", "digest"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+(?:\\.[0-9]+)?$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "capabilityProfileMetadata": {
+      "type": "object",
+      "required": ["id", "version", "digest", "title", "description"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$" },
+        "version": { "type": "string", "maxLength": 32, "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:\\.(?:0|[1-9][0-9]*))?$" },
+        "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 500 }
+      },
+      "additionalProperties": false
+    },
+    "startRunRequest": {
+      "type": "object",
+      "required": ["message", "capabilityProfile"],
+      "properties": {
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100000,
+          "pattern": "\\S"
+        },
+        "model": {
+          "type": ["string", "null"],
+          "maxLength": 200
+        },
+        "threadId": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Za-z0-9._:-]{1,200}$"
+        },
+        "capabilityProfile": { "$ref": "#/$defs/capabilityProfileSelector" },
+        "teamMembers": {
+          "type": ["array", "null"],
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/teamMemberRequest" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "deliveryStatus": {
+      "enum": ["execution_blocked", "delivered_with_issues", "release_ready"]
+    },
+    "createRunRevisionRequest": {
+      "type": "object",
+      "required": ["feedback"],
+      "properties": {
+        "feedback": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100000,
+          "pattern": "\\S"
+        }
+      },
+      "additionalProperties": false
+    },
+    "runResponse": {
+      "type": "object",
+      "required": [
+        "runId",
+        "rootRunId",
+        "parentRunId",
+        "revisionNumber",
+        "projectId",
+        "threadId",
+        "state",
+        "deliveryStatus",
+        "capabilityProfile",
+        "createdAt",
+        "eventCount"
+      ],
+      "properties": {
+        "runId": { "type": "string", "format": "uuid" },
+        "rootRunId": { "type": "string", "format": "uuid" },
+        "parentRunId": { "type": ["string", "null"], "format": "uuid" },
+        "revisionNumber": { "type": "integer", "minimum": 1 },
+        "projectId": { "type": "string", "format": "uuid" },
+        "threadId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{1,200}$"
+        },
+        "state": {
+          "enum": ["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"]
+        },
+        "deliveryStatus": {
+          "anyOf": [
+            { "$ref": "#/$defs/deliveryStatus" },
+            { "type": "null" }
+          ]
+        },
+        "capabilityProfile": {
+          "anyOf": [
+            { "$ref": "#/$defs/capabilityProfileSnapshot" },
+            { "type": "null" }
+          ]
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "startedAt": { "type": ["string", "null"], "format": "date-time" },
+        "finishedAt": { "type": ["string", "null"], "format": "date-time" },
+        "eventCount": { "type": "integer", "minimum": 0 },
+        "errorCode": { "type": ["string", "null"] },
+        "error": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "artifactResponse": {
+      "type": "object",
+      "required": [
+        "artifactId",
+        "runId",
+        "fileName",
+        "kind",
+        "mediaType",
+        "sizeBytes",
+        "sha256",
+        "createdAt"
+      ],
+      "properties": {
+        "artifactId": { "type": "string", "format": "uuid" },
+        "runId": { "type": "string", "format": "uuid" },
+        "fileName": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "mediaType": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "sizeBytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "artifactListResponse": {
+      "type": "object",
+      "required": ["runId", "superseded", "artifacts"],
+      "properties": {
+        "runId": { "type": "string", "format": "uuid" },
+        "superseded": { "type": "boolean" },
+        "artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifactResponse" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "messageResponse": {
+      "type": "object",
+      "required": [
+        "type",
+        "content",
+        "toolCalls",
+        "responseMetadata",
+        "customData"
+      ],
+      "properties": {
+        "type": { "enum": ["human", "ai", "tool", "custom"] },
+        "content": { "type": "string" },
+        "toolCalls": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "toolCallId": { "type": ["string", "null"] },
+        "runId": { "type": ["string", "null"] },
+        "responseMetadata": { "type": "object" },
+        "customData": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "runEventData": {
+      "type": "object",
+      "properties": {
+        "message": { "$ref": "#/$defs/messageResponse" },
+        "content": { "type": "string" },
+        "error": { "type": "string" },
+        "code": { "type": "string" },
+        "retryable": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "runEvent": {
+      "type": "object",
+      "required": ["eventId", "runId", "type", "createdAt", "data"],
+      "properties": {
+        "eventId": { "type": "integer", "minimum": 1 },
+        "runId": { "type": "string", "format": "uuid" },
+        "type": {
+          "enum": [
+            "message",
+            "token",
+            "reasoning",
+            "artifact_manifest",
+            "error",
+            "completed",
+            "failed",
+            "cancelled",
+            "timed_out"
+          ]
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "data": { "$ref": "#/$defs/runEventData" }
+      },
+      "additionalProperties": false
+    },
+    "historyResponse": {
+      "type": "object",
+      "required": ["messages"],
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/messageResponse" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "agentInfo": {
+      "type": "object",
+      "required": ["key", "description"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "runtimeInfoResponse": {
+      "type": "object",
+      "required": ["agents", "models", "defaultAgent", "defaultModel", "profiles"],
+      "properties": {
+        "agents": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/agentInfo" }
+        },
+        "models": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "defaultAgent": { "type": "string", "minLength": 1 },
+        "defaultModel": { "type": "string", "minLength": 1 },
+        "profiles": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/capabilityProfileMetadata" }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ratsnest-runtime-config
+  namespace: ratsnest
+data:
+  CELL_ID: cell-01
+  REGION_ID: us-east-1
+  RATSNESTPRO_TEMPORAL_TASK_QUEUE: ratsnest-hardware-cell-01
+  RATSNESTPRO_TEMPORAL_WORKER_CONCURRENCY: "1"
+  RATSNEST_RUN_RECONCILIATION_ENABLED: "true"

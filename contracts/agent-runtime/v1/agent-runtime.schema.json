@@ -1,0 +1,543 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ratsnest.team/contracts/agent-runtime/v1/agent-runtime.schema.json",
+  "title": "Agent Runtime v1",
+  "description": "Java AgentRuntimeGateway records and the private Python REST/SSE wire contract.",
+  "$defs": {
+    "runtimeIdentity": {
+      "type": "object",
+      "required": ["principalId", "tenantId", "projectId"],
+      "properties": {
+        "principalId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "tenantId": { "type": "string", "format": "uuid" },
+        "projectId": { "type": "string", "format": "uuid" }
+      },
+      "additionalProperties": false
+    },
+    "capabilityProfileSnapshot": {
+      "type": "object",
+      "required": ["id", "version", "digest"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$" },
+        "version": { "type": "string", "maxLength": 32, "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:\\.(?:0|[1-9][0-9]*))?$" },
+        "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "capabilityProfileMetadata": {
+      "type": "object",
+      "required": ["id", "version", "digest", "title", "description"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$" },
+        "version": { "type": "string", "maxLength": 32, "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:\\.(?:0|[1-9][0-9]*))?$" },
+        "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 500 }
+      },
+      "additionalProperties": false
+    },
+    "runtimeConfig": {
+      "type": "object",
+      "required": ["capability_profile"],
+      "properties": {
+        "capability_profile": { "$ref": "#/$defs/capabilityProfileSnapshot" },
+        "team_members": { "type": "array", "maxItems": 8 }
+      },
+      "additionalProperties": true
+    },
+    "deliveryStatus": {
+      "enum": ["execution_blocked", "delivered_with_issues", "release_ready"]
+    },
+    "artifactWire": {
+      "type": "object",
+      "required": [
+        "artifact_id",
+        "name",
+        "kind",
+        "media_type",
+        "size_bytes",
+        "sha256",
+        "object_key"
+      ],
+      "properties": {
+        "artifact_id": { "type": "string", "format": "uuid" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "media_type": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "object_key": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      },
+      "additionalProperties": false
+    },
+    "artifactManifestWire": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "manifest_id",
+        "manifest_digest",
+        "delivery_status",
+        "storage_backend",
+        "artifacts"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "manifest_id": { "type": "string", "format": "uuid" },
+        "manifest_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "delivery_status": { "$ref": "#/$defs/deliveryStatus" },
+        "storage_backend": { "enum": ["local", "s3"] },
+        "artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifactWire" }
+        },
+        "errors": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "source_event_seq": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "runtimeResult": {
+      "type": "object",
+      "properties": {
+        "artifact_manifest": {
+          "anyOf": [
+            { "$ref": "#/$defs/artifactManifestWire" },
+            { "type": "null" }
+          ]
+        },
+        "delivery_status": {
+          "anyOf": [
+            { "$ref": "#/$defs/deliveryStatus" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "startRunCommand": {
+      "type": "object",
+      "required": [
+        "requestId",
+        "threadId",
+        "identity",
+        "message",
+        "config",
+        "streamTokens"
+      ],
+      "properties": {
+        "requestId": { "type": "string", "minLength": 8, "maxLength": 200 },
+        "threadId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "identity": { "$ref": "#/$defs/runtimeIdentity" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 100000 },
+        "model": { "type": ["string", "null"], "maxLength": 200 },
+        "timeoutSeconds": {
+          "type": ["number", "null"],
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "config": { "$ref": "#/$defs/runtimeConfig" },
+        "streamTokens": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "runReference": {
+      "type": "object",
+      "required": ["requestId", "identity"],
+      "properties": {
+        "requestId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "identity": { "$ref": "#/$defs/runtimeIdentity" }
+      },
+      "additionalProperties": false
+    },
+    "controlRunCommand": {
+      "type": "object",
+      "required": ["run", "control"],
+      "properties": {
+        "run": { "$ref": "#/$defs/runReference" },
+        "control": { "const": "CANCEL" }
+      },
+      "additionalProperties": false
+    },
+    "eventSubscription": {
+      "type": "object",
+      "required": ["command", "lastEventId"],
+      "properties": {
+        "command": { "$ref": "#/$defs/startRunCommand" },
+        "lastEventId": {
+          "description": "Last fully processed SSE event; zero subscribes from the beginning of the retained buffer.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "historyQuery": {
+      "type": "object",
+      "required": ["threadId", "identity"],
+      "properties": {
+        "threadId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "identity": { "$ref": "#/$defs/runtimeIdentity" }
+      },
+      "additionalProperties": false
+    },
+    "runtimeRun": {
+      "type": "object",
+      "required": [
+        "requestId",
+        "kind",
+        "state",
+        "agentId",
+        "threadId",
+        "createdAt",
+        "eventCount",
+        "result"
+      ],
+      "properties": {
+        "requestId": { "type": "string" },
+        "runId": { "type": ["string", "null"] },
+        "kind": { "enum": ["invoke", "stream"] },
+        "state": {
+          "enum": ["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"]
+        },
+        "agentId": { "type": "string" },
+        "threadId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "startedAt": { "type": ["string", "null"], "format": "date-time" },
+        "finishedAt": { "type": ["string", "null"], "format": "date-time" },
+        "eventCount": { "type": "integer", "minimum": 0 },
+        "oldestEventId": { "type": ["integer", "null"], "minimum": 0 },
+        "newestEventId": { "type": ["integer", "null"], "minimum": 0 },
+        "errorCode": { "type": ["string", "null"] },
+        "error": { "type": ["string", "null"] },
+        "result": { "$ref": "#/$defs/runtimeResult" }
+      },
+      "additionalProperties": false
+    },
+    "runtimeMessage": {
+      "type": "object",
+      "required": ["type", "content", "toolCalls", "responseMetadata", "customData"],
+      "properties": {
+        "type": { "enum": ["human", "ai", "tool", "custom"] },
+        "content": { "type": "string" },
+        "toolCalls": { "type": "array", "items": { "type": "object" } },
+        "toolCallId": { "type": ["string", "null"] },
+        "runId": { "type": ["string", "null"] },
+        "responseMetadata": { "type": "object" },
+        "customData": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "runtimeEvent": {
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": {
+        "eventId": { "type": ["integer", "null"], "minimum": 1 },
+        "type": {
+          "enum": [
+            "heartbeat",
+            "message",
+            "token",
+            "reasoning",
+            "artifact_manifest",
+            "error",
+            "completed",
+            "failed",
+            "cancelled",
+            "timed_out"
+          ]
+        },
+        "message": {
+          "anyOf": [
+            { "$ref": "#/$defs/runtimeMessage" },
+            { "type": "null" }
+          ]
+        },
+        "content": { "type": ["string", "null"] },
+        "error": { "type": ["string", "null"] },
+        "data": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "runtimeInfo": {
+      "type": "object",
+      "required": ["agents", "models", "defaultAgent", "defaultModel", "profiles"],
+      "properties": {
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["key", "description"],
+            "properties": {
+              "key": { "type": "string" },
+              "description": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "models": { "type": "array", "items": { "type": "string" } },
+        "defaultAgent": { "type": "string" },
+        "defaultModel": { "type": "string" },
+        "profiles": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/capabilityProfileMetadata" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "internalStreamRequest": {
+      "description": "Private Python request. user_id is intentionally absent and rejected as an additional property.",
+      "type": "object",
+      "required": ["message", "thread_id", "request_id"],
+      "properties": {
+        "message": { "type": "string", "minLength": 1, "maxLength": 100000 },
+        "model": { "type": ["string", "null"] },
+        "thread_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "request_id": { "type": "string", "minLength": 8, "maxLength": 200 },
+        "timeout_seconds": {
+          "type": ["number", "null"],
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "agent_config": { "$ref": "#/$defs/runtimeConfig" },
+        "stream_tokens": { "type": "boolean" },
+        "last_event_id": {
+          "description": "Snake-case wire form of EventSubscription.lastEventId.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "internalHistoryRequest": {
+      "description": "Private Python request. user_id is intentionally absent and rejected as an additional property.",
+      "type": "object",
+      "required": ["request_id", "thread_id"],
+      "properties": {
+        "request_id": { "type": "string", "minLength": 8, "maxLength": 200 },
+        "thread_id": { "type": "string", "minLength": 1, "maxLength": 200 }
+      },
+      "additionalProperties": false
+    },
+    "runtimeRunWire": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "run_id",
+        "kind",
+        "status",
+        "agent_id",
+        "thread_id",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "event_count",
+        "oldest_event_id",
+        "newest_event_id",
+        "error_code",
+        "error",
+        "artifact_manifest",
+        "delivery_status"
+      ],
+      "properties": {
+        "request_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "run_id": { "type": ["string", "null"] },
+        "kind": { "enum": ["invoke", "stream"] },
+        "status": {
+          "enum": ["queued", "running", "completed", "failed", "cancelled", "timed_out"]
+        },
+        "agent_id": { "type": "string", "minLength": 1 },
+        "thread_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "created_at": { "type": "string", "format": "date-time" },
+        "started_at": { "type": ["string", "null"], "format": "date-time" },
+        "finished_at": { "type": ["string", "null"], "format": "date-time" },
+        "event_count": { "type": "integer", "minimum": 0 },
+        "oldest_event_id": { "type": ["integer", "null"], "minimum": 1 },
+        "newest_event_id": { "type": ["integer", "null"], "minimum": 1 },
+        "error_code": { "type": ["string", "null"] },
+        "error": { "type": ["string", "null"] },
+        "artifact_manifest": {
+          "anyOf": [
+            { "$ref": "#/$defs/artifactManifestWire" },
+            { "type": "null" }
+          ]
+        },
+        "delivery_status": {
+          "anyOf": [
+            { "$ref": "#/$defs/deliveryStatus" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "runtimeCancelWire": {
+      "type": "object",
+      "required": ["request_id", "status"],
+      "properties": {
+        "request_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "status": {
+          "enum": ["queued", "running", "completed", "failed", "cancelled", "timed_out"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "runtimeMessageWire": {
+      "type": "object",
+      "required": [
+        "type",
+        "content",
+        "tool_calls",
+        "tool_call_id",
+        "run_id",
+        "response_metadata",
+        "custom_data"
+      ],
+      "properties": {
+        "type": { "enum": ["human", "ai", "tool", "custom"] },
+        "content": { "type": "string" },
+        "tool_calls": { "type": "array", "items": { "type": "object" } },
+        "tool_call_id": { "type": ["string", "null"] },
+        "run_id": { "type": ["string", "null"] },
+        "response_metadata": { "type": "object" },
+        "custom_data": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "runtimeHistoryWire": {
+      "type": "object",
+      "required": ["messages"],
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/runtimeMessageWire" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "runtimeInfoWire": {
+      "type": "object",
+      "required": ["agents", "models", "default_agent", "default_model", "profiles"],
+      "properties": {
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["key", "description"],
+            "properties": {
+              "key": { "type": "string" },
+              "description": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "models": { "type": "array", "items": { "type": "string" } },
+        "default_agent": { "const": "ratsnestpro-multi-agent" },
+        "default_model": { "type": "string", "minLength": 1 },
+        "profiles": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/capabilityProfileMetadata" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "runtimeSseMessageEnvelope": {
+      "type": "object",
+      "required": ["type", "content", "event_id"],
+      "properties": {
+        "type": { "const": "message" },
+        "content": { "$ref": "#/$defs/runtimeMessageWire" },
+        "event_id": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "runtimeSseTextEnvelope": {
+      "type": "object",
+      "required": ["type", "content", "event_id"],
+      "properties": {
+        "type": { "enum": ["token", "reasoning"] },
+        "content": { "type": "string" },
+        "event_id": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "runtimeSseErrorEnvelope": {
+      "type": "object",
+      "required": ["type", "content", "code", "retryable", "event_id"],
+      "properties": {
+        "type": { "const": "error" },
+        "content": { "type": "string" },
+        "code": { "type": "string", "minLength": 1 },
+        "retryable": { "type": "boolean" },
+        "event_id": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "runtimeSseArtifactManifestEnvelope": {
+      "type": "object",
+      "required": ["type", "content", "event_id"],
+      "properties": {
+        "type": { "const": "artifact_manifest" },
+        "content": { "$ref": "#/$defs/artifactManifestWire" },
+        "event_id": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "runtimeSseEnvelope": {
+      "description": "JSON carried in an SSE data field. The terminal data value [DONE] is a non-JSON sentinel with its own SSE id.",
+      "oneOf": [
+        { "$ref": "#/$defs/runtimeSseMessageEnvelope" },
+        { "$ref": "#/$defs/runtimeSseTextEnvelope" },
+        { "$ref": "#/$defs/runtimeSseArtifactManifestEnvelope" },
+        { "$ref": "#/$defs/runtimeSseErrorEnvelope" }
+      ]
+    },
+    "internalJwtHeader": {
+      "type": "object",
+      "required": ["alg", "typ"],
+      "properties": {
+        "alg": { "const": "HS256" },
+        "typ": { "const": "JWT" }
+      },
+      "additionalProperties": false
+    },
+    "internalJwtClaims": {
+      "description": "Java emits a 90-second request-bound token; Python accepts at most the configured 120-second lifetime.",
+      "type": "object",
+      "required": [
+        "v",
+        "iss",
+        "aud",
+        "sub",
+        "tenantId",
+        "projectId",
+        "runId",
+        "method",
+        "path",
+        "bodySha256",
+        "iat",
+        "exp",
+        "jti"
+      ],
+      "properties": {
+        "v": { "const": 1 },
+        "iss": { "const": "ratsnest-control-plane" },
+        "aud": { "const": "ratsnest-agent-runtime" },
+        "sub": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "tenantId": { "type": "string", "format": "uuid" },
+        "projectId": { "type": "string", "format": "uuid" },
+        "runId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "method": { "enum": ["GET", "POST", "DELETE"] },
+        "path": { "type": "string", "pattern": "^/internal/v1/" },
+        "bodySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "iat": { "type": "integer" },
+        "exp": { "type": "integer" },
+        "jti": { "type": "string", "format": "uuid" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

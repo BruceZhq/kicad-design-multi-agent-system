@@ -1,0 +1,126 @@
+{
+  "realm": "ratsnest-dev",
+  "displayName": "RatsNest Development",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "editUsernameAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "rememberMe": false,
+  "verifyEmail": false,
+  "defaultSignatureAlgorithm": "RS256",
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "roles": {
+    "realm": [
+      {
+        "name": "engineer",
+        "description": "RatsNest development engineer"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "ratsnest-api",
+      "name": "RatsNest API",
+      "description": "Bearer-only audience for the Java control plane",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "bearerOnly": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "publicClient": false
+    },
+    {
+      "clientId": "ratsnest-web",
+      "name": "RatsNest Web",
+      "description": "Development-only confidential client used by oauth2-proxy",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "clientAuthenticatorType": "client-secret",
+      "secret": "ratsnest-web-dev-only-not-a-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "publicClient": false,
+      "redirectUris": [
+        "http://localhost:8088/oauth2/callback"
+      ],
+      "webOrigins": [
+        "http://localhost:8088"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "http://localhost:8088/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "ratsnest-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "ratsnest-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "ratsnest-smoke",
+      "name": "RatsNest Smoke Test",
+      "description": "Development-only public client for bounded automated token checks",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "publicClient": true,
+      "redirectUris": [],
+      "webOrigins": [],
+      "protocolMappers": [
+        {
+          "name": "ratsnest-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "ratsnest-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "ratsnest-dev-engineer",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "RatsNest",
+      "lastName": "Developer",
+      "email": "ratsnest-dev-engineer@localhost.invalid",
+      "realmRoles": [
+        "engineer",
+        "default-roles-ratsnest-dev"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "ratsnest-dev-only",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

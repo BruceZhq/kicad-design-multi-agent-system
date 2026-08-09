@@ -1,0 +1,23 @@
+{
+  "schema_version": "1",
+  "id": "sfp-sync-interface",
+  "version": "1.0",
+  "title": "SFP Synchronization Interface",
+  "description": "Designs bounded timing and synchronization interface boards using pluggable high-speed connectivity.",
+  "scope": {
+    "supported": ["pluggable-module host interfaces", "clock and synchronization distribution", "management and status interfaces"],
+    "excluded": ["optical module internal design", "certified carrier equipment", "unbounded multi-gigabit switching fabrics"]
+  },
+  "constraints": ["Preserve reference-plane continuity for high-speed and timing paths.", "Keep clock noise, module power, and management circuitry appropriately partitioned.", "Treat impedance, loss, skew, and stack-up limits as fabricator-dependent constraints."],
+  "evidence_requirements": ["Authoritative host-interface and selected module-form-factor documentation.", "Official clock, protection, power, and physical-interface documentation.", "Fabricator stack-up evidence for claimed impedance or loss performance."],
+  "toolchain": {
+    "required": ["KiCad schematic and PCB tools", "kicad-cli ERC and DRC", "manufacturing export"],
+    "optional": ["Freerouting for low-speed paths", "signal-integrity and timing analysis"]
+  },
+  "budget": {"max_wall_clock_minutes": 60, "max_llm_tokens": 120000, "max_ahe_repairs": 6, "max_same_failure_retries": 2},
+  "acceptance": {
+    "required_artifacts": ["editable KiCad project", "BOM and placement data", "Gerber and drill outputs", "risk and evidence report"],
+    "verification": ["ERC and DRC findings are reported without concealment.", "High-speed, clock, power, and thermal constraints receive independent review.", "Unverified channel performance is labeled for simulation or laboratory validation."],
+    "delivery_policy": "Deliver a reviewable implementation and constraint report without claiming unperformed channel, timing, or compliance validation."
+  }
+}

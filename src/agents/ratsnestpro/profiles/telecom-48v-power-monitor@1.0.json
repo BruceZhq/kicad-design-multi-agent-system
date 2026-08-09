@@ -1,0 +1,23 @@
+{
+  "schema_version": "1",
+  "id": "telecom-48v-power-monitor",
+  "version": "1.0",
+  "title": "Telecom 48 V Power Monitor",
+  "description": "Designs bounded extra-low-voltage telecom power monitoring and supervised control boards.",
+  "scope": {
+    "supported": ["nominal telecom DC input monitoring", "isolated or protected sensing", "low-voltage telemetry and supervised outputs"],
+    "excluded": ["mains input conversion", "life-safety protection", "unattended high-power switching certification"]
+  },
+  "constraints": ["Derive working-voltage, transient, clearance, and thermal assumptions from authoritative evidence.", "Prevent monitoring and communications paths from defeating the chosen isolation boundary.", "Represent input protection, fault energy, and reverse-polarity risks explicitly."],
+  "evidence_requirements": ["Official electrical and package documentation for selected protection, conversion, sensing, and isolation functions.", "Applicable telecom input-transient guidance identified for the deployment context.", "KiCad symbol-to-footprint and pin compatibility evidence."],
+  "toolchain": {
+    "required": ["KiCad schematic and PCB tools", "kicad-cli ERC and DRC", "manufacturing export"],
+    "optional": ["Freerouting", "thermal and surge analysis"]
+  },
+  "budget": {"max_wall_clock_minutes": 60, "max_llm_tokens": 120000, "max_ahe_repairs": 6, "max_same_failure_retries": 2},
+  "acceptance": {
+    "required_artifacts": ["editable KiCad project", "BOM and placement data", "Gerber and drill outputs", "risk and evidence report"],
+    "verification": ["ERC and DRC findings are reported without concealment.", "Protection, isolation, and thermal assumptions are independently reviewed.", "Unverified compliance claims remain explicit open issues."],
+    "delivery_policy": "Produce reviewable engineering artifacts with an evidence ledger; do not represent the design as certified or field-ready without human approval."
+  }
+}

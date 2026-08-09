@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ratsnest-cell-capacity
+  namespace: ratsnest
+  annotations:
+    ratsnest.io/capacity-status: planning-envelope-not-load-tested
+data:
+  cell_id: cell-01
+  region: us-east-1
+  availability_zones: "3"
+  active_hardware_workflows: "50"
+  temporal_worker_concurrency_per_pod: "1"
+  temporal_worker_max_replicas: "50"
+  sse_connections: "5000"
+  sse_connections_per_pod: "250"
+  sse_serving_max_replicas: "20"
+  rollout_gate: custom.metrics.k8s.io and external.metrics.k8s.io must serve the named metrics through an installed adapter
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ratsnest-temporal-worker
+  namespace: ratsnest
+  annotations:
+    ratsnest.io/capacity-status: planning-envelope-not-load-tested
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: ratsnest-temporal-worker }
+  minReplicas: 3
+  maxReplicas: 50
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      selectPolicy: Max
+      policies:
+        - { type: Pods, value: 10, periodSeconds: 60 }
+        - { type: Percent, value: 100, periodSeconds: 60 }
+    scaleDown:
+      stabilizationWindowSeconds: 900
+      policies:
+        - { type: Pods, value: 1, periodSeconds: 300 }
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: ratsnest_temporal_hardware_task_queue_backlog
+          selector:
+            matchLabels:
+              cell: cell-01
+              task_queue: ratsnest-hardware-cell-01
+        target: { type: AverageValue, averageValue: "1" }
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ratsnest-oidc-proxy
+  namespace: ratsnest
+  annotations:
+    ratsnest.io/capacity-status: planning-envelope-not-load-tested
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: ratsnest-oidc-proxy }
+  minReplicas: 3
+  maxReplicas: 20
+  behavior:
+    scaleDown: { stabilizationWindowSeconds: 300 }
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: ratsnest-temporal-worker, namespace: ratsnest }
+spec:
+  minAvailable: 2
+  selector: { matchLabels: { app: ratsnest-temporal-worker } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: ratsnest-oidc-proxy, namespace: ratsnest }
+spec:
+  minAvailable: 2
+  selector: { matchLabels: { app: ratsnest-oidc-proxy } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: ratsnest-kafka-audit-relay, namespace: ratsnest }
+spec:
+  minAvailable: 2
+  selector: { matchLabels: { app: ratsnest-kafka-audit-relay } }

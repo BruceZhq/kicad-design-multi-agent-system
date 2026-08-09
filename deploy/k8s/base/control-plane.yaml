@@ -1,0 +1,119 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratsnest-control-plane
+  namespace: ratsnest
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: ratsnest-control-plane }
+  template:
+    metadata:
+      labels: { app: ratsnest-control-plane, app.kubernetes.io/part-of: ratsnestpro }
+    spec:
+      serviceAccountName: ratsnest-runtime
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: api
+          image: ghcr.io/ratsnestteam/ratsnest-control-plane:replace-me
+          ports:
+            - { name: http, containerPort: 8080 }
+          env:
+            - name: RATSNEST_AGENT_RUNTIME_URL
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_AGENT_RUNTIME_URL }
+            - name: RATSNEST_AGENT_RUNTIME_TRANSPORT
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_AGENT_RUNTIME_TRANSPORT }
+            - name: RATSNEST_AGENT_RUNTIME_GRPC_TARGET
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_AGENT_RUNTIME_GRPC_TARGET }
+            - name: RATSNEST_AGENT_RUNTIME_GRPC_PLAINTEXT
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_AGENT_RUNTIME_GRPC_PLAINTEXT }
+            - name: RATSNEST_KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_KAFKA_BOOTSTRAP_SERVERS }
+            - name: RATSNEST_KAFKA_SECURITY_PROTOCOL
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_KAFKA_SECURITY_PROTOCOL }
+            - name: RATSNEST_KAFKA_SASL_MECHANISM
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_KAFKA_SASL_MECHANISM }
+            - name: RATSNEST_KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM }
+            - name: RATSNEST_KAFKA_SASL_JAAS_CONFIG
+              valueFrom:
+                secretKeyRef: { name: ratsnest-runtime-secrets, key: RATSNEST_KAFKA_SASL_JAAS_CONFIG }
+            - name: RATSNEST_RUN_OUTBOX_ENABLED
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_RUN_OUTBOX_ENABLED }
+            - name: RATSNEST_RUN_OUTBOX_TOPIC
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_RUN_OUTBOX_TOPIC }
+            - name: RATSNEST_RUN_RECONCILIATION_ENABLED
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_RUN_RECONCILIATION_ENABLED }
+            - name: RATSNEST_ARTIFACT_BUCKET
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_ARTIFACT_BUCKET }
+            - name: RATSNEST_ARTIFACT_ENDPOINT
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_ARTIFACT_ENDPOINT }
+            - name: RATSNEST_ARTIFACT_REGION
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_ARTIFACT_REGION }
+            - name: RATSNEST_ARTIFACT_PATH_STYLE
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_ARTIFACT_PATH_STYLE }
+            - name: RATSNEST_ARTIFACT_DOWNLOAD_TTL
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_ARTIFACT_DOWNLOAD_TTL }
+            - name: RATSNEST_DB_URL
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_DB_URL }
+            - name: RATSNEST_OIDC_ISSUER_URI
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_OIDC_ISSUER_URI }
+            - name: RATSNEST_OIDC_JWK_SET_URI
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_OIDC_JWK_SET_URI }
+            - name: RATSNEST_OIDC_AUDIENCE
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_OIDC_AUDIENCE }
+            - name: RATSNEST_DB_USER
+              valueFrom:
+                secretKeyRef: { name: ratsnest-runtime-secrets, key: RATSNEST_DB_USER }
+            - name: RATSNEST_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: ratsnest-runtime-secrets, key: RATSNEST_DB_PASSWORD }
+            - name: RATSNEST_INTERNAL_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef: { name: ratsnest-runtime-secrets, key: RATSNEST_INTERNAL_SIGNING_SECRET }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 15
+            timeoutSeconds: 3
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { cpu: "2", memory: 2Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratsnest-control-plane
+  namespace: ratsnest
+spec:
+  selector: { app: ratsnest-control-plane }
+  ports:
+    - { name: http, port: 8080, targetPort: http }

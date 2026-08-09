@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+package ratsnest.runtime.v1;
+
+option java_multiple_files = true;
+option java_package = "team.ratsnest.runtime.v1";
+option java_outer_classname = "AgentRuntimeProto";
+
+// Durable control-plane boundary. Runtime metadata and chat history remain on
+// the signed compatibility HTTP API until their contracts are equally stable.
+service AgentRuntimeService {
+  rpc StartRun(StartRunRequest) returns (Run);
+  rpc GetRun(GetRunRequest) returns (Run);
+  rpc ControlRun(ControlRunRequest) returns (Run);
+  rpc SubscribeRunEvents(SubscribeRunEventsRequest) returns (stream RunEvent);
+}
+
+message RuntimeIdentity {
+  string principal_id = 1;
+  string tenant_id = 2;
+  string project_id = 3;
+}
+
+message StartRunRequest {
+  string request_id = 1;
+  string thread_id = 2;
+  RuntimeIdentity identity = 3;
+  string message = 4;
+  optional string model = 5;
+  optional double timeout_seconds = 6;
+  // Canonical JSON avoids a protobuf map becoming a second configuration
+  // schema. Its shape remains governed by agent-runtime.schema.json.
+  string config_json = 7;
+  bool stream_tokens = 8;
+}
+
+message GetRunRequest {
+  string request_id = 1;
+  RuntimeIdentity identity = 2;
+}
+
+enum RunControl {
+  RUN_CONTROL_UNSPECIFIED = 0;
+  RUN_CONTROL_CANCEL = 1;
+}
+
+message ControlRunRequest {
+  GetRunRequest run = 1;
+  RunControl control = 2;
+}
+
+message SubscribeRunEventsRequest {
+  GetRunRequest run = 1;
+  uint64 last_event_seq = 2;
+}
+
+enum RunState {
+  RUN_STATE_UNSPECIFIED = 0;
+  RUN_STATE_QUEUED = 1;
+  RUN_STATE_RUNNING = 2;
+  RUN_STATE_COMPLETED = 3;
+  RUN_STATE_FAILED = 4;
+  RUN_STATE_CANCELLED = 5;
+  RUN_STATE_TIMED_OUT = 6;
+}
+
+message Run {
+  string request_id = 1;
+  optional string graph_run_id = 2;
+  string kind = 3;
+  RunState state = 4;
+  string agent_id = 5;
+  string thread_id = 6;
+  string created_at = 7;
+  optional string started_at = 8;
+  optional string finished_at = 9;
+  uint64 event_count = 10;
+  optional uint64 oldest_event_seq = 11;
+  optional uint64 newest_event_seq = 12;
+  optional string error_code = 13;
+  optional string error = 14;
+  // Canonical JSON governed by runtimeResult in agent-runtime.schema.json.
+  // Keeping the final manifest on Run makes status polling sufficient even
+  // when no event subscriber was connected at completion time.
+  optional string result_json = 15;
+}
+
+message RunEvent {
+  uint64 event_seq = 1;
+  string run_id = 2;
+  string type = 3;
+  // The existing versioned message/token/error envelope encoded as canonical
+  // JSON. High-frequency token events are streamed, never written to Kafka.
+  string payload_json = 4;
+  string created_at = 5;
+}

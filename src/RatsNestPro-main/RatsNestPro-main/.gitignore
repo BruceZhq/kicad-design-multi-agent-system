@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.pytest-tmp-*/
+.mypy_cache/
+.ruff_cache/
+.debug-*/
+.tmp-lock-*/
+.tv9*/
+.tp1*/
+.tcc*/
+Temp/
+tmp*/
+runs/
+dist/
+build/
+.env
+*.kicad_prl
+*-backups/
+knowledge/.index/
+
+# EricAI SSO authentication record (login token) — never commit
+.ericai_authrecord
+*.ericai_authrecord
