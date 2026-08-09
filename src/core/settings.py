@@ -31,12 +31,6 @@ from schema.models import (
 )
 
 
-class DatabaseType(StrEnum):
-    SQLITE = "sqlite"
-    POSTGRES = "postgres"
-    MONGO = "mongo"
-
-
 class RunRegistryBackend(StrEnum):
     MEMORY = "memory"
     REDIS = "redis"
@@ -184,12 +178,6 @@ class Settings(BaseSettings):
     COMPATIBLE_API_KEY: SecretStr | None = None
     COMPATIBLE_BASE_URL: str | None = None
 
-    OPENWEATHERMAP_API_KEY: SecretStr | None = None
-
-    # MCP Configuration
-    GITHUB_PAT: SecretStr | None = None
-    MCP_GITHUB_SERVER_URL: str = "https://api.githubcopilot.com/mcp/"
-
     LANGCHAIN_TRACING_V2: bool = False
     LANGCHAIN_PROJECT: str = "default"
     LANGCHAIN_ENDPOINT: Annotated[str, BeforeValidator(check_str_is_http)] = (
@@ -202,12 +190,6 @@ class Settings(BaseSettings):
     LANGFUSE_PUBLIC_KEY: SecretStr | None = None
     LANGFUSE_SECRET_KEY: SecretStr | None = None
 
-    # Database Configuration
-    DATABASE_TYPE: DatabaseType = (
-        DatabaseType.SQLITE
-    )  # Options: DatabaseType.SQLITE or DatabaseType.POSTGRES
-    SQLITE_DB_PATH: str = "checkpoints.db"
-
     # PostgreSQL Configuration
     POSTGRES_USER: str | None = None
     POSTGRES_PASSWORD: SecretStr | None = None
@@ -217,15 +199,6 @@ class Settings(BaseSettings):
     POSTGRES_APPLICATION_NAME: str = "agent-service-toolkit"
     POSTGRES_MIN_CONNECTIONS_PER_POOL: int = 1
     POSTGRES_MAX_CONNECTIONS_PER_POOL: int = 1
-
-    # MongoDB Configuration
-    MONGO_HOST: str | None = None
-    MONGO_PORT: int | None = None
-    MONGO_DB: str | None = None
-    MONGO_USER: str | None = None
-    MONGO_PASSWORD: SecretStr | None = None
-    MONGO_AUTH_SOURCE: str | None = None
-    MONGO_TLS: bool = False  # opt-in TLS for MongoDB; set to True for production/Atlas
 
     # Azure OpenAI Settings
     AZURE_OPENAI_API_KEY: SecretStr | None = None

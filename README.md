@@ -1,311 +1,278 @@
-# 🧰 AI Agent Service Toolkit
+# RatsNestPro
 
-[![build status](https://github.com/JoshuaC215/agent-service-toolkit/actions/workflows/test.yml/badge.svg)](https://github.com/JoshuaC215/agent-service-toolkit/actions/workflows/test.yml) [![codecov](https://codecov.io/github/JoshuaC215/agent-service-toolkit/graph/badge.svg?token=5MTJSYWD05)](https://codecov.io/github/JoshuaC215/agent-service-toolkit) [![Python Version](https://img.shields.io/python/required-version-toml?tomlFilePath=https%3A%2F%2Fraw.githubusercontent.com%2FJoshuaC215%2Fagent-service-toolkit%2Frefs%2Fheads%2Fmain%2Fpyproject.toml)](https://github.com/JoshuaC215/agent-service-toolkit/blob/main/pyproject.toml)
-[![GitHub License](https://img.shields.io/github/license/JoshuaC215/agent-service-toolkit)](https://github.com/JoshuaC215/agent-service-toolkit/blob/main/LICENSE)
+RatsNestPro 是面向版本化 KiCad 硬件设计场景的企业级多智能体系统。它把自然语言需求转换成可审查的 KiCad 工程、制造文件和风险报告，并通过 Java 控制面提供多租户、身份、任务、产物和审计能力。
 
-A distributed multi-agent engineering system built with LangGraph, FastAPI, Temporal,
-PostgreSQL, Redis, Kafka, Next.js, React, and TypeScript.
+当前生产产品只注册一个 Agent：`ratsnestpro-multi-agent`。旧的通用聊天、RAG、AG-UI、语音和多 Agent 示例代码已经从运行时移除，避免启动时加载无关图和错误地把普通聊天 Agent 当成硬件设计 Agent。
 
-The browser communicates through a same-origin Next.js BFF. Agent output is streamed
-with `fetch()` and `ReadableStream`; live cross-instance run state and replay live in
-Redis, LangGraph checkpoints live in PostgreSQL, long Hardware Engineer execution lives
-in Temporal, and versioned audit metadata is relayed to Kafka.
+## 当前能力边界
 
-This project offers a template for you to easily build and run your own agents using the LangGraph framework. It demonstrates a complete setup from agent definition to user interface, making it easier to get started with LangGraph-based projects by providing a full, robust toolkit.
+- 支持自然语言硬件需求，包含不完整或非模板化描述。
+- 通过五类版本化 Capability Profile 约束任务边界，而不是用固定 BOM 模板回答。
+- Supervisor 编排 Architect、Parts Specialist、Hardware Engineer 和 Reviewer。
+- Architect 负责意图澄清、官方资料检索、KiCad 符号/封装证据和设计依据。
+- Parts Specialist 负责器件、符号、封装、引脚—焊盘兼容性及可采购性证据。
+- Hardware Engineer 通过 Temporal 执行长时间 KiCad、Freerouting 和制造活动。
+- Reviewer 独立审查 ERC、DRC、连通性、布局、制造和交付风险。
+- AHE 只修复 Harness/流程缺陷；EHE 记录跨任务的匿名失败签名，不直接修改源码。
+- 普通设计风险可以交付为 `delivered_with_issues`；工具执行故障才会进入 `execution_blocked`。
+- 产物使用内容寻址和 SHA-256 Manifest，支持人工反馈创建新 Revision，不覆盖旧工程。
 
-**[🎥 Watch a video walkthrough of the repo and app](https://www.youtube.com/watch?v=pdYVHw_YCNY)**
+系统不会把缺失的 KiCad 器件、封装或数据手册编造成“已验证”结果。指定器件不可用时，必须报告真实候选并等待批准替代。
 
-## Overview
+## 总体架构
 
-### Quickstart
-
-Run directly in python
-
-```sh
-# At least one LLM API key is required
-echo 'OPENAI_API_KEY=your_openai_api_key' >> .env
-
-# uv is the recommended way to install agent-service-toolkit, but "pip install ." also works
-# For uv installation options, see: https://docs.astral.sh/uv/getting-started/installation/
-curl -LsSf https://astral.sh/uv/0.11.29/install.sh | sh
-
-# Install dependencies. "uv sync" creates .venv automatically
-uv sync --frozen
-source .venv/bin/activate
-python src/run_service.py
-
-# In another shell, start the TypeScript web frontend
-cd frontend
-npm ci
-npm run dev
+```mermaid
+flowchart LR
+    U[浏览器用户] --> P[OAuth2 Proxy\nOIDC 会话]
+    P --> F[Next.js 前端\nBFF + fetch/ReadableStream]
+    F --> J[Java Spring Control Plane\n认证/租户/任务/产物/SSE]
+    J -->|内部 HTTP/SSE 或 gRPC\n短期签名身份| R[Python Agent Runtime]
+    R --> L[LangGraph\nSupervisor + 子智能体]
+    L --> T[Temporal\nHardware Engineer Workflow]
+    T --> K[KiCad CLI / Freerouting\n17 步工程流水线]
+    J --> PG[(PostgreSQL\n业务状态/RLS/Outbox)]
+    R --> CP[(PostgreSQL\nLangGraph Checkpoint/Store)]
+    R --> RD[(Redis\nLease/Replay/限流/LLM Stream)]
+    J --> KF[(Kafka\n审计/用量/生命周期事件)]
+    R --> S3[(S3 兼容存储\n工程与制造产物)]
+    K --> S3
 ```
 
-Run with docker
+### 服务边界
 
-```sh
-echo 'OPENAI_API_KEY=your_openai_api_key' >> .env
-docker compose watch
+| 层 | 技术 | 负责内容 |
+|---|---|---|
+| 浏览器入口 | OAuth2 Proxy + Keycloak | OIDC Authorization Code + PKCE、登录会话、退出登录 |
+| Web | Next.js / React / TypeScript | 白色团队工作区、聊天、模型/Profile选择、Markdown渲染、SSE消费、资料页 |
+| 控制面 | Java 21 + Spring Boot | OIDC/JWKS验签、租户/RBAC、Project/Run/Revision、配额、Artifact授权、SSE、审计 |
+| Agent Runtime | Python + FastAPI | LangGraph运行、内部身份校验、Redis运行协调、事件转换 |
+| Agent Kernel | LangGraph | State、节点、handoff、checkpoint、Supervisor和角色协作 |
+| 耐久工程执行 | Temporal | Workflow、Activity、重试、超时、Event History、取消和恢复 |
+| 持久化 | PostgreSQL | Java业务表、RLS、Outbox、LangGraph checkpoint/store |
+| 协调与回放 | Redis | lease、fencing token、幂等、SSE事件回放、LLM输出流 |
+| 事件总线 | Kafka | Durable生命周期、审计、用量和EHE observation |
+| 文件存储 | S3兼容对象存储 | KiCad、Gerber、BOM、CPL、DSN、SES和审查报告 |
+
+## 登录与请求泳道
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as 用户浏览器
+    participant Proxy as OAuth2 Proxy :8088
+    participant KC as Keycloak
+    participant Web as Next.js :3000
+    participant Java as Java Control Plane :8081
+    participant Py as Python Runtime :8080/9090
+
+    User->>Proxy: GET /
+    Proxy-->>User: 未登录，302 /oauth2/start
+    User->>KC: Authorization Code + PKCE S256
+    KC-->>Proxy: callback code
+    Proxy-->>User: 加密会话 Cookie
+    User->>Web: 页面与 BFF 请求
+    Web->>Java: /api/v1/session、/info、/runs
+    Java->>KC: JWKS 验签 issuer/audience/exp
+    Java->>Java: (issuer, subject) + Membership + RLS
+    Java->>Py: 内部短期签名任务身份
+    Py->>Py: 校验 path/body/run/tenant/project/principal
+    Py-->>Java: 事件、里程碑、最终状态
+    Java-->>Web: 有序 SSE + Last-Event-ID
+    Web-->>User: Markdown、角色进度、产物和风险
 ```
 
-### Architecture Diagram
+## AG-UI 是什么
 
-<img src="media/agent_architecture.png" width="600" alt="Agent architecture diagram">
+AG-UI（Agent User Interaction）是一个面向 Agent 与前端之间交互事件的通用协议/适配层，通常用于把 Agent 的消息、工具调用、状态更新和流式事件转换为前端可消费的事件流。它适合通用 Copilot 或 Agent UI 集成，但它不是 LangGraph 本身，也不是身份认证协议，更不是 KiCad 执行引擎。
 
-### Key Features
+本项目早期曾有 `src/service/agui.py` 和 AG-UI 示例客户端。当前正式产品链路已经固定为：
 
-1. **LangGraph Agent and latest features**: A customizable agent built using the LangGraph framework. Implements the latest LangGraph v1.0 features including human in the loop with `interrupt()`, flow control with `Command`, long-term memory with `Store`, and `langgraph-supervisor`.
-1. **FastAPI Service**: Serves the agent with both streaming and non-streaming endpoints.
-1. **Advanced Streaming**: A novel approach to support both token-based and message-based streaming.
-1. **AG-UI Protocol Support**: Every agent is also served over the [AG-UI protocol](https://docs.ag-ui.com) for connecting AG-UI compatible frontends like CopilotKit - see [docs](docs/AGUI.md).
-1. **Next.js/React Interface**: Uses a server-side BFF and incremental `fetch` + `ReadableStream` SSE parsing without exposing the FastAPI credential.
-1. **Distributed Run Control**: Redis provides cross-replica idempotency, leases, cancellation, bounded SSE replay, and the Kafka audit outbox.
-1. **Durable Hardware Workflow**: Temporal owns long KiCad/Freerouting activities, retries, timeouts, Event History, and recovery boundaries.
-1. **Audit Backbone**: A consumer-group relay publishes versioned metadata to Kafka with at-least-once delivery and stable deduplication IDs.
-1. **Immutable Deliveries**: Content-addressed S3-compatible artifacts, short-lived authorized downloads, and human-feedback Run Revisions preserve every engineering version.
-1. **Multiple Agent Support**: Run multiple agents in the service and call by URL path. Available agents and models are described in `/info`
-1. **Asynchronous Design**: Utilizes async/await for efficient handling of concurrent requests.
-1. **Content Moderation**: Implements Safeguard for content moderation (requires Groq API key).
-1. **RAG Agent**: A basic RAG agent implementation using ChromaDB - see [docs](docs/RAG_Assistant.md).
-1. **Feedback Mechanism**: Includes a star-based feedback system integrated with LangSmith.
-1. **Docker Support**: Includes Dockerfiles and a docker compose file for easy development and deployment.
-1. **Testing**: Includes robust unit and integration tests for the full repo.
-
-### Key Files
-
-The repository is structured as follows:
-
-- `src/agents/`: Defines several agents with different capabilities
-- `src/schema/`: Defines the protocol schema
-- `src/core/`: Core modules including LLM definition and settings
-- `src/service/service.py`: FastAPI service to serve the agents
-- `src/client/client.py`: Client to interact with the agent service
-- `frontend/`: Next.js/React/TypeScript web application and server-only BFF
-- `src/service/redis_run_registry.py`: distributed run lifecycle and SSE replay
-- `src/service/kafka_relay.py`: Redis outbox to Kafka audit relay
-- `tests/`: Unit and integration tests
-
-## Setup and Usage
-
-1. Clone the repository:
-
-   ```sh
-   git clone https://github.com/JoshuaC215/agent-service-toolkit.git
-   cd agent-service-toolkit
-   ```
-
-2. Set up environment variables:
-   Create a `.env` file in the root directory. At least one LLM API key or configuration is required. See the [`.env.example` file](./.env.example) for a full list of available environment variables, including a variety of model provider API keys, header-based authentication, LangSmith tracing, testing and development modes, and OpenWeatherMap API key.
-
-3. Run the complete development stack with Docker, or run FastAPI and the Next.js frontend separately for local development.
-
-### Additional setup for specific AI providers
-
-- [Setting up Ollama](docs/Ollama.md)
-- [Setting up VertexAI](docs/VertexAI.md)
-- [Setting up RAG with ChromaDB](docs/RAG_Assistant.md)
-
-### Building or customizing your own agent
-
-To customize the agent for your own use case:
-
-1. Add your new agent to the `src/agents` directory. You can copy `research_assistant.py` or `chatbot.py` and modify it to change the agent's behavior and tools.
-1. Import and add your new agent to the `agents` dictionary in `src/agents/agents.py`. Your agent can be called by `/<your_agent_name>/invoke` or `/<your_agent_name>/stream`.
-1. Extend the typed event rendering in `frontend/components/chat-console.tsx` when an agent introduces a new client-visible event contract.
-
-### RatsNestPro multi-agent PCB system
-
-The embedded `src/RatsNestPro-main/RatsNestPro-main` project is registered as
-`ratsnestpro-multi-agent`. It keeps the original RatsNestPro CLI and deterministic
-EDA core, while exposing its capabilities through a LangGraph supervisor with
-Architect, Hardware Engineer, Reviewer, and grounded Parts Specialist sub-agents.
-The existing `/info`, `/{agent_id}/invoke`, `/{agent_id}/stream`, history, and
-Next.js agent discovery and selection work through the existing `/info` endpoint.
-
-With Docker Compose, generated KiCad, BOM, CPL, Gerber, plan, gate, and review
-artifacts are persisted under `data/ratsnestpro` on the host. Paths passed to the
-review agent must remain inside that workspace. ATmega328 is an offline example
-template, not a supported-family limit. Other named MCUs use the adaptive
-17-step pipeline and the toolkit's configured model (including DeepSeek), plus
-the installed KiCad symbol/footprint libraries. The supervisor and Architect
-also have a real `web_search` tool for manufacturer datasheets and reference
-designs.
-
-Non-ATmega requests cannot silently enter the ATmega fallback: their effective
-LLM mode is forced to `required`, the requested MCU must occur in the selected
-BOM, and its library-defined package must match. A failed identity or package
-check blocks generation instead of relabeling an ATmega board.
-
-The service image includes KiCad 9, Java 25, and pinned Freerouting 2.2.4.
-Compose sets `RATSNESTPRO_REQUIRE_FREEROUTING=true`, so a full PCB request
-cannot report success unless DSN export, Freerouting, SES import, and the
-zero-unconnected check all complete. Set the flag to `false` only when an
-unrouted board is intentionally acceptable as an intermediate artifact.
-
-The production intent router, task-local AHE convergence loop, cross-task EHE
-memory, checkpoint/concurrency model, and SSE event flow are documented in
-[RatsNestPro Intent + AHE + EHE Architecture](docs/RATSNESTPRO_INTENT_AHE_EHE_ARCHITECTURE.md).
-The intake accepts ordinary Chinese or English instead of requiring a long
-template. Ambiguous hardware goals are resolved by a compact LLM classifier;
-greetings and unrelated questions receive a lightweight conversational answer
-without entering the PCB pipeline.
-The production run lifecycle, PostgreSQL state ownership, resumable SSE protocol,
-admission control, cancellation, health checks, and deployment settings are documented
-in [RatsNestPro Production Runtime](docs/RATSNESTPRO_PRODUCTION_RUNTIME.md).
-Increment 7 implementation and bounded verification evidence are recorded in
-[Increment 7 Acceptance](docs/increment-7-acceptance.md).
-
-### Handling Private Credential files
-
-If your agents or chosen LLM require file-based credential files or certificates, the `privatecredentials/` has been provided for your development convenience. All contents, excluding the `.gitkeep` files, are ignored by git and docker's build process. See [Working with File-based Credentials](docs/File_Based_Credentials.md) for suggested use.
-
-### Docker Setup
-
-The Compose development stack includes PostgreSQL, Redis, a single-node Kafka broker,
-Temporal, FastAPI, a Temporal Hardware Engineer worker, the Kafka audit relay, and the
-Next.js frontend. Single-node Compose is not a production HA topology; see
-[Distributed Runtime](docs/DISTRIBUTED_RUNTIME.md) for production boundaries.
-
-For local development, we recommend using [docker compose watch](https://docs.docker.com/compose/file-watch/). This feature allows for a smoother development experience by automatically updating your containers when changes are detected in your source code.
-
-1. Make sure you have Docker and Docker Compose (>= [v2.23.0](https://docs.docker.com/compose/release-notes/#2230)) installed on your system.
-
-2. Create a `.env` file from the `.env.example`. At minimum, you need to provide an LLM API key (e.g., OPENAI_API_KEY).
-
-   ```sh
-   cp .env.example .env
-   # Edit .env to add your API keys
-   ```
-
-3. Build and launch the services in watch mode:
-
-   ```sh
-   docker compose watch
-   ```
-
-   This will automatically:
-   - Start a PostgreSQL database service that the agent service connects to
-   - Start the agent service with FastAPI
-   - Start Redis-backed distributed run coordination and SSE replay
-   - Start the Kafka audit relay and Temporal Hardware Engineer worker
-   - Start the Next.js web interface
-
-4. The services will now automatically update when you make changes to your code:
-   - Changes in the relevant python files and directories will trigger updates for the relevant services.
-   - NOTE: If you make changes to the `pyproject.toml` or `uv.lock` files, you will need to rebuild the services by running `docker compose up --build`.
-
-5. Access the web application at `http://localhost:3000`.
-
-6. The agent service API will be available at `http://0.0.0.0:8080`. You can also use the OpenAPI docs at `http://0.0.0.0:8080/redoc`.
-
-7. Use `docker compose down` to stop the services.
-
-This setup allows you to develop and test your changes in real-time without manually restarting the services.
-
-### Building other apps on the AgentClient
-
-The repo includes a generic `src/client/client.AgentClient` that can be used to interact with the agent service. This client is designed to be flexible and can be used to build other apps on top of the agent. It supports both synchronous and asynchronous invocations, and streaming and non-streaming requests.
-
-See the `src/run_client.py` file for full examples of how to use the `AgentClient`. A quick example:
-
-```python
-from client import AgentClient
-client = AgentClient()
-
-response = client.invoke("Tell me a brief joke?")
-response.pretty_print()
-# ================================== Ai Message ==================================
-#
-# A man walked into a library and asked the librarian, "Do you have any books on Pavlov's dogs and Schrödinger's cat?"
-# The librarian replied, "It rings a bell, but I'm not sure if it's here or not."
-
+```text
+浏览器 → OAuth2 Proxy → Next.js BFF → Java Control Plane → Python internal_api/gRPC → RatsNestPro LangGraph
 ```
 
-### Development with LangGraph Studio
+因此 AG-UI 不再作为正式公网入口。当前前端直接使用 Java 提供的 REST + SSE 契约，浏览器通过 `fetch()` 和 `ReadableStream` 接收有序 `RunEvent`。这避免了两套事件协议、两套认证边界和通用 Agent 路由造成的状态歧义。
 
-The agent supports [LangGraph Studio](https://langchain-ai.github.io/langgraph/concepts/langgraph_studio/), the IDE for developing agents in LangGraph.
+## 多智能体执行流程
 
-`langgraph-cli[inmem]` is installed with `uv sync`. You can simply add your `.env` file to the root directory as described above, and then launch LangGraph Studio with `langgraph dev`. Customize `langgraph.json` as needed. See the [local quickstart](https://langchain-ai.github.io/langgraph/cloud/how-tos/studio/quick_start/#local-development-server) to learn more.
-
-### Local development without Docker
-
-You can also run FastAPI and the TypeScript frontend locally without Docker.
-
-1. Create a virtual environment and install dependencies:
-
-   ```sh
-   uv sync --frozen
-   source .venv/bin/activate
-   ```
-
-2. Run the FastAPI server:
-
-   ```sh
-   python src/run_service.py
-   ```
-
-3. In a separate terminal, run the Next.js frontend:
-
-   ```sh
-   cd frontend
-   npm ci
-   npm run dev
-   ```
-
-4. Open `http://localhost:3000`.
-
-## Projects built with or inspired by agent-service-toolkit
-
-The following are a few of the public projects that drew code or inspiration from this repo.
-
-- **[PolyRAG](https://github.com/QuentinFuxa/PolyRAG)** - Extends agent-service-toolkit with RAG capabilities over both PostgreSQL databases and PDF documents.
-- **[alexrisch/agent-web-kit](https://github.com/alexrisch/agent-web-kit)** - A Next.JS frontend for agent-service-toolkit
-- **[raushan-in/dapa](https://github.com/raushan-in/dapa)** - Digital Arrest Protection App (DAPA) enables users to report financial scams and frauds efficiently via a user-friendly platform.
-
-**Please create a pull request editing the README or open a discussion with any new ones to be added!** Would love to include more projects.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-**A note on how this repo is maintained:** this is a solo-maintainer project, and issues, PRs, and discussions are triaged on a roughly biweekly cycle with help from an AI maintenance agent. Thanks for your patience if responses take a week or two — I will do my best to respond to truly urgent issues (vulnerability reports, etc.) or in-progress PRs within a few days. The full automation playbooks are versioned in [`docs/maintenance/`](docs/maintenance/) if you're curious how it works.
-
-Currently the tests need to be run using the local development without Docker setup. To run the tests for the agent service:
-
-1. Ensure you're in the project root directory and have activated your virtual environment.
-
-2. Install the development dependencies and pre-commit hooks:
-
-   ```sh
-   uv sync --frozen
-   pre-commit install
-   ```
-
-3. Run the tests using pytest:
-
-   ```sh
-   pytest
-   ```
-
-### Smoke testing optional dependencies
-
-Some integrations aren't exercised by the unit suite or the default CI run because they
-need real infrastructure: the Postgres and MongoDB checkpointers, the AG-UI endpoint, and
-LangFuse tracing. `scripts/smoke_test.sh` spins up each dependency in Docker, runs the
-service against it, verifies the integration end-to-end (including a check that the
-intended backend was actually used, not a silent SQLite fallback), and tears it down.
-
-```sh
-./scripts/smoke_test.sh                 # default: postgres, mongo, agui
-./scripts/smoke_test.sh mongo           # a single target
-./scripts/smoke_test.sh langfuse        # heavy: starts LangFuse's full self-host stack
-./scripts/smoke_test.sh all             # everything, including langfuse
+```mermaid
+flowchart TD
+    A[用户自然语言需求] --> B[Java 创建 Run\n保存 tenant/project/profile 快照]
+    B --> C[Intent Router\nbuild/review/feedback/chat]
+    C -->|不相关或需澄清| D[返回澄清/普通对话]
+    C -->|build| E[Supervisor]
+    E --> F[Architect\n检索资料与 KiCad 证据]
+    F --> G{符号/封装/引脚焊盘兼容?}
+    G -->|缺失| H[请求批准兼容替代\n不编造器件]
+    G -->|通过| I[Parts Specialist\n采购和拓扑角色]
+    I --> J[Hardware Engineer\nTemporal Workflow]
+    J --> K[生成原理图与网络]
+    K --> L[生成 PCB 与布局约束]
+    L --> M[DSN → Freerouting → SES]
+    M --> N[导回 PCB、ERC、DRC、BOM/CPL]
+    N --> O[Gerber、钻孔、Manifest]
+    O --> P[Reviewer 独立审查]
+    P --> Q{是否存在执行级故障?}
+    Q -->|是| R[execution_blocked\n保留中间产物]
+    Q -->|否| S[delivered_with_issues 或 release_ready]
+    S --> T[Java 交付 Manifest、下载授权和审计]
+    R --> U[AHE 局部修复\n仅修 Harness 缺陷]
+    U --> J
 ```
 
-These are opt-in confidence checks for a maintainer or agent — not part of CI. Run the
-target that matches what you changed rather than the whole set. The optional add-on
-compose files live in `docker/` (e.g. `docker/compose.mongo.yaml`), layered on top of the
-default `compose.yaml` so the default stack stays lightweight.
+## LangGraph 内核
+
+LangGraph 是 Agent 的有向状态图运行时。它将每一步输入、输出、共享 State、消息列表、节点转移和 checkpoint 明确化，适合需要长流程、可恢复、可审计和人工反馈的工程任务。
+
+在 RatsNestPro 中，Supervisor 是图入口。Architect、Parts Specialist、Hardware Engineer 和 Reviewer 不是互相随意调用的聊天机器人，而是具有边界的阶段节点。确定性工具负责文件、引脚、网络、ERC/DRC 和门禁；LLM 负责资料理解、需求分解、候选选择和解释。
+
+```mermaid
+stateDiagram-v2
+    [*] --> Intent
+    Intent --> Clarify: 非硬件/信息不足
+    Intent --> Supervisor: build 或 review
+    Supervisor --> Architect
+    Architect --> Parts
+    Parts --> Hardware
+    Hardware --> Reviewer
+    Reviewer --> Supervisor: 复审/汇总
+    Hardware --> AHE: 可恢复 Harness 故障
+    AHE --> Hardware: 预算内继续
+    Hardware --> Blocked: 执行级故障
+    Reviewer --> DeliveredWithIssues
+    Reviewer --> ReleaseReady
+    Clarify --> [*]
+    Blocked --> [*]
+    DeliveredWithIssues --> [*]
+    ReleaseReady --> [*]
+```
+
+## Hardware Engineer 的 17 步边界
+
+Temporal Workflow 负责耐久编排；具体 KiCad 操作在 Activity 中执行。每个 Activity 有超时、重试和 heartbeat，工作流具有幂等 `run_id + request_id`。
+
+核心阶段包括：
+
+1. 读取 Profile、需求摘要和已验证器件。
+2. 生成选型与封装绑定。
+3. 验证符号真实存在。
+4. 验证封装真实存在。
+5. 验证引脚—焊盘兼容。
+6. 生成原理图工程。
+7. 生成语义网络与连接关系。
+8. 生成 PCB 板框、层叠和布局约束。
+9. 写入元件并执行确定性布局。
+10. 导出 DSN。
+11. 真实调用 Freerouting。
+12. 生成 SES。
+13. 将 SES 导回 PCB。
+14. 执行 KiCad ERC。
+15. 执行 KiCad DRC 和 unconnected 检查。
+16. 导出 BOM、CPL、Gerber 和钻孔文件。
+17. Reviewer 独立审查并生成最终 Manifest/报告。
+
+LLM 的布局意图会被编译为带 digest 的 placement constraint sidecar。确定性布局只能在约束允许的区域内工作，不能覆盖 Architect/LLM 已确认的板卡分区。
+
+## AHE 与 EHE
+
+### AHE
+
+AHE（Agentic Harness Engineer）处理框架自身的可恢复缺陷，例如事件格式漂移、状态增量错误、输入映射错误、局部网络生成失败或旧上下文污染。它不把真实器件缺失、硬件规格冲突或 KiCad 工具不可用伪装成成功。
+
+每次任务受总修复次数、同一失败签名次数、墙钟时间和 LLM token 预算限制。预算耗尽后系统保留产物并报告问题，而不是无限循环。
+
+### EHE
+
+EHE（Evolutionary Harness Engineer）只记录经过匿名化和独立验证的跨任务失败签名。它不会在运行中自动改写源码；候选策略必须经过回归验证、代码审查和版本发布后才进入下一版本 Harness。
+
+## 状态、并发和恢复
+
+```mermaid
+flowchart LR
+    R[Java Run 权威状态] --> O[PostgreSQL Outbox]
+    O --> K[Kafka Durable Event]
+    R --> S[Redis Lease + Fencing]
+    S --> X[SSE Replay / Last-Event-ID]
+    P[LangGraph State] --> C[PostgreSQL Checkpoint]
+    T[Temporal Event History] --> W[Workflow Recovery]
+    F[人工反馈] --> V[Revision CAS]
+    V --> P
+```
+
+- PostgreSQL 保存租户隔离的业务状态和 Run 状态。
+- PostgreSQL RLS、`TenantContext` 和 Membership 防止跨租户访问。
+- Redis lease/fencing 防止多个 Runtime producer 同时写同一 Run。
+- `event_seq`/`state_version` 保证事件单调性；Kafka 使用稳定 event ID 去重。
+- SSE 断线使用 `Last-Event-ID` 回放；Redis XREAD 超时被视为空闲 heartbeat，而不是任务失败。
+- Java/Python 重启后以 `run_id + request_id` reconciliation，不创建重复 Workflow。
+- 人工反馈以 `base_revision` CAS 创建新 Revision，旧产物不可覆盖。
+
+## 目录结构
+
+```text
+.
+├── backend/                         Java Spring Control Plane
+│   └── src/main/java/...             身份、租户、Run、Artifact、Outbox、SSE
+├── frontend/                        Next.js/React 工作区和 BFF
+├── src/agents/ratsnestpro/           LangGraph Supervisor 与子智能体
+├── src/service/                     Python internal REST/gRPC、Redis、Kafka、SSE
+├── src/core/                        LLM provider 与运行配置
+├── src/memory/postgres.py            LangGraph PostgreSQL checkpoint/store
+├── src/RatsNestPro-main/...          KiCad/EDA/17步流水线
+├── contracts/                       REST、SSE、gRPC、Runtime JSON Schema
+├── docker/                          Runtime、Frontend、Keycloak、Freerouting 镜像
+├── deploy/k8s/                      Cell、HPA、网络策略和可观测性模板
+├── docs/                            设计、运行、AHE/EHE 和技术报告
+├── compose.yaml                     本地 PostgreSQL/Redis/Kafka/Temporal/MinIO/OIDC
+└── .env.example                     脱敏环境变量模板
+```
+
+## 本地启动
+
+实际密钥只放在本地 `.env`，不要提交到 Git：
+
+```powershell
+Copy-Item .env.example .env
+# 编辑 .env，至少配置可用的 LLM 和内部服务密钥
+
+docker compose --profile control-plane --profile identity --profile artifact-store up -d
+```
+
+访问地址：
+
+| 地址 | 用途 |
+|---|---|
+| `http://localhost:8088` | OAuth2 Proxy 保护后的正式开发入口 |
+| `http://localhost:3000` | Next.js 前端直连开发入口 |
+| `http://localhost:8081/actuator/health` | Java Control Plane 健康检查 |
+| `http://localhost:8180` | Keycloak 开发身份服务 |
+| `http://localhost:9001` | MinIO 控制台 |
+
+修改 Python 依赖后需要重新构建 Agent Runtime；修改前端依赖后需要重新构建 Frontend。日常验证优先使用静态检查和轻量 smoke，不要默认启动真实 LLM、KiCad 或 Freerouting。
+
+## 配置与安全
+
+- `.env`、OIDC client secret、内部签名密钥、AWS/S3 key、Kafka SASL secret 不提交。
+- `.env.example` 只包含空值或明确的开发占位值。
+- Java 是浏览器唯一业务后端；Python Runtime 不接受浏览器伪造的 `user_id`/`tenant_id`。
+- Keycloak 只负责身份认证与用户资料；业务权限由 Java Membership/RBAC/RLS 决定。
+- 本地 Compose 是开发环境，不代表已经完成跨区域 HA、真实 Metrics API、TLS 演练或 RPO/RTO 验收。
+
+## 相关文档
+
+- [多智能体内核与硬化](docs/multi-agent-kernel-hardening.md)
+- [意图识别、AHE 与 EHE](docs/RATSNESTPRO_INTENT_AHE_EHE_ARCHITECTURE.md)
+- [LangGraph + Temporal 架构](docs/RATSNESTPRO_LANGGRAPH_TEMPORAL_ARCHITECTURE.md)
+- [生产 Runtime 与恢复](docs/RATSNESTPRO_PRODUCTION_RUNTIME.md)
+- [分布式 Runtime](docs/DISTRIBUTED_RUNTIME.md)
+- [完整技术报告](docs/RATSNESTPRO_COMPLETE_PROJECT_TECHNICAL_REPORT_ZH.md)
+
+## 当前已知边界
+
+1. ATmega328 兼容实现仍存在于旧独立生成/修复链中，正在迁移为 Profile 驱动实现；它不能成为其他 MCU 的回退答案。
+2. 本地 Compose 已具备组件连通配置，但真实 Kubernetes Metrics API、跨区域 failover/failback、TLS 重启恢复和 RPO/RTO 仍需要在目标集群演练。
+3. 交付工程是否满足全部硬件设计规则仍需 Reviewer 和人工硬件工程师确认；系统不会把 `delivered_with_issues` 冒充 `release_ready`。
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+项目使用 MIT License，详见 [LICENSE](LICENSE)。

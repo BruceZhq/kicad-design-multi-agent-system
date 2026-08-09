@@ -48,7 +48,6 @@ from schema import (
     StreamInput,
     UserInput,
 )
-from service.agui import router as agui_router
 from service.internal_api import router as internal_router
 from service.redis_run_registry import RedisRunRegistry, RunHandle
 from service.run_coordination import checkpoint_thread_candidates, serialize_thread_run
@@ -283,8 +282,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(lifespan=lifespan, generate_unique_id_function=custom_generate_unique_id)
 router = APIRouter(dependencies=[Depends(verify_bearer)])
-# AG-UI protocol endpoints inherit the same bearer auth - see service/agui.py
-router.include_router(agui_router)
 
 
 @app.middleware("http")
@@ -608,7 +605,7 @@ async def _message_generator_unlocked(
                         continue
                     updates = updates or {}
                     update_messages = updates.get("messages", [])
-                    # special cases for using langgraph-supervisor library
+                    # Preserve the final handoff message from nested subgraphs.
                     if ("supervisor" in node or "sub-agent" in node) and update_messages:
                         # the only tools that come from the actual agent are the handoff and handback tools
                         if isinstance(update_messages[-1], ToolMessage):

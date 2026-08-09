@@ -250,7 +250,6 @@ services:
           - agent-service
     environment:
       - MODE=${MODE:-development}
-      - DATABASE_TYPE=postgres
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
       - POSTGRES_HOST=postgres

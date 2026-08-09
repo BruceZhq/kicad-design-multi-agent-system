@@ -2,7 +2,6 @@
     "python_version": "3.12",
     "dependencies": ["./src"],
     "graphs": {
-        "research_assistant": "./src/agents/research_assistant.py:research_assistant",
         "ratsnestpro-multi-agent": "./src/agents/ratsnestpro/ratsnestpro_agent.py:ratsnestpro_multi_agent"
     },
     "env": "./.env"

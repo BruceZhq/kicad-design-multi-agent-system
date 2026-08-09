@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from urllib.parse import quote
 
 from core import settings
-from core.settings import DatabaseType
 
 
 @dataclass
@@ -63,10 +62,6 @@ async def serialize_thread_run(
 
 @asynccontextmanager
 async def _distributed_thread_lock(agent_id: str, user_scope: str, thread_id: str):
-    if settings.DATABASE_TYPE != DatabaseType.POSTGRES:
-        yield
-        return
-
     from psycopg import AsyncConnection
 
     from memory.postgres import get_postgres_connection_string
