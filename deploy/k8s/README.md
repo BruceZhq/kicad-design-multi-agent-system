@@ -1,4 +1,4 @@
-# RatsNestPro Kubernetes cell
+# CircuitFoundry Kubernetes cell
 
 This deployment keeps `ratsnestpro-multi-agent` as the only execution runtime.
 Java is the external SaaS control plane; Python remains private:
@@ -36,6 +36,9 @@ Before rendering, provide these two secrets through the cluster secret manager:
   model-provider keys. Supply the JAAS login-module stanza through the secret
   manager, never the ConfigMap. The internal signing secret is shared only by Java
   and Python and must contain at least 32 random bytes.
+- `ratsnest-flyway-secrets`: schema-owner-only `RATSNEST_FLYWAY_USER` and
+  `RATSNEST_FLYWAY_PASSWORD`. Do not merge these keys into the runtime Secret;
+  Python Agent and Java application Pods must never receive schema-owner credentials.
 - `ratsnest-oidc-secrets`: oauth2-proxy variables including
   `OAUTH2_PROXY_CLIENT_ID`, `OAUTH2_PROXY_CLIENT_SECRET`,
   `OAUTH2_PROXY_COOKIE_SECRET` and `OAUTH2_PROXY_REDIRECT_URL`.
@@ -45,6 +48,16 @@ class, and resource budgets. Then render without contacting a cluster:
 
 ```bash
 kubectl kustomize deploy/k8s/cells/primary-region
+```
+
+Harness releases use an isolated stable/canary overlay rather than mixing two
+versions behind one Service. The complete Flyway, promotion, drain, and explicit
+Deployment rollback procedure is documented in
+[`docs/HARNESS_CANARY_RUNBOOK.md`](../../docs/HARNESS_CANARY_RUNBOOK.md). Render
+the release topology locally with:
+
+```bash
+kubectl kustomize deploy/k8s/overlays/harness-canary
 ```
 
 Before attempting any release exercise, run the fail-closed cluster preflight:

@@ -253,6 +253,7 @@ class ChatHistory(BaseModel):
 RunState = Literal[
     "queued",
     "running",
+    "waiting_for_input",
     "completed",
     "failed",
     "cancelled",
@@ -277,6 +278,8 @@ class RunStatus(BaseModel):
     newest_event_id: int | None = None
     error_code: str | None = None
     error: str | None = None
+    interaction_id: str | None = None
+    interaction_state_version: int | None = None
     artifact_manifest: dict[str, Any] | None = None
     delivery_status: Literal[
         "execution_blocked",

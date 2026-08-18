@@ -119,6 +119,18 @@ _NEGATED_BUILD_RE = re.compile(
     r"[^。；\n]{0,20}(?:PCB|板))",
     re.IGNORECASE,
 )
+_EXPLICIT_CLARIFICATION_RE = re.compile(
+    r"(?:\b(?:ask|confirm|clarify)\b[^.\n]{0,40}"
+    r"\b(?:task|goal|intent|requirement|what\s+to\s+do)\b[^.\n]{0,20}"
+    r"\b(?:first|before)\b|"
+    r"\b(?:do\s+not|don't|must\s+not)\b[^.\n]{0,40}"
+    r"\b(?:start|execute|proceed|design|build)\b[^.\n]{0,20}"
+    r"\b(?:until|before)\b[^.\n]{0,40}\b(?:answer|confirm|clarif)|"
+    r"(?:请先|先)(?:向我)?(?:询问|提问|确认|澄清)[^。；;\n]{0,40}|"
+    r"(?:不要|不得|禁止)(?:直接|立即)?(?:开始|执行|设计|构建)[^。；;\n]{0,20}"
+    r"(?:先|直到|在)[^。；;\n]{0,20}(?:回答|确认|澄清))",
+    re.IGNORECASE,
+)
 _DOMAIN_RE = re.compile(
     r"\b(?:pcb|kicad|schematic|gerber|freerouting|dsn|ses|erc|drc|bom|cpl|"
     r"mcu|microcontroller|datasheet|footprint|symbol|netlist|routing|"
@@ -231,6 +243,25 @@ def classify_intent(
         explicit = explicit_match.group(1).lower()
     resumable_intents = {"build", "review", "research", "parts"}
     normalized_prior = (prior_intent or "").strip().lower()
+
+    # An explicit request to ask before acting is a workflow control command,
+    # not a board-build instruction. Honor it before creation keywords so a
+    # user can deliberately enter the checkpointed human-input path.
+    if _EXPLICIT_CLARIFICATION_RE.search(requirement):
+        return IntentDecision(
+            primary_intent="clarify",
+            confidence=0.99,
+            evidence=["explicit clarification before execution"],
+            in_scope=in_scope,
+            needs_clarification=True,
+            clarification_question=(
+                "请确认希望执行的任务：新建 KiCad 设计、审查已有工程、验证器件，"
+                "还是只查询硬件资料？"
+            ),
+            context_relation=(
+                "resume" if has_active_context and not explicit_new_context else "new"
+            ),
+        )
 
     if explicit in {"build", "review", "research", "parts", "diagnose"}:
         if explicit == "build" and not strong_hardware_domain:

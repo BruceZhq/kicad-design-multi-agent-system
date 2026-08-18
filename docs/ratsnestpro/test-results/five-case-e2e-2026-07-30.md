@@ -37,9 +37,7 @@
 
 - [`five-case-e2e-2026-07-30.json`](../test-cases/five-case-e2e-2026-07-30.json)
 
-可复现执行器：
-
-- [`run_ratsnest_e2e_matrix.py`](../../../scripts/run_ratsnest_e2e_matrix.py)
+执行器属于 2026-07-30 的历史测试环境，当前精简后的发布仓库不再包含该脚本；本页只保留当时的结果证据，不能作为现行验收命令。
 
 原始 SSE 事件及请求：
 

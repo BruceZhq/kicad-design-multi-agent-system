@@ -72,6 +72,18 @@
       },
       "additionalProperties": false
     },
+    "harnessVersionSnapshot": {
+      "type": "object",
+      "required": ["id", "manifestDigest", "channel"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "manifestDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "channel": {
+          "enum": ["stable", "canary", "previous_stable", "evaluation", "development"]
+        }
+      },
+      "additionalProperties": false
+    },
     "startRunRequest": {
       "type": "object",
       "required": ["message", "capabilityProfile"],
@@ -115,6 +127,20 @@
       },
       "additionalProperties": false
     },
+    "interactionResponseRequest": {
+      "type": "object",
+      "required": ["answer", "stateVersion"],
+      "properties": {
+        "answer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100000,
+          "pattern": "\\S"
+        },
+        "stateVersion": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
     "runResponse": {
       "type": "object",
       "required": [
@@ -127,6 +153,7 @@
         "state",
         "deliveryStatus",
         "capabilityProfile",
+        "harnessVersion",
         "createdAt",
         "eventCount"
       ],
@@ -141,7 +168,7 @@
           "pattern": "^[A-Za-z0-9._:-]{1,200}$"
         },
         "state": {
-          "enum": ["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"]
+          "enum": ["QUEUED", "RUNNING", "WAITING_FOR_INPUT", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"]
         },
         "deliveryStatus": {
           "anyOf": [
@@ -155,6 +182,7 @@
             { "type": "null" }
           ]
         },
+        "harnessVersion": { "$ref": "#/$defs/harnessVersionSnapshot" },
         "createdAt": { "type": "string", "format": "date-time" },
         "startedAt": { "type": ["string", "null"], "format": "date-time" },
         "finishedAt": { "type": ["string", "null"], "format": "date-time" },
@@ -252,6 +280,8 @@
             "token",
             "reasoning",
             "artifact_manifest",
+            "ag_ui",
+            "waiting_for_input",
             "error",
             "completed",
             "failed",

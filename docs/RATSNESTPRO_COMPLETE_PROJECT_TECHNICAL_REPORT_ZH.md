@@ -1,13 +1,14 @@
-# RatsNestPro 完整项目技术、架构与面试报告
+# CircuitFoundry 完整项目技术、架构与面试报告
 
-> 快照日期：2026-08-08  
-> 代码根目录：`E:\agent-service-toolkit-main\agent-service-toolkit_frame\agent-service-toolkit-main`  
-> 产品定位：面向五类版本化 KiCad 硬件设计场景的企业级、多租户、多智能体 SaaS  
+> 快照日期：2026-08-19
+> 代码根目录：本仓库根目录
+> 产品定位：面向五类版本化 KiCad 硬件设计场景的企业级、多租户、多智能体 SaaS
+> 兼容说明：产品名称升级为 CircuitFoundry；`ratsnestpro`/`ratsnest-*` 继续作为稳定的内部协议、数据库与运行标识。
 > 重要说明：本文区分“代码已实现”“静态验证通过”“本地集成通过”和“生产环境已演练”。没有真实证据的能力不会写成已经投产。
 
 ## 1. 执行摘要
 
-RatsNestPro 已经不是一个“把提示词直接交给单个 LLM”的演示程序，而是由三层组成的工程系统：
+CircuitFoundry 已经不是一个“把提示词直接交给单个 LLM”的演示程序，而是由三层组成的工程系统：
 
 1. **产品与 SaaS 控制面**：Next.js 前端通过 Java Spring Boot 控制面完成登录、组织、项目、Run、Revision、产物授权和 SSE 事件访问。
 2. **多智能体执行面**：Python LangGraph 注册了唯一面向产品的 `ratsnestpro-multi-agent`，由 Supervisor、Architect、Parts Specialist、Hardware Engineer 和 Reviewer 分工协作。
@@ -16,7 +17,7 @@ RatsNestPro 已经不是一个“把提示词直接交给单个 LLM”的演示�
 当前项目已经具备以下主要能力：
 
 - OIDC 登录、JWT/JWKS 校验、组织/成员/项目模型和固定 RBAC；
-- PostgreSQL RLS 多租户隔离和 Flyway V1–V7 迁移；
+- PostgreSQL RLS 多租户隔离和 Flyway V1–V10 迁移；
 - OIDC 主体资料、头像上传、乐观锁更新和个人资料工作区；
 - 自然语言意图识别、上下文续跑/修订/诊断和离题对话边界；
 - 五类不可变、带摘要的 Capability Profile；
@@ -287,7 +288,7 @@ Router 输出严格 `IntentDecision`，主要字段包括 primary intent、new/r
 | `sfp-sync-interface@1.0` | SFP Host、时钟同步、管理/状态接口 | 光模块内部、认证运营商设备、无界高速交换 |
 | `radio-control-monitor@1.0` | 无线模块监控、低速控制、受保护供电/服务接口 | PA/天线设计、频谱认证、安全关键射频控制 |
 
-Profile 不是固定 BOM/Net/板卡模板。Manifest 只定义边界、证据、工具链、预算和验收；运行时保存 `id + version + SHA-256 digest` 快照，续跑不能偷偷换 Profile。五类当前统一预算上限为：60 分钟、120000 LLM tokens、AHE 最多 6 次、同 failure 最多 2 次。
+Profile 不是固定 BOM/Net/板卡模板。Manifest 只定义边界、证据、工具链、预算和验收；运行时保存 `id + version + SHA-256 digest` 快照，续跑不能偷偷换 Profile。五类当前统一预算上限为：60 分钟、1200000 LLM tokens、AHE 最多 6 次、同 failure 最多 2 次。
 
 当前 `Profile` 中预算和身份摘要已经确定性执行；部分 scope/acceptance 仍作为严格边界文本进入工程需求，并没有一套把每条自然语言约束自动编译为 gate 的通用解释器。这是后续 Profile 工程化的重要工作。
 
@@ -1624,7 +1625,7 @@ Java 的 `principalId` 不是 Keycloak `sub` 原文，而是对 `principal-v1 + 
 
 五个权威定义位于 `src/agents/ratsnestpro/profiles/*.json`，由 `src/agents/ratsnestpro/profiles/registry.py` 校验并计算摘要。Profile 固定的是版本化的**支持域、排除域、证据、工具、预算和验收政策**，不是固定 BOM、网络、器件、板框或标准板模板；同一 Profile 下的具体电路仍由用户需求、官方资料、真实 KiCad 库、可采购器件和板厂叠层决定。Java 在 `V3__add_run_capability_profile_snapshot.sql` 与 `RunService.java` 中保存 `id + version + SHA-256 digest`，Revision 继承快照，禁止续跑静默换边界。
 
-五类共同预算为 60 分钟、120000 LLM tokens、最多 6 次 AHE repair、同 failure 最多 2 次；共同要求可编辑 KiCad 工程、BOM/placement、Gerber/Drill、风险与证据报告。当前身份摘要和预算已确定性执行，但自然语言 scope/acceptance 尚未被通用解释器逐条编译为 gate，不能声称所有文字约束已自动证明。
+五类共同预算为 60 分钟、1200000 LLM tokens、最多 6 次 AHE repair、同 failure 最多 2 次；共同要求可编辑 KiCad 工程、BOM/placement、Gerber/Drill、风险与证据报告。当前身份摘要和预算已确定性执行，但自然语言 scope/acceptance 尚未被通用解释器逐条编译为 gate，不能声称所有文字约束已自动证明。
 
 #### 26.1.1 `sipi-channel-pdn-eval@1.0`
 
@@ -1922,3 +1923,319 @@ Java 暴露 `GET/PUT /api/v1/me/profile` 和 `GET/PUT /api/v1/me/profile/avatar`
 ### Q100：为什么只把 blocking read timeout 当作 idle，不全局捕获 Redis TimeoutError？
 
 **参考答案：**阻塞读取到达空闲边界等价于“本轮没有事件”；普通状态读、写、lease续期超时则代表无法证明状态或所有权，必须暴露故障。**具体实现：**三个 `XREAD` 入口共用 `_xread_or_idle`，之后立即重新检查durable state；其他Redis操作不经过该helper。**深挖：**这如何避免split-brain？**答案：**lease renewal 仍保持 fail-closed，无法确认续租就取消本地producer；修复只影响订阅等待，不放宽写入owner/fencing校验。
+
+## 28. 受治理 Harness Evolution：从 AHE 事件到可回滚 Canary
+
+> 本章是截至 2026-08-19 的源码级实现快照，专门补充第 12 章之后新增的受治理 Harness Evolution。若早期章节中“EHE 只记录经验、完全不产生代码候选”的描述与本章冲突，应以本章为准：当前系统可以让模型提出**受限的完整文件候选**并在隔离 worktree 中执行固定评测，但仍然不能自动 merge、push 或 deploy。对用户展示的产品名为 **CircuitFoundry**；`ratsnestpro`、`ratsnest-*`、数据库 schema、协议 ID 和 Temporal task queue 等内部标识为兼容性接口，不能仅为改名而破坏。
+
+### 28.1 第一性原理：这里的“进化”到底是什么
+
+生产系统里的 Harness Evolution 不是让正在处理客户任务的 Agent 在线改自己的源码。它是一个带有证据、隔离、回归、审批、版本化和回滚的发布流程：
+
+```text
+当前 Run 内的有界 AHE
+        │ 只发结构化 ahe_event
+        ▼
+Java EvolutionCollector ──HMAC/字段白名单/RLS──► Observation
+        │ 同一租户、同一 Harness、同一失败签名，至少两个项目仍未解决
+        ▼
+Candidate: observed → eligible → evaluating ──Eval proof──► awaiting_approval
+        │
+        ├─► Optimizer 只看到候选摘要、公开 Eval 摘要和允许修改的源码上下文
+        │       └─► 严格 PatchProposal（完整 UTF-8 文件，不是 shell 或任意 diff）
+        │
+        └─► detached Git worktree + 固定命令 Eval + 强制清理
+                └─► Temporal 等待 approve/reject/cancel
+                         │
+                         ▼
+                  外部代码审查和 CI
+                         │
+                         ▼
+HarnessVersion: CANDIDATE → APPROVED → CANARY → STABLE
+                         │
+                         ▼
+Java 稳定分桶 → HTTP/gRPC 独立 endpoint → K8s Canary Deployment/Task Queue
+```
+
+这条链路有三条不可混淆的语义：
+
+1. **AHE 是 Run 内恢复。**它只能在当前任务的修复预算、超时和状态门禁内修复 Harness 型执行故障；普通 ERC/DRC 或设计风险不应被当成 Harness 缺陷无限重跑。
+2. **Evolution 是跨 Run 的发布候选流程。**它把重复问题变成可审查的候选补丁和评测证据，不直接改变当前 Run，也不把一次成功经验写回生产源码。
+3. **Release 是平台控制面行为。**只有经过平台权限校验、版本证明、Eval、人工审查和 Canary 的不可变 Harness 才能成为 stable；Kubernetes Ready 只说明 Pod 可接流量，不说明功能正确。
+
+### 28.2 Increment 0–6 的真实完成面
+
+| Increment | 目标 | 当前源码证据 | 当前边界 |
+|---|---|---|---|
+| 0：基线、契约、CI | 固定不可变规则和可复现入口 | `config/harness/invariants.v1.json`；`contracts/evolution/v1/*.json`；`scripts/build_harness_manifest.ps1`；`.github/workflows/ci.yml` | CI 已声明 Python、前端、Java、Kustomize/Compose 门禁，但本章编写过程没有执行远端 CI；完整 Maven 构建仍待 CI 实证 |
+| 1：Harness 身份 | 让一次 Run 绑定一个可追溯版本 | V9 `harness_versions/harness_rollouts`；`runs` 新增 version/manifest/channel；数据库触发器禁止修改；`RunService` 创建 Run 时固化并下发 `runtime_config.harness_version`；Python Runtime 在 checkpoint 前校验签名请求中的显式 pin 与 Pod 环境身份完全一致 | 当前已闭环 Agent Runtime 入口的 fail-closed binding；真实 Docker/K8s 中稳定版、Canary 和恢复流量的身份错配演练仍未执行 |
+| 2：Eval | 用相同案例和确定性判分比较 stable 与 candidate | 四个 content-addressed case；七类 grader；`evaluate_suite/compare_reports`；公开、holdout、adversarial 分组 | 当前 fixture 是录制证据，不是本轮真实 LLM/KiCad/Freerouting 执行；不能据此宣称五类板卡已经通过完整回归 |
+| 3：Observation/Candidate | 把重复 AHE 缺陷变成隐私安全候选 | Java `EvolutionCollector`、V9 三张演进表、RLS、去重键、候选状态机和受限 REST transition API | 聚合范围是**同一租户内跨项目**；通用管理 API 已禁止直接进入 awaiting_approval/approved，但 Java→Temporal Trial proof 入口尚未实现 |
+| 4：Optimizer/Sandbox | 让模型能提出低风险补丁，但不能获得发布权 | `optimizer.py` 严格结构化输出；`sandbox.py` detached worktree、路径/哈希/大小/命令门禁和 candidate `PYTHONPATH` 隔离；Temporal workflow 人审信号；Compose 提供默认关闭、单并发的本地 `evolution_worker` | Java 目前没有创建 Trial、启动该 Evolution Workflow 和回写报告的闭环；Compose 入口只用于本地开发，生产 K8s Evolution Worker 尚未设计和部署 |
+| 5：Canary/Rollback | 用真实版本和隔离执行面做渐进发布 | Java HMAC 稳定分桶；stable/canary HTTP 与 gRPC 双 endpoint；K8s 独立 Service、Deployment、NetworkPolicy、Temporal task queue；base ConfigMap/Deployment 注入 Canary HTTP/gRPC target；digest-only 脚本和静态门禁 | 配置链已闭环，但尚未在真实 K8s 上验证 gRPC Canary 连接、身份错配拒绝、分流、drain、Promotion 或 Rollback |
+| 6：文档和验收 | 让发布/迁移/回滚有可执行手册 | `docs/HARNESS_CANARY_RUNBOOK.md`、三个发布脚本、静态基础设施检查 | 按需求不制作演示视频；本轮没有连接真实集群，也没有执行真实 promote、rollback、Flyway Job、LLM 或 EDA |
+
+这张表刻意把“存在代码”与“生产闭环已验证”分开。面试或交付时可以说“关键机制已实现并有窄测试/静态门”，不能把尚未连接的控制面和真实环境演练描述为已经上线。
+
+### 28.3 Harness Manifest 与一次 Run 的版本固化
+
+`build_harness_manifest.ps1` 对受版本管理和未忽略的关键路径建立内容摘要，输出：`sourceCommit`、`sourceTreeDigest`、`bundleDigest`、`contractDigest`、`policyDigest`、可选 `toolchainDigest`、`runtimeImageDigest` 和最终 `manifestDigest`。`-Release` 模式要求 Git worktree 干净，并要求运行镜像是 `sha256:<64 hex>`；这避免把“本地改过但没提交”的代码注册成可发布版本。
+
+V9 中的 `harness_versions` 保存源码、bundle、contract、policy、镜像和 Manifest 证据，状态为 `CANDIDATE/APPROVED/CANARY/STABLE/RETIRED/ROLLED_BACK`。`HarnessVersionService.register` 只接受干净、有 OCI digest 且有 Manifest object key 的候选；同一 ID 重放只有在全部不可变身份一致时才幂等。这里的 `attested` 当前表示**结构条件满足**，并不等于 Sigstore/SLSA 式密码学签名；Java 也尚未从对象存储重新计算并比对 Manifest 内容，这是供应链加固项。
+
+Run 创建时，`HarnessReleaseRouter` 先读取 `production` rollout，再对 `tenantId + projectId + Idempotency-Key` 做带服务端密钥的 HMAC-SHA256，取稳定的 0–99 bucket。bucket 小于 `canary_percent` 才选择 Canary，否则选择 stable。选择结果包含 Harness ID、Manifest digest 和 channel，并同时：
+
+- 写入 `control_plane.runs.harness_version_id/harness_manifest_digest/harness_channel`；
+- 写入发送给 Python 的 `runtime_config.harness_version`；
+- 进入 Run fingerprint，防止同一幂等键以不同执行身份被静默复用；
+- 由 V9 trigger 拒绝后续对三列的任何修改；
+- 新建 Revision 时继承父 Run 的 Harness 身份，而不是在会话中途重新分桶。
+
+因此修改 `harness_rollouts` 只影响**尚未创建的新 Run**。已经创建的 Run 不会因为 Canary 百分比变化而换代码。Python Runtime 的 `_handle_input` 已在查找/创建 LangGraph checkpoint 之前调用 `request_harness_identity`：只有具有 transport-authenticated `runtime_identity` 的内部请求才能携带 Harness pin；签名请求必须使用唯一的 `harness_version` carrier，并显式提供 ID、channel 和 Manifest digest；别名、多 carrier、缺失 pin、公共请求伪造 pin，或显式 pin 与 Pod 的 `RATSNEST_HARNESS_*` 环境身份不一致，都会在执行前以 422/fail closed 拒绝。验证后的三元组写入 `RunnableConfig.configurable.harness_version`。这闭环了 Agent Runtime 入口绑定，但真实 K8s 稳定/Canary Pod、进程重启和在途 Temporal Workflow 的端到端错配演练仍是部署验收项。
+
+### 28.4 Increment 2 Eval 为什么是演进的核心，而不是“多跑几个案例”
+
+没有 Eval，Optimizer 只能证明“它改了代码”，不能证明“它解决了问题且没有破坏别处”。本实现把一次评测拆成内容寻址的 case manifest、录制的 `RunEvidence`、确定性 grader、Harness 级报告和 stable/candidate 比较。
+
+当前 `core.v1` 包含四类案例：
+
+| Suite/Case | 主要问题 | 关键期望 |
+|---|---|---|
+| historical：`release-truth-missing-artifact` | 没有真实文件却声称 `release_ready` | 必须判为 `execution_blocked`，且 release truth 与禁止伪造证据不变量成立 |
+| optimization：`ahe-bounded-recovery` | 结构化输出故障后能否有界恢复 | 完成 17 步、保留 `.kicad_sch/.kicad_pcb` 哈希证据、独立审查通过、AHE 至少修复一次且不超预算 |
+| sealed holdout：`constraint-preservation` | 修复是否通过偷偷削弱用户约束来“过测” | 约束在 Architect、Parts、Hardware、Reviewer 全链路保持，交付真值不被叙述覆盖 |
+| sealed adversarial：`prompt-injection-release-truth` | 恶意指令能否让系统伪造发布结论 | 即使用户要求忽略门禁，也必须保留 blocker，并拒绝无证据的 `release_ready` |
+
+七类 grader 都只读取结构化、录制的证据，不让另一个 LLM 自由打分：
+
+- `intent`：意图模式是否与 case 预期一致；
+- `trajectory`：完成步数、固定 17 步总数和角色顺序是否一致；
+- `artifact`：每个必需产物是否同时具备存在、格式有效和 SHA-256 证据；
+- `release_truth`：三态交付与执行完成、blocker、独立 Reviewer 是否自洽；
+- `recovery`：故障注入案例是否真的发生过 AHE 修复并恢复；
+- `security`：case 声明的每条不可变量是否有 `true` 证据；
+- `cost`：AHE 次数、LLM token 和墙钟是否在 case 预算内。
+
+`compare_reports` 要求 baseline 与 candidate 使用完全相同的 case ID：至少一个 baseline 失败 case 被修复、没有任何原先通过的 case 回退、candidate 全部 case 通过，并且 token 与墙钟都不能超过 baseline 的 120%。这是一种偏保守的“先不伤害”门禁。它也有明确局限：grader 当前是二值分数；如果 baseline 已经全绿，候选无法凭“无 case 改善”通过，后续需要引入连续质量指标或先增加能复现新缺陷的回归 case，不能为了允许无效改动而删除 `bool(improved)`。
+
+所谓 sealed 目前意味着三层约束：case 位于 `evals/sealed/**`；治理策略禁止修改；Optimizer prompt 只接收 `PublicEvalSummary`，没有 `inputRef` 或 case 内容。它防止模型针对隐藏答案投机，但还不是独立凭据域或远程密封评测服务；运行 evolution worker 的操作系统进程理论上仍可读取仓库文件。生产强化应把 sealed suite 放到独立 Eval 服务/仓库和独立凭据中，由它只返回签名后的汇总 verdict。
+
+### 28.5 AHE Observation 如何变成 Candidate
+
+Java 在持久化 Runtime event 时识别 `type=message`、`message.type=custom`、`customData.kind=ahe_event`。收集动作运行在独立事务中；失败只记录 warn，不允许观测系统故障中断用户的 SSE 事件流。
+
+Collector 不保存 raw prompt、模型回答、诊断 message 或 evidence。它只接受长度受限、字符集受限的 event、step、category、recoverability、strategy 等字段；证据整体只留下 HMAC digest。tenant/run 和 tenant/project 分别生成不可逆 scope/project fingerprint；不安全的失败签名也退化为 HMAC。`(tenant_id, observation_id)` 与 `(tenant_id, run_id, source_event_seq)` 双重唯一约束防止重放重复写。
+
+Candidate 的聚合键是同一租户下的 `base_harness_version + manifest_digest + failure_signature`。查询会排除同一项目中发生在 gap 之后的 `capability_gap_resolved`；未解决 gap 覆盖至少两个不同 `project_fingerprint` 才从 `observed` 进入 `eligible`。如果所有活跃 gap 都被后续 resolved 覆盖，尚未离开 observed/eligible 的聚合会变为 `stale`。这样可以避免一次板卡、一次模型抖动或一个客户的特殊要求直接触发代码修改。
+
+V9 对 observation、candidate、trial 都启用并 `FORCE ROW LEVEL SECURITY`。当前聚合是租户内跨项目学习，默认不会把 A 租户的失败细节合并给 B 租户；如果未来做全局产品演进，必须先做匿名化导出、k-anonymity/最小项目数、权限和数据处理协议，不能简单取消 RLS。
+
+租户成员可读 observation/candidate/trial；Candidate 状态 transition 仅 `owner/admin` 可执行并带 `expectedVersion` CAS。通用管理 transition 明确拒绝把 Candidate 直接改为 `awaiting_approval` 或 `approved`，返回 `EVOLUTION_EVALUATION_PROOF_REQUIRED`；只有未来接入的受治理 Trial 证明路径才可进入这两个状态，而该 Java→Temporal 入口当前仍未实现。平台级 Harness 注册和 rollout 则要求 OIDC token 包含 `ratsnest-platform-admin` role 或 `ratsnest.harness.admin` scope。租户管理员和平台发布管理员是不同的授权面，避免一个普通客户管理员直接发布全局 Runtime。
+
+### 28.6 Optimizer 与隔离 Sandbox 的安全模型
+
+Optimizer 的输入只有：Candidate、固定 Harness Manifest、公开 Eval 汇总和至多 80,000 字符的 allowlist 源码上下文。模型必须通过 structured output 生成 `PatchProposal = PatchPlan + PatchBundle`。Bundle 不是可执行 shell 或上下文 diff，而是最多 8 个完整 UTF-8 文件的 `create/replace` 操作；单文件最多 64 KiB、总内容最多 256 KiB、治理策略最多新增 500 行。replace 必须带 `expectedOldSha256`，每个新内容必须匹配 `contentSha256`，从而拒绝基线漂移和传输篡改。
+
+当前低风险 allowlist 仅覆盖少量 intent/decision/retry/remediation/Profile、文档和 evolution 回归测试。数据库 migration、身份/安全代码、工作流、部署清单、secret/credential、`.env` 和 sealed eval 都在 denylist；七条不可变量必须全部出现在 `preservedInvariants`。路径规范化还拒绝绝对路径、盘符、`..`、NUL、Windows 保留名、尾随点/空格和大小写重复。
+
+Materializer 使用固定 argv 创建 detached Git worktree，不建分支。写入前再次检查 allowlist、sealed path、旧文件 hash、symlink/junction 和目标是否越出 worktree；所有文件先准备，再使用同目录临时文件、`fsync` 和 `os.replace` 原子落盘。模型不能提供评测命令；v1 只允许注册在代码中的 `python-compile` 和 `evolution-core`。命令使用 `shell=False`，stdin 关闭，设置 60/180 秒 timeout、32 KiB 输出上限、最小环境、禁用用户 site/pytest 自动插件，并把常规代理指向不可用本机地址。评测环境还把 `PYTHONPATH` 固定为 detached worktree 的 `src`，防止候选测试意外导入 Worker 镜像中的稳定版 `/app` 源码而产生“假通过”。任意失败即停止后续命令，finally 强制 `git worktree remove --force` 和目录清理；清理失败会把原本 passed 的结果改成 error。
+
+这仍不是完全的恶意代码沙箱。代理环境变量不能阻止直接 socket，进程也与宿主共享内核和当前用户权限。生产运行应进一步使用一次性容器/Pod、只读基线、独立 ServiceAccount、无 Secret、默认拒绝 egress、CPU/内存/PID/磁盘限额、seccomp/AppArmor 和整体 deadline。当前实现适合“受信模型提出低风险候选”的本地受控评估，不能宣传为任意不可信代码执行平台。
+
+### 28.7 Temporal 人审与尚未连接的控制面闭环
+
+`HarnessEvolutionWorkflow` 运行在独立 `ratsnest-evolution` task queue，worker 的 `max_concurrent_activities=1`。Patch 生成 Activity 最长 15 分钟，Sandbox Activity 最长 10 分钟；两者最多尝试 2 次，策略/评测错误被标记为 non-retryable。Workflow 提供 `progress` query 和 `approve/reject/cancel` signal。Sandbox verdict 不是 passed 或清理不成功时立即拒绝；通过后默认永久等待人工信号，最终最多返回 `approved_for_external_review`，结果中 `automatic_merge/push/deploy` 恒为 false。
+
+Temporal 在这里解决的是“等待人、worker 重启、有限 Activity retry 和可查询历史”，不替代 Eval，也不替代 Git 审查。Compose 现在提供 `profiles: [evolution]` 的默认关闭 `evolution_worker`：它基于已构建 Runtime 增加 Git 与锁定的 dev 依赖，将仓库挂载到 `/repository`、候选 worktree 放入独立 `/evolution-sandbox` volume，并继续由 Worker 限制 `max_concurrent_activities=1`。这是显式 opt-in 的本地开发入口，不是生产隔离证明。一个重要的当前缺口仍是：Java `evolution_trials` Repository 只有查询，没有创建/更新 Trial 的写路径；控制面也没有启动 `ratsnest.harness-evolution.v1`、转发 signal、绑定 `CandidateEvalReport` 和更新 Candidate 状态的完整 API；生产 K8s 尚未部署 Evolution Worker。因此当前实现是可本地启动的安全执行原语和状态模型，不是可从产品页面一键完成的闭环。另一个治理项是给 human gate 增加审批 SLA/过期策略，避免无限等待的 Workflow 长期占用历史与运维注意力。
+
+### 28.8 Java Canary 分桶与 HTTP/gRPC 双 endpoint
+
+Canary 不是“多启动一个新版本 Pod，然后按副本数碰运气”。Java 是新 Run 的唯一分流权威：
+
+- `PUT /api/v1/platform/harness-rollouts/{rolloutId}/canary` 以 `expectedVersion` CAS 设置候选和百分比；
+- `POST /api/v1/platform/harness-rollouts/{rolloutId}:promote` 把旧 stable 置为 retired、canary 置为 stable，清空 Canary 指针，并把经过 attestation 的旧 stable 记录为唯一 `previous_stable_version_id`；
+- `POST /api/v1/platform/harness-rollouts/{rolloutId}:rollback` 只接受与 `previous_stable_version_id` 完全相同的 `targetVersionId`；要求没有 active Canary、目标仍为 attested retired，随后把当前 stable 标为 rolled back、前任恢复为 stable，并清空回滚目标，因此是不可任意选版本、单次使用的一级回滚；
+- `POST /api/v1/platform/harness-versions` 注册不可变版本；transition API 只允许候选批准/退休，CANARY/STABLE 由 rollout 操作推进；
+- 所有状态更新使用 `row_version` CAS，事务失败会一起回滚，发布者不能用最后写入者覆盖并发操作。
+
+HTTP gateway 按 `runtime_config.harness_version.channel` 选择 stable 或 Canary base URI；gRPC gateway 以同样规则选择两个 `ManagedChannel`。没有配置 Canary endpoint 时 fail closed 返回 503，不会悄悄降级到 stable。HTTP 兼容通道固定 HTTP/1.1，gRPC 仍使用 HTTP/2。当前 K8s base ConfigMap 与控制面 Deployment 已同时注入 `RATSNEST_AGENT_RUNTIME_CANARY_URL`、`RATSNEST_AGENT_RUNTIME_CANARY_GRPC_TARGET` 和 Canary gRPC plaintext 开关；`check_infrastructure.ps1` 也要求渲染结果包含 `ratsnest-agent-service-canary:9090`。因此代码和清单配置链已经闭环，但真实集群中的 DNS、NetworkPolicy、HTTP/2 连接和身份匹配仍未实测。
+
+稳定 bucket 的价值是：同一 tenant/project/Idempotency-Key 在 rollout 配置不变时总落到同一 channel，浏览器重试不会随机换版本；HMAC secret 又避免用户预计算或直接指定 channel。它不是粘住整个用户账号，因为 key 中包含 project 和幂等键；若产品要求“一个组织在一个实验窗口始终同版本”，应改变 server-side bucket key 并版本化策略，而不是把 `harnessChannel` 开放给浏览器。
+
+### 28.9 Kubernetes Canary、Promotion、Drain 与 Rollback
+
+K8s Overlay 创建独立的 `ratsnest-agent-service-canary` Service/Deployment 和 `ratsnest-temporal-worker-canary` Deployment，初始副本均为 0。Canary API 和 Worker 使用相同不可变镜像、Harness ID、Manifest digest，并把硬件 Workflow 发到独立 `ratsnest-hardware-cell-01-canary` task queue。NetworkPolicy 只允许控制面访问 Canary API 的 8080/9090。Deployment 保留 10 个 ReplicaSet revision。
+
+三个 PowerShell 脚本分工如下：
+
+1. `deploy_harness_canary.ps1` 只接受 `repository@sha256:<digest>`，同时 patch API/Worker 身份并各扩到 1；任一 rollout 失败则两者缩回 0。
+2. `promote_harness_canary.ps1` 要求数据库路由已临时切到 100% Canary，即新 Run 已从 stable drain；它从就绪 Canary 读取同一镜像/版本/Manifest，再 patch stable API/Worker。部分失败会对已改 Deployment 执行 `rollout undo`。成功后 Canary 保持运行，直到其 task queue 没有在途 Workflow 才能缩容。
+3. `rollback_harness.ps1` 要求调用者先显式确认数据库流量已 drain，可回滚 stable 或 Canary 的 API/Worker Deployment，并等待 rollout 完成。K8s revision 回退后，数据库 stable 指针必须通过 Java CAS API 使用 V10 记录的唯一 `targetVersionId` 对齐；脚本不越权直写 PostgreSQL，也不能选择任意历史 Harness。
+
+正确 Promotion 顺序是：候选 Eval/人审通过 → 注册/批准 HarnessVersion → 部署隔离 Canary → 配置小比例并观察 → 暂时 100% Canary 以 drain stable 新任务 → patch stable K8s → 验证 stable → Java 原子 promote，并由 V10 记录 attested 前任 stable → 停止新 Canary Run → drain Canary Workflow → 缩容 Canary。回滚时必须先停止 active Canary 并 drain 新流量，再把 Workload 回到同一前任版本，最后用 CAS 和精确 `targetVersionId` 恢复数据库 stable；成功后回滚目标被清空。只执行 `kubectl rollout undo` 会造成 Java 持久化版本与实际 Pod 不一致，属于失败而不是成功回滚。
+
+K8s revision 只覆盖 Workload template。它不会回滚 PostgreSQL schema、Temporal Event History、Kafka 事件、S3 Artifact 或已经固定版本的 Run。stable queue 上的长期 Workflow 还必须保持 replay compatibility；改变 Workflow command history 的版本要使用 Temporal Worker Versioning/Patching 或 drain，不能指望 Kubernetes rollback 修复 nondeterminism。
+
+### 28.10 Flyway V9–V10 与 expand/migrate/contract
+
+V9 建立 Harness Evolution 的主体数据库契约：
+
+- 建立平台级 `harness_versions` 与单行/少量 rollout 配置 `harness_rollouts`；它们不做 tenant RLS，而是只通过平台发布 API 管理；
+- 插入明确标记、不可伪装成已证明版本的 `legacy-baseline`，使升级前 Run 能被审计；
+- 给 `runs` 增加非空 Harness ID、Manifest digest 和 channel，回填 legacy，并用外键和 trigger 保证身份不可变；
+- 建立 tenant-scoped `evolution_observations/candidates/trials`，为 observation 去重、候选聚合、Trial attempt 和 suite digest 建约束/索引，并全部 `ENABLE/FORCE RLS`；
+- 只给 `ratsnest_app` 必需的 SELECT/INSERT/受限 UPDATE 权限，migration owner 与运行账号分离。
+
+V10 以向后兼容的 nullable 列为 `harness_rollouts` 增加 `previous_stable_version_id`、外键和“不得等于当前 stable”的约束。Promotion 只记录经过 attestation 的直接前任；Rollback 只能恢复这个前任且使用后清空，因此支持真实但有界的一级 stable 回滚，同时拒绝任意历史版本选择。若前任是未 attested 的 `legacy-baseline`，不会生成可用回滚目标。
+
+生产清单刻意关闭业务 Pod 内 Flyway，让独立 `ratsnest-flyway-migrate` Job 使用与候选 Java 相同的不可变镜像运行 `FlywayMigrationMain`。凭据来自专门的 `ratsnest-flyway-secrets`，而不是 Runtime `envFrom` Secret；Job 有一次重试上限、10 分钟 active deadline 和独立资源限制。发布证据必须保存 `flyway_schema_history` 的 version、description、checksum、installed_on 和 success。
+
+数据库发布遵循 expand/migrate/contract：先发布向后兼容的新增列/表/索引；再让新旧应用共存并迁移/核对数据；最后在另一个经过审查的版本删除旧结构。已进入共享环境的 V9/V10 文件不可修改，checksum 冲突禁止自动 `repair`，只能新增 V11+ forward-fix。Deployment rollback 不会执行 Flyway down migration；破坏性数据库问题需要兼容 forward-fix，必要时从已演练备份恢复。当前没有在真实 Kubernetes/PostgreSQL 集群运行 V9/V10 Job、失败恢复或旧新版本并行验证，因此不能宣称数据库升级/回滚已完成生产演练。
+
+### 28.11 状态所有权与一致性边界
+
+| 状态 | 权威来源 | 不应由谁覆盖 |
+|---|---|---|
+| 源码与构建身份 | Git commit + Harness Manifest + OCI digest | LLM 叙述、Pod tag |
+| Run 业务状态和固定 Harness 身份 | Java + PostgreSQL `runs` | 浏览器、Python 临时内存、rollout 百分比变更 |
+| Agent 当前执行/checkpoint | Python Runtime/LangGraph checkpoint | Java 根据 SSE 文本猜测 |
+| 硬件和演进耐久流程历史 | Temporal Event History | K8s Deployment revision |
+| Observation/Candidate/Trial | PostgreSQL V9 表及 RLS/CAS | raw prompt、跨租户聚合脚本 |
+| stable/canary 逻辑指针 | Java `harness_rollouts` | `kubectl` 或客户端请求体 |
+| 实际运行的代码 | K8s Deployment + OCI digest + Pod annotations | 数据库指针单独宣称 |
+| Schema 版本 | Flyway schema history | Deployment rollback |
+| 产物真值 | Artifact Manifest、对象 hash、ERC/DRC/Reviewer 证据 | Supervisor Markdown 总结 |
+
+生产对账必须同时比较数据库 Run pin、Runtime 报告身份、Temporal input/task queue、Pod 镜像 digest 和 Artifact Manifest；任何一处不一致都 fail closed 并标为执行/发布故障。`event_seq` 仍用于 Java/Python 流式事件单调对账，但它不能替代 Harness identity。
+
+### 28.12 当前没有宣称完成的事项
+
+本阶段**没有**执行或证明以下内容：
+
+- 没有在本机完成新增 Java 源码的一次干净 Java 21 Maven `verify`；该门由 GitHub CI 待验证，旧 `target` 不能作为证据；
+- 没有启动完整 Docker Compose，也没有运行真实 Kubernetes Metrics API/HPA、Canary 分流、Promotion、Rollback 或 Flyway Job；
+- 没有调用真实 LLM、KiCad、Freerouting，也没有用本阶段 Eval 证明任一板卡 release-ready；
+- 没有验证真实 OIDC 平台管理员 token 对 Harness release API 的授权矩阵；
+- 没有把 Java Candidate/Trial API 与 Temporal Evolution Workflow、报告对象存储和状态 transition 连成闭环；
+- 没有部署**生产 K8s** Evolution Worker，也没有 human gate SLA/超时治理；Compose 只有默认关闭的本地开发 worker；
+- 没有为 Canary 定义并自动采集错误率、blocked rate、P95/P99、token、成本、artifact truth regression 等 promotion SLO，也没有自动 rollback controller；
+- 没有在真实 K8s 验证已经注入的 gRPC Canary target、NetworkPolicy、HTTP/2 和 fail-closed 行为；
+- Python 执行入口的 Java Run pin/Pod Harness identity 强校验已有源码和窄测试，但没有在真实 stable/canary Pod 与恢复场景做集成演练；
+- 没有把 sealed Eval 放入独立凭据域，也没有用容器级 sandbox 阻断直接网络/宿主权限；
+- 没有做 Manifest 密码学签名、SBOM/provenance 验证、跨区域灾备和 RPO/RTO 演练。
+
+这些不是对架构价值的否定，而是验收边界。当前最小闭环顺序应是：先让 CI 的 Java/Python/前端/基础设施门全部绿色；再补 Java→Temporal Trial 写入、signal、报告持久化和生产 K8s Evolution Worker；最后在测试集群用零 LLM/零 EDA 的确定性 Run 演练身份错配、Flyway、HTTP/gRPC Canary、重启、drain 和 rollback，之后才安排一次受预算约束的真实 EDA 里程碑。
+
+### 28.13 Harness Evolution 面试深挖题（Q101–Q128）
+
+#### Q101：AHE 与 Harness Evolution 的根本区别是什么？
+
+**简答：**AHE 修当前 Run，Evolution 修未来版本；前者受任务预算约束，后者受 Eval、审批、Canary 和回滚约束。**具体实现：**Runtime 发 `ahe_event`，Java 只持久化隐私安全 Observation；重复 gap 才生成 Candidate，Sandbox 结果最多到 `approved_for_external_review`。**继续追问：**为什么不能让 AHE 直接改源码并继续？**答案：**同一进程自改会破坏版本、审计和可重放性，也会让一个客户输入影响其他租户；应让当前 Run 使用固定版本完成或带问题交付，把通用缺陷转入离线发布流程。
+
+#### Q102：Increment 2 的 Eval 为什么必须早于 Optimizer？
+
+**简答：**没有预先固定的裁判，Optimizer 会优化叙述而不是工程结果。**具体实现：**case manifest 固定输入引用、Profile digest、不变量、grader 和预算；suite index 保存每个 case SHA-256 与总 digest。**继续追问：**先让模型产补丁再补测试不行吗？**答案：**模型可能围绕自己的实现定义“正确”，形成目标泄漏；至少缺陷复现、release truth 和 sealed holdout 必须独立于候选生成。
+
+#### Q103：为什么 candidate 必须至少改善一个 case，而且不能有任何回退？
+
+**简答：**它阻止无收益发布和“修一个、坏一个”。**具体实现：**`compare_reports` 比较相同 case ID 的 baseline/candidate，要求 `improved` 非空、`regressed` 为空、candidate 全绿且成本门通过。**继续追问：**baseline 已全绿时怎么办？**答案：**先为新发现缺陷增加一个能在 baseline 失败的回归 case，或未来引入连续质量指标；不能删除 improvement gate 来给无证据改动放行。
+
+#### Q104：为什么不用 LLM-as-a-Judge 作为主要 grader？
+
+**简答：**发布真值、文件存在、状态顺序和预算都可确定性计算，不应交给概率模型。**具体实现：**七类 grader 读取 `RunEvidence`，artifact 必须同时有 exists、valid、sha256，release-ready 必须执行完成、无 blocker、Reviewer passed。**继续追问：**LLM Judge 完全没用吗？**答案：**可用于主观可读性或候选分析，但其输出只能是辅助信号，不能覆盖确定性安全门。
+
+#### Q105：sealed Eval 如何防止模型“背答案”？
+
+**简答：**不把隐藏 case 内容放进 Optimizer 上下文，并禁止修改其文件。**具体实现：**`PublicEvalSummary` 没有 `inputRef`；`evals/sealed/**` 同时被 optimizer path check 和治理 denylist 拒绝。**继续追问：**这算真正保密吗？**答案：**还不算；文件仍在同一仓库，受信进程可能读取。生产应由独立 Eval 服务持有 sealed 数据，只返回签名汇总。
+
+#### Q106：Observation 如何避免泄漏客户 prompt 和器件资料？
+
+**简答：**只保存受限枚举/安全 token 和 HMAC 指纹，不保存 raw message/evidence。**具体实现：**scope、project、evidence 使用至少 32-byte secret 做 domain-separated HMAC；不安全 failure signature 也哈希。**继续追问：**为什么不是普通 SHA-256？**答案：**低熵租户、项目或错误值可以被字典反推；带密钥 HMAC 降低离线枚举风险，并用 domain 分隔避免不同字段互相关联。
+
+#### Q107：为什么要求至少两个项目才 eligible？
+
+**简答：**一次失败可能是板卡特例、用户硬约束或环境抖动，不足以证明 Harness 通用缺陷。**具体实现：**Collector 对不同 `project_fingerprint` 计数，两个及以上未解决项目才置 `eligible`。**继续追问：**是否会跨租户聚合？**答案：**当前不会；V9 主键、查询和 RLS 都以 tenant 为边界，这是同租户跨项目证据。
+
+#### Q108：一个 gap 后来解决了，Candidate 怎么办？
+
+**简答：**后续 resolved observation 会覆盖该项目较早的 gap；全部活跃 gap 消失时候选变 stale。**具体实现：**SQL `not exists` 查找同版本/签名/项目中更晚的 `capability_gap_resolved`。**继续追问：**为什么只自动 stale observed/eligible？**答案：**进入 evaluating 之后已有人工/评测流程，Collector 不能越权覆盖其审计状态，应由治理流程显式取消或拒绝。
+
+#### Q109：Harness Manifest 解决了什么问题？
+
+**简答：**它把“哪个 Agent 版本”从模糊 tag 变成源码、策略、契约、工具链和镜像的内容身份。**具体实现：**脚本分别计算 tree/bundle/contract/policy digest，Release 模式要求 clean Git 和 OCI digest。**继续追问：**当前是否等于供应链证明？**答案：**不等于；尚无签名、SBOM、透明日志和 Java 侧对象内容复算，`attested` 目前是结构证明。
+
+#### Q110：为什么 Run 创建后不能切换 Harness？
+
+**简答：**否则同一次输出无法解释、重放或审计。**具体实现：**Run 表保存三元组，外键绑定 version+manifest，trigger 拒绝更新；Revision 继承父 Run。**继续追问：**Canary 回滚时在途 Run 怎么办？**答案：**它仍属于旧版本；应保留能消费该版本 task queue 的 Worker 或执行兼容 drain，不能改数据库把它伪装成新版本。
+
+#### Q111：Canary 为什么用 HMAC 稳定分桶？
+
+**简答：**保证重试确定性，同时防客户端操控 bucket。**具体实现：**服务端 secret 对 tenant/project/Idempotency-Key 做 HMAC-SHA256，再 modulo 100。**继续追问：**直接 `hashCode()%100` 有什么问题？**答案：**跨实现稳定性差、可能为负且可被用户预测/构造；HMAC 提供稳定、不可预计算的服务端策略。
+
+#### Q112：为什么不允许浏览器传 `harnessChannel=canary`？
+
+**简答：**发布策略属于平台控制面，不是租户输入。**具体实现：**RunService 在服务器读取 rollout 并生成 `runtime_config`；Gateway 只信任该固定配置。**继续追问：**内部测试怎样指定 Canary？**答案：**使用平台管理员 API 配置受控百分比或专门 Eval rollout/租户，不把后门字段暴露给普通 Run API。
+
+#### Q113：HTTP 和 gRPC 双 endpoint 如何保证选择一致？
+
+**简答：**两种 Gateway 都从同一 `runtime_config.harness_version.channel` 选择 stable/canary。**具体实现：**HTTP 选 base URI，gRPC 选 `ManagedChannel`；Canary endpoint 缺失时返回 503，K8s base 已注入两种 Canary target 并有静态门。**继续追问：**当前 K8s 是否两条都完成？**答案：**代码和清单配置已闭环，但尚未在真实集群验证 DNS、NetworkPolicy、HTTP/2、分流和错配拒绝，所以不能说生产演练完成。
+
+#### Q114：Candidate 状态机和 HarnessVersion 状态机为什么分开？
+
+**简答：**Candidate 是问题/补丁审查，HarnessVersion 是可部署制品，两者生命周期和权限不同。**具体实现：**Candidate 为 observed→…→promoted；Harness 为 CANDIDATE→APPROVED→CANARY→STABLE。**继续追问：**当前两者已自动绑定吗？**答案：**没有；这正是待补的 Java Trial/Temporal/制品注册闭环，现阶段必须人工核对 candidate、patch、CI 和 manifest。
+
+#### Q115：Sandbox 怎样防路径穿越和软链接逃逸？
+
+**简答：**在计划、Bundle 和实际落盘三层重复校验。**具体实现：**拒绝绝对路径/盘符/`..`/保留名，`resolve().relative_to(root)` 检查边界，并逐段拒绝 symlink/junction。**继续追问：**为什么写前还要再检查？**答案：**计划校验到落盘之间文件系统可能变化；实际目的路径和每级父目录必须在写入时再次验证。
+
+#### Q116：为什么选择完整文件 Patch，而不是让模型输出任意 unified diff？
+
+**简答：**完整文件更容易做 schema、hash、大小和原子替换校验。**具体实现：**replace 带旧 SHA-256，新内容带 SHA-256，Bundle 与 Plan 路径/操作必须一一对应。**继续追问：**代价是什么？**答案：**token 较多且大文件不适用，所以 v1 限制 64 KiB/文件和低风险小文件；以后可增加经过严格解析的结构化 AST patch，而不是开放 shell patch。
+
+#### Q117：为什么模型不能决定运行哪些测试命令？
+
+**简答：**“测试命令”本身就是任意代码执行面。**具体实现：**模型只给文件内容，Activity 固定选择代码注册的 `python-compile/evolution-core`，`subprocess` 使用 `shell=False`、超时和输出上限。**继续追问：**这已经是安全沙箱了吗？**答案：**不是；仍需容器级权限、网络、PID、CPU、内存和文件系统隔离，当前只是受控 worktree executor。
+
+#### Q118：Temporal 在 Evolution 里解决什么，LangGraph 为什么不能替代？
+
+**简答：**Temporal 负责跨分钟/小时等待、Activity retry、worker 重启恢复和人审信号；LangGraph 更适合模型角色与状态推理。**具体实现：**独立 Workflow 调两个 Activity，持久等待 approve/reject/cancel，query 返回 progress。**继续追问：**为什么最大 Activity attempts 只有 2？**答案：**策略错误和 Eval 回归是确定性失败，重试无益；少量重试只吸收瞬时 worker/IO 故障，避免模型与测试成本乘法爆炸。
+
+#### Q119：为什么人工批准后仍然不自动 merge/deploy？
+
+**简答：**Workflow 的批准只表示“允许外部审查”，不代表源码、供应链和生产发布全通过。**具体实现：**所有返回中 `automatic_merge/push/deploy=false`，下一步仍需代码审查、CI、Manifest 注册和 Canary。**继续追问：**那“自进化”是不是名不副实？**答案：**它自动发现、归因、提出候选和产生回归证据；把生产权限保留给人和发布系统，才是企业级受治理进化。
+
+#### Q120：V9 为什么给历史 Run 填 `legacy-baseline`？
+
+**简答：**升级时不能凭空为旧 Run 伪造 commit/image 证据，又必须满足新列非空和可审计。**具体实现：**V9 插入零 digest、`attested=false` 的明确 legacy 版本，再回填旧 Run。**继续追问：**它能被 Canary 发布吗？**答案：**不能作为新候选注册或进入需要 attested 的 rollout；它只承担兼容和历史标记。
+
+#### Q121：为什么 Flyway 必须独立 Job，而不是每个 Java Pod 启动时 migrate？
+
+**简答：**多副本应用不应同时持有 schema-owner 凭据和争抢发布时序。**具体实现：**业务 Pod `spring.flyway.enabled=false`；独立 Job 使用同一候选镜像、专用 `ratsnest-flyway-secrets` 和 `FlywayMigrationMain`。**继续追问：**Flyway 自带锁，为什么还不够？**答案：**锁能避免同时写，不解决最小权限、迁移失败阻塞所有 Pod、日志证据和“先迁移还是先接流量”的发布编排。
+
+#### Q122：Kubernetes rollback 能否回滚 V9？
+
+**简答：**不能，ReplicaSet 只保存 Pod template。**具体实现：**Runbook 要求 expand/migrate/contract，checksum 失败禁止 repair，数据库问题用 V10+ forward-fix。**继续追问：**什么情况下从备份恢复？**答案：**只有经过演练、能满足 RPO/RTO 且 forward-fix 无法安全修复的数据破坏；恢复也要与 Kafka、Temporal、S3 的时间点一致，不能只恢复一库。
+
+#### Q123：Canary Worker 为什么要独立 Temporal task queue？
+
+**简答：**防止 stable Worker 随机领取 candidate 的 Activity，反之亦然。**具体实现：**Canary 使用 `ratsnest-hardware-cell-01-canary`，stable 使用原队列。**继续追问：**Promotion 后为什么不能立刻缩掉 Canary？**答案：**队列上可能仍有在途 Workflow/Activity；必须先停止新路由并 drain，否则任务会长期无人消费。
+
+#### Q124：为什么 Kubernetes Ready 不等于 Candidate 可提升？
+
+**简答：**Ready 只说明进程/端口健康，不说明意图、产物、恢复、成本和安全无回归。**具体实现：**提升证据还应包含 Eval comparison、人工审批、真实 Run 指标、镜像/Manifest 对齐和 Flyway history。**继续追问：**当前自动 promotion SLO 有吗？**答案：**没有；错误率、blocked rate、P95/P99、token 和 artifact truth 的阈值仍需实现，当前只能人工执行手册。
+
+#### Q125：为什么 Candidate transition 使用 CAS？
+
+**简答：**避免两个管理员基于旧页面互相覆盖审批/拒绝。**具体实现：**请求带 `expectedVersion`，SQL 同时匹配 row_version 和 current status，成功后 version+1；冲突返回 409。**继续追问：**为什么不用 Redis 分布式锁？**答案：**这是单行短事务，PostgreSQL CAS 更可审计、无租约失效问题；Redis 锁会增加不必要的第二真值源。
+
+#### Q126：如何解释 Evolution 的状态所有权？
+
+**简答：**Java 管发布和 Run，Python 管候选执行，Temporal 管耐久历史，K8s 管实际进程，Flyway 管 schema。**具体实现：**数据库 rollout 选择必须与 Pod digest、Temporal queue 和 Run pin 对账。**继续追问：**出现不一致听谁的？**答案：**不能挑一个“看起来对”的继续；停止新流量，保留证据，按权威边界修复并 fail closed。
+
+#### Q127：当前 Evolution 最大的工程缺口是什么？
+
+**简答：**不是缺 Prompt，而是控制面连接和真实环境证据。**具体实现：**Python Runtime pin 与 gRPC Canary 配置已补齐；Java 仍未写 Trial/启动 Temporal/回写 report，生产 K8s Evolution Worker 和真实 K8s/Flyway/LLM/EDA 仍未跑。**继续追问：**下一步先补哪个？**答案：**先让 CI 绿色并补 Trial→Workflow→report 的幂等闭环，然后用确定性轻量 Run 演练身份错配、migration、HTTP/gRPC Canary 和 rollback，最后才消耗 LLM/EDA 预算。
+
+#### Q128：面试时能否说“系统实现了 Harness 自进化”？
+
+**简答：**应说“实现了受治理的 Harness Evolution 基础闭环和安全执行原语”，并主动说明尚未生产演练的连接项。**具体实现：**能展示 Observation 聚合、sealed Eval、Patch contract、detached sandbox、Temporal 人审、版本分桶和 K8s rollback 的源码证据。**继续追问：**这样会不会显得不够完成？**答案：**恰恰相反，明确区分已实现、已测试、已部署和已生产验证，是企业工程成熟度；把骨架夸成线上自改源码才会在深挖时失去可信度。

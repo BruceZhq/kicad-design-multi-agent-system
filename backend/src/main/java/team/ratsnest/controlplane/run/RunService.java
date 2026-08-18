@@ -9,6 +9,8 @@ import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.Flow;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -23,6 +25,7 @@ import team.ratsnest.controlplane.agentgateway.AgentRuntimeGateway.EventSubscrip
 import team.ratsnest.controlplane.agentgateway.AgentRuntimeGateway.HistoryQuery;
 import team.ratsnest.controlplane.agentgateway.AgentRuntimeGateway.RunControl;
 import team.ratsnest.controlplane.agentgateway.AgentRuntimeGateway.RunReference;
+import team.ratsnest.controlplane.agentgateway.AgentRuntimeGateway.ResumeRunCommand;
 import team.ratsnest.controlplane.agentgateway.AgentRuntimeGateway.RunState;
 import team.ratsnest.controlplane.agentgateway.AgentRuntimeGateway.RuntimeEvent;
 import team.ratsnest.controlplane.agentgateway.AgentRuntimeGateway.RuntimeIdentity;
@@ -34,6 +37,11 @@ import team.ratsnest.controlplane.agentgateway.InternalTaskSigner;
 import team.ratsnest.controlplane.artifact.ArtifactManifest;
 import team.ratsnest.controlplane.artifact.ArtifactManifestParser;
 import team.ratsnest.controlplane.artifact.ArtifactRepository;
+import team.ratsnest.controlplane.evolution.EvolutionCollector;
+import team.ratsnest.controlplane.harness.HarnessReleaseRouter;
+import team.ratsnest.controlplane.harness.HarnessReleaseRouter.HarnessSelection;
+import team.ratsnest.controlplane.harness.HarnessVersion;
+import team.ratsnest.controlplane.harness.HarnessVersionService;
 import team.ratsnest.controlplane.identity.AuthenticatedActor;
 import team.ratsnest.controlplane.project.ProjectService;
 import team.ratsnest.controlplane.shared.web.ApiException;
@@ -45,14 +53,20 @@ import tools.jackson.databind.ObjectMapper;
 @Service
 public class RunService {
 
+    private static final Logger logger = LoggerFactory.getLogger(RunService.class);
+
     private final TransactionTemplate transactions;
     private final TenantAccess tenantAccess;
     private final TenantContext tenantContext;
     private final ProjectService projects;
     private final RunRepository runs;
+    private final RunInteractionRepository interactions;
     private final RunOutboxRepository outbox;
     private final ArtifactRepository artifacts;
     private final ArtifactManifestParser artifactManifests;
+    private final EvolutionCollector evolutionCollector;
+    private final HarnessVersionService harnessVersions;
+    private final HarnessReleaseRouter harnessReleaseRouter;
     private final AgentRuntimeGateway runtime;
     private final InternalTaskSigner signer;
     private final ObjectMapper objectMapper;
@@ -65,9 +79,13 @@ public class RunService {
             TenantContext tenantContext,
             ProjectService projects,
             RunRepository runs,
+            RunInteractionRepository interactions,
             RunOutboxRepository outbox,
             ArtifactRepository artifacts,
             ArtifactManifestParser artifactManifests,
+            EvolutionCollector evolutionCollector,
+            HarnessVersionService harnessVersions,
+            HarnessReleaseRouter harnessReleaseRouter,
             AgentRuntimeGateway runtime,
             InternalTaskSigner signer,
             ObjectMapper objectMapper,
@@ -78,9 +96,13 @@ public class RunService {
         this.tenantContext = tenantContext;
         this.projects = projects;
         this.runs = runs;
+        this.interactions = interactions;
         this.outbox = outbox;
         this.artifacts = artifacts;
         this.artifactManifests = artifactManifests;
+        this.evolutionCollector = evolutionCollector;
+        this.harnessVersions = harnessVersions;
+        this.harnessReleaseRouter = harnessReleaseRouter;
         this.runtime = runtime;
         this.signer = signer;
         this.objectMapper = objectMapper;
@@ -108,7 +130,9 @@ public class RunService {
                 projectId,
                 request.capabilityProfile(),
                 actor);
-        Map<String, Object> config = runtimeConfig(request.teamMembers(), profile);
+        HarnessSelection harness = harnessReleaseRouter.route(
+                tenantId, projectId, idempotencyKey);
+        Map<String, Object> config = runtimeConfig(request.teamMembers(), profile, harness);
         String fingerprint = fingerprint(
                 tenantId,
                 projectId,
@@ -129,6 +153,7 @@ public class RunService {
                     request,
                     config,
                     profile,
+                    harness,
                     fingerprint,
                     actor));
         } catch (DataIntegrityViolationException exception) {
@@ -161,7 +186,7 @@ public class RunService {
 
     public Run get(UUID tenantId, UUID runId, AuthenticatedActor actor) {
         Run run = requireRun(tenantId, runId, actor);
-        if (run.state() != RunState.QUEUED && run.state() != RunState.RUNNING) {
+        if (terminal(run.state())) {
             synchronizeTerminalResult(run);
             return requireRun(tenantId, runId, actor);
         }
@@ -228,6 +253,60 @@ public class RunService {
             updateFromRuntime(run, cancelled);
             return requireRun(tenantId, runId, actor);
         } catch (AgentRuntimeException exception) {
+            throw runtimeFailure(exception);
+        }
+    }
+
+    public Run respond(
+            UUID tenantId,
+            UUID runId,
+            String interactionId,
+            String idempotencyKey,
+            String answer,
+            long stateVersion,
+            AuthenticatedActor actor) {
+        InteractionResponse response = transactions.execute(status -> beginInteractionResponse(
+                tenantId,
+                runId,
+                interactionId,
+                idempotencyKey,
+                answer,
+                stateVersion,
+                actor));
+        if (response == null) {
+            throw notFound();
+        }
+        Run run = response.run();
+        RunInteraction interaction = response.interaction();
+        if (!response.dispatch() && interaction.status() == RunInteraction.Status.RESPONDED) {
+            return run;
+        }
+        try {
+            RuntimeRun resumed = runtime.resumeRun(new ResumeRunCommand(
+                    reference(run),
+                    interaction.interactionId(),
+                    interaction.responseRequestId().toString(),
+                    interaction.answer(),
+                    interaction.stateVersion(),
+                    run.model(),
+                    null,
+                    run.runtimeConfig()));
+            updateFromRuntime(run, resumed);
+            transactions.executeWithoutResult(status -> {
+                tenantContext.activate(tenantId);
+                RunInteraction current = interactions.findForUpdate(
+                                tenantId, runId, interactionId)
+                        .orElseThrow(this::notFound);
+                if (current.status() == RunInteraction.Status.RESPONDING
+                        && current.responseRequestId().equals(interaction.responseRequestId())) {
+                    interactions.markResponded(current);
+                    appendLifecycle(run, "run.interaction.responded", resumed.state(), null, null);
+                }
+            });
+            return requireRun(tenantId, runId, actor);
+        } catch (AgentRuntimeException exception) {
+            // RESPONDING is intentionally durable. Replaying the same
+            // Idempotency-Key retries the same runtime response_request_id.
             throw runtimeFailure(exception);
         }
     }
@@ -310,6 +389,7 @@ public class RunService {
             StartRequest request,
             Map<String, Object> config,
             CapabilityProfile profile,
+            HarnessSelection harness,
             String fingerprint,
             AuthenticatedActor actor) {
         RuntimeIdentity runtimeIdentity = requireProject(tenantId, projectId, actor, true);
@@ -335,6 +415,9 @@ public class RunService {
                 profile.id(),
                 profile.version(),
                 profile.digest(),
+                harness.version().harnessVersionId(),
+                harness.version().manifestDigest(),
+                harness.channel(),
                 runtimeIdentity.principalId(),
                 actor.issuer(),
                 actor.subject(),
@@ -352,6 +435,87 @@ public class RunService {
         runs.insert(created, actor);
         appendLifecycle(created, "run.queued", RunState.QUEUED, null, null);
         return new Creation(created, true);
+    }
+
+    private InteractionResponse beginInteractionResponse(
+            UUID tenantId,
+            UUID runId,
+            String interactionId,
+            String idempotencyKey,
+            String answer,
+            long stateVersion,
+            AuthenticatedActor actor) {
+        MembershipRole role = tenantAccess.requireMembership(tenantId, actor);
+        if (!role.canWriteProjects()) {
+            throw new ApiException(
+                    "RUN_INTERACTION_DENIED",
+                    HttpStatus.FORBIDDEN,
+                    "The organization role cannot respond to run interactions.");
+        }
+        Run run = runs.findForUpdate(tenantId, runId).orElseThrow(this::notFound);
+        projects.get(tenantId, run.projectId(), actor);
+        RunInteraction interaction = interactions.findForUpdate(tenantId, runId, interactionId)
+                .orElseThrow(() -> new ApiException(
+                        "INTERACTION_NOT_FOUND",
+                        HttpStatus.NOT_FOUND,
+                        "The requested run interaction was not found."));
+        if (Boolean.FALSE.equals(interaction.request().get("allowFreeText"))
+                && interaction.request().get("options") instanceof List<?> options
+                && !options.contains(answer)) {
+            throw new ApiException(
+                    "INTERACTION_ANSWER_INVALID",
+                    HttpStatus.BAD_REQUEST,
+                    "The answer must be one of the interaction options.");
+        }
+        String fingerprint = interactionFingerprint(interactionId, answer, stateVersion);
+        if (interaction.status() != RunInteraction.Status.PENDING) {
+            if (idempotencyKey.equals(interaction.responseIdempotencyKey())
+                    && fingerprint.equals(interaction.responseFingerprint())) {
+                return new InteractionResponse(
+                        run,
+                        interaction,
+                        interaction.status() == RunInteraction.Status.RESPONDING);
+            }
+            throw new ApiException(
+                    "INTERACTION_ALREADY_RESPONDED",
+                    HttpStatus.CONFLICT,
+                    "The interaction already has a different response.");
+        }
+        if (interaction.stateVersion() != stateVersion
+                || run.state() != RunState.WAITING_FOR_INPUT) {
+            throw new ApiException(
+                    "INTERACTION_STALE",
+                    HttpStatus.CONFLICT,
+                    "The interaction state version is no longer current.");
+        }
+        UUID responseRequestId = UUID.randomUUID();
+        if (!interactions.beginResponse(
+                interaction,
+                idempotencyKey,
+                fingerprint,
+                responseRequestId,
+                answer,
+                actor)) {
+            throw new ApiException(
+                    "INTERACTION_STALE",
+                    HttpStatus.CONFLICT,
+                    "The interaction was changed concurrently.");
+        }
+        return new InteractionResponse(
+                run,
+                new RunInteraction(
+                        interaction.tenantId(),
+                        interaction.interactionId(),
+                        interaction.runId(),
+                        interaction.kind(),
+                        interaction.stateVersion(),
+                        interaction.request(),
+                        RunInteraction.Status.RESPONDING,
+                        idempotencyKey,
+                        fingerprint,
+                        responseRequestId,
+                        answer),
+                true);
     }
 
     private Creation createOrGetRevision(
@@ -406,6 +570,9 @@ public class RunService {
                 parent.profileId(),
                 parent.profileVersion(),
                 parent.profileDigest(),
+                parent.harnessVersionId(),
+                parent.harnessManifestDigest(),
+                parent.harnessChannel(),
                 parent.runtimePrincipalId(),
                 actor.issuer(),
                 actor.subject(),
@@ -451,7 +618,9 @@ public class RunService {
                         request.teamMembers(),
                         existing.profileId(),
                         existing.profileVersion(),
-                        existing.profileDigest()));
+                        existing.profileDigest(),
+                        harnessVersions.get(existing.harnessVersionId()),
+                        existing.harnessChannel()));
         return matching(existing, replayFingerprint).run();
     }
 
@@ -543,7 +712,8 @@ public class RunService {
     private RunReference reference(Run run) {
         return new RunReference(
                 run.runId().toString(),
-                run.runtimeIdentity(signer));
+                run.runtimeIdentity(signer),
+                run.harnessChannel());
     }
 
     private RuntimeIdentity identity(UUID tenantId, UUID projectId, AuthenticatedActor actor) {
@@ -595,8 +765,8 @@ public class RunService {
             if (current == null) {
                 return;
             }
-            boolean stateAdvanced = stateRank(runtimeRun.state()) > stateRank(current.state());
-            if (runs.updateFromRuntime(run.tenantId(), run.runId(), runtimeRun) && stateAdvanced) {
+            boolean stateChanged = runtimeRun.state() != current.state();
+            if (runs.updateFromRuntime(run.tenantId(), run.runId(), runtimeRun) && stateChanged) {
                 appendLifecycle(
                         current,
                         "run." + runtimeRun.state().name().toLowerCase(java.util.Locale.ROOT),
@@ -635,7 +805,7 @@ public class RunService {
             tenantContext.activate(tenantId);
             return runs.find(tenantId, runId).orElse(null);
         });
-        if (run == null || terminal(run.state())) {
+        if (run == null || terminal(run.state()) || run.state() == RunState.WAITING_FOR_INPUT) {
             return false;
         }
         // StartRun is idempotent on the stable Java run ID. Calling it for every
@@ -658,8 +828,23 @@ public class RunService {
         if (event.eventId() == null || event.eventId() <= 0) {
             return;
         }
+        if (evolutionCollector.supports(event)) {
+            try {
+                // Evolution persistence is an independent transaction. A telemetry
+                // failure must never terminate the user-facing Agent event stream.
+                evolutionCollector.collect(run, event);
+            } catch (RuntimeException exception) {
+                logger.warn(
+                        "Evolution observation deferred runId={} eventSeq={} cause={}",
+                        run.runId(),
+                        event.eventId(),
+                        exception.getClass().getSimpleName());
+            }
+        }
         boolean artifactManifest = "artifact_manifest".equals(event.type());
-        if (!artifactManifest && (!outboxEnabled || !persistableEvent(event.type()))) {
+        boolean interactionRequest = "ag_ui".equals(event.type());
+        if (!artifactManifest && !interactionRequest
+                && (!outboxEnabled || !persistableEvent(event.type()))) {
             return;
         }
         transactions.executeWithoutResult(status -> {
@@ -671,6 +856,9 @@ public class RunService {
             if (artifactManifest) {
                 persistManifest(current, event.eventId(), event.data());
             }
+            if (interactionRequest) {
+                persistInteraction(current, event.data());
+            }
             if (outboxEnabled && persistableEvent(event.type())) {
                 outbox.appendSourceEvent(
                         run.tenantId(),
@@ -680,6 +868,39 @@ public class RunService {
                         runtimeEventPayload(event));
             }
         });
+    }
+
+    private void persistInteraction(Run run, Map<String, Object> event) {
+        if (!"CUSTOM".equals(event.get("type"))
+                || !"ratsnest.human-input-required.v1".equals(event.get("name"))
+                || !(event.get("value") instanceof Map<?, ?> raw)) {
+            return;
+        }
+        Map<String, Object> value = new LinkedHashMap<>();
+        raw.forEach((key, item) -> {
+            if (key instanceof String text) {
+                value.put(text, item);
+            }
+        });
+        String interactionId = stringValue(value.get("interactionId"));
+        String kind = stringValue(value.get("kind"));
+        String question = stringValue(value.get("question"));
+        String requestedBy = stringValue(value.get("requestedBy"));
+        Long stateVersion = positiveLong(value.get("stateVersion"));
+        if (interactionId == null || !interactionId.matches("[A-Za-z0-9._:-]{1,200}")
+                || !"clarification".equals(kind)
+                || question == null
+                || requestedBy == null
+                || !(value.get("options") instanceof List<?>)
+                || !(value.get("allowFreeText") instanceof Boolean)
+                || stateVersion == null) {
+            return;
+        }
+        boolean created = interactions.register(
+                run, interactionId, stateVersion, Map.copyOf(value));
+        if (created && runs.markWaitingForInput(run.tenantId(), run.runId())) {
+            appendLifecycle(run, "run.waiting_for_input", RunState.WAITING_FOR_INPUT, null, null);
+        }
     }
 
     private void persistRuntimeResult(Run run, RuntimeRun runtimeRun) {
@@ -750,6 +971,9 @@ public class RunService {
             payload.put("profileId", run.profileId());
             payload.put("profileVersion", run.profileVersion());
         }
+        payload.put("harnessVersionId", run.harnessVersionId());
+        payload.put("harnessManifestDigest", run.harnessManifestDigest());
+        payload.put("harnessChannel", run.harnessChannel());
         if (errorCode != null) {
             payload.put("errorCode", errorCode);
         }
@@ -761,6 +985,7 @@ public class RunService {
 
     private boolean persistableEvent(String type) {
         return "message".equals(type)
+                || "ag_ui".equals(type)
                 || "artifact_manifest".equals(type)
                 || "error".equals(type)
                 || terminalEvent(type);
@@ -770,25 +995,26 @@ public class RunService {
         return "done".equals(type) || terminalEvent(type);
     }
 
-    private int stateRank(RunState state) {
-        return switch (state) {
-            case QUEUED -> 0;
-            case RUNNING -> 1;
-            case COMPLETED, FAILED, CANCELLED, TIMED_OUT -> 2;
-        };
-    }
-
     private Map<String, Object> runtimeConfig(
             List<TeamMember> teamMembers,
-            CapabilityProfile profile) {
-        return runtimeConfig(teamMembers, profile.id(), profile.version(), profile.digest());
+            CapabilityProfile profile,
+            HarnessSelection harness) {
+        return runtimeConfig(
+                teamMembers,
+                profile.id(),
+                profile.version(),
+                profile.digest(),
+                harness.version(),
+                harness.channel());
     }
 
     private Map<String, Object> runtimeConfig(
             List<TeamMember> teamMembers,
             String profileId,
             String profileVersion,
-            String profileDigest) {
+            String profileDigest,
+            HarnessVersion harness,
+            String harnessChannel) {
         List<Map<String, Object>> members = teamMembers.stream()
                 .map(member -> Map.<String, Object>of(
                         "role_id", member.roleId(),
@@ -800,7 +1026,17 @@ public class RunService {
                 "capability_profile", Map.of(
                         "id", profileId,
                         "version", profileVersion,
-                        "digest", profileDigest));
+                        "digest", profileDigest),
+                "harness_version", Map.of(
+                        "id", harness.harnessVersionId(),
+                        "version", harness.version(),
+                        "manifest_digest", harness.manifestDigest(),
+                        "source_commit", harness.sourceCommit(),
+                        "source_tree_digest", harness.sourceTreeDigest(),
+                        "bundle_digest", harness.bundleDigest(),
+                        "contract_digest", harness.contractDigest(),
+                        "policy_digest", harness.policyDigest(),
+                        "channel", harnessChannel));
     }
 
     private String fingerprint(
@@ -838,6 +1074,31 @@ public class RunService {
         } catch (Exception exception) {
             throw new IllegalStateException("Unable to fingerprint run revision", exception);
         }
+    }
+
+    private String interactionFingerprint(String interactionId, String answer, long stateVersion) {
+        try {
+            return java.util.HexFormat.of().formatHex(
+                    MessageDigest.getInstance("SHA-256").digest(
+                            objectMapper.writeValueAsBytes(Map.of(
+                                    "interactionId", interactionId,
+                                    "answer", answer,
+                                    "stateVersion", stateVersion))));
+        } catch (Exception exception) {
+            throw new IllegalStateException("Unable to fingerprint interaction response", exception);
+        }
+    }
+
+    private String stringValue(Object value) {
+        return value instanceof String text && !text.isBlank() ? text : null;
+    }
+
+    private Long positiveLong(Object value) {
+        if (!(value instanceof Number number)) {
+            return null;
+        }
+        long result = number.longValue();
+        return result > 0 ? result : null;
     }
 
     private Object canonicalValue(Object value) {
@@ -897,6 +1158,9 @@ public class RunService {
     }
 
     public record ProfileSelector(String id, String version) {
+    }
+
+    private record InteractionResponse(Run run, RunInteraction interaction, boolean dispatch) {
     }
 
     public record TeamMember(String roleId, String name, String responsibility) {

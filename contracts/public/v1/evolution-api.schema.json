@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ratsnest.team/contracts/public/v1/evolution-api.schema.json",
+  "title": "Evolution governance API v1",
+  "$defs": {
+    "candidateStatus": {
+      "enum": [
+        "observed", "eligible", "evaluating", "awaiting_approval",
+        "approved", "canary", "promoted", "rejected", "rolled_back", "stale"
+      ]
+    },
+    "managementTransitionStatus": {
+      "enum": [
+        "eligible", "evaluating", "canary", "promoted",
+        "rejected", "rolled_back", "stale"
+      ]
+    },
+    "transitionRequest": {
+      "type": "object",
+      "required": ["expectedVersion", "targetStatus", "reason"],
+      "properties": {
+        "expectedVersion": { "type": "integer", "minimum": 1 },
+        "targetStatus": { "$ref": "#/$defs/managementTransitionStatus" },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S" }
+      },
+      "additionalProperties": false
+    },
+    "candidate": {
+      "type": "object",
+      "required": [
+        "candidateId", "baseHarnessVersionId", "baseManifestDigest",
+        "failureSignature", "step", "profileReferences", "observationIds",
+        "occurrenceCount", "projectCount", "riskTier", "changeKind",
+        "status", "rowVersion",
+        "createdAt", "updatedAt"
+      ],
+      "properties": {
+        "candidateId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "baseHarnessVersionId": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "baseManifestDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "failureSignature": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "step": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "checkName": { "type": ["string", "null"], "maxLength": 200 },
+        "category": { "type": ["string", "null"], "maxLength": 80 },
+        "requiredCapability": { "type": ["string", "null"], "maxLength": 160 },
+        "profileReferences": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1, "maxLength": 120 }
+        },
+        "observationIds": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "riskTier": { "enum": ["low", "medium", "high", "prohibited"] },
+        "changeKind": {
+          "enum": [
+            "unclassified", "prompt", "skill", "tool_description", "policy",
+            "router", "parser", "tool_adapter", "recovery_strategy",
+            "validator", "harness_code"
+          ]
+        },
+        "occurrenceCount": { "type": "integer", "minimum": 1 },
+        "projectCount": { "type": "integer", "minimum": 1 },
+        "status": { "$ref": "#/$defs/candidateStatus" },
+        "transitionReason": { "type": ["string", "null"], "maxLength": 2000 },
+        "rowVersion": { "type": "integer", "minimum": 1 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

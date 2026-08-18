@@ -46,7 +46,35 @@ export interface DisplayMessage extends ChatMessage {
 
 export type TerminalRunEvent = "completed" | "failed" | "cancelled" | "timed_out";
 export type DeliveryStatus = "execution_blocked" | "delivered_with_issues" | "release_ready";
-export type RunState = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED" | "TIMED_OUT";
+export type RunState = "QUEUED" | "RUNNING" | "WAITING_FOR_INPUT" | "COMPLETED" | "FAILED" | "CANCELLED" | "TIMED_OUT";
+
+export interface HumanDecisionOption {
+  key: string;
+  label: string;
+  basis: string;
+  freeText: boolean;
+}
+
+export interface HumanDecisionQuestion {
+  slot: string;
+  question: string;
+  kind: string;
+  recommendedKey: string;
+  citation: string;
+  options: HumanDecisionOption[];
+}
+
+export interface HumanInputRequest {
+  interactionId: string;
+  kind: "clarification";
+  question: string;
+  options: string[];
+  allowFreeText: boolean;
+  requestedBy: string;
+  stateVersion: number;
+  schemaVersion: string | null;
+  questions: HumanDecisionQuestion[];
+}
 
 export interface RunSummary {
   runId: string;
@@ -118,7 +146,7 @@ function uuid(value: unknown): value is string {
 }
 
 function runState(value: unknown): value is RunState {
-  return value === "QUEUED" || value === "RUNNING" || value === "COMPLETED" ||
+  return value === "QUEUED" || value === "RUNNING" || value === "WAITING_FOR_INPUT" || value === "COMPLETED" ||
     value === "FAILED" || value === "CANCELLED" || value === "TIMED_OUT";
 }
 
@@ -293,6 +321,143 @@ export function parseRunEvent(value: unknown): RunEvent | null {
     createdAt: item.createdAt,
     data: item.data as Record<string, unknown>,
   };
+}
+
+function objectOrJson(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value !== "string" || value.length > 100_000) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Extract the one supported HITL contract without claiming unrelated CUSTOM events. */
+export function parseHumanInputRequest(event: RunEvent): HumanInputRequest | null {
+  const queue: Array<{ value: unknown; depth: number }> = [{ value: event.data, depth: 0 }];
+  const seen = new Set<object>();
+  let agUiEvent: Record<string, unknown> | null = null;
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    const item = objectOrJson(current.value);
+    if (!item || seen.has(item)) continue;
+    seen.add(item);
+    if (item.type === "CUSTOM" && item.name === "ratsnest.human-input-required.v1") {
+      agUiEvent = item;
+      break;
+    }
+    if (current.depth >= 3) continue;
+    for (const key of ["agUi", "ag_ui", "content", "payload", "event"]) {
+      if (item[key] !== undefined) queue.push({ value: item[key], depth: current.depth + 1 });
+    }
+  }
+
+  const value = objectOrJson(agUiEvent?.value);
+  if (!value) return null;
+  const options = Array.isArray(value.options) && value.options.every(
+    (option) => typeof option === "string" && option.trim().length > 0 && option.length <= 500,
+  )
+    ? value.options.map((option) => String(option).trim())
+    : null;
+  const questions = parseHumanDecisionQuestions(value.questions);
+  if (
+    typeof value.interactionId !== "string" ||
+    !/^[A-Za-z0-9._:-]{1,200}$/.test(value.interactionId) ||
+    value.kind !== "clarification" ||
+    typeof value.question !== "string" ||
+    value.question.trim().length < 1 ||
+    value.question.length > 10_000 ||
+    options === null ||
+    options.length > 20 ||
+    questions === null ||
+    (questions.length > 0 && value.schemaVersion !== "ratsnest.decision-request.v1") ||
+    typeof value.allowFreeText !== "boolean" ||
+    typeof value.requestedBy !== "string" ||
+    value.requestedBy.trim().length < 1 ||
+    value.requestedBy.length > 100 ||
+    !Number.isSafeInteger(value.stateVersion) ||
+    Number(value.stateVersion) < 1 ||
+    (!value.allowFreeText && options.length === 0)
+  ) return null;
+  return {
+    interactionId: value.interactionId,
+    kind: "clarification",
+    question: value.question.trim(),
+    options,
+    allowFreeText: value.allowFreeText,
+    requestedBy: value.requestedBy.trim(),
+    stateVersion: Number(value.stateVersion),
+    schemaVersion: typeof value.schemaVersion === "string" ? value.schemaVersion : null,
+    questions,
+  };
+}
+
+function parseHumanDecisionQuestions(value: unknown): HumanDecisionQuestion[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length < 1 || value.length > 12) return null;
+  const questions: HumanDecisionQuestion[] = [];
+  const slots = new Set<string>();
+  for (const rawQuestion of value) {
+    const question = objectOrJson(rawQuestion);
+    if (!question ||
+      typeof question.slot !== "string" ||
+      !/^[a-z][a-z0-9_]{0,63}$/.test(question.slot) ||
+      slots.has(question.slot) ||
+      typeof question.question !== "string" ||
+      question.question.trim().length < 1 ||
+      question.question.length > 1_000 ||
+      typeof question.kind !== "string" ||
+      question.kind.length > 40 ||
+      typeof question.recommendedKey !== "string" ||
+      question.recommendedKey.length > 16 ||
+      typeof question.citation !== "string" ||
+      question.citation.length > 500 ||
+      !Array.isArray(question.options) ||
+      question.options.length < 2 ||
+      question.options.length > 6
+    ) return null;
+    const decisionOptions: HumanDecisionOption[] = [];
+    const keys = new Set<string>();
+    for (const rawOption of question.options) {
+      const option = objectOrJson(rawOption);
+      if (!option ||
+        typeof option.key !== "string" ||
+        !/^[A-Z][A-Z0-9_.+-]{0,15}$/.test(option.key) ||
+        keys.has(option.key) ||
+        typeof option.label !== "string" ||
+        option.label.trim().length < 1 ||
+        option.label.length > 500 ||
+        typeof option.basis !== "string" ||
+        option.basis.length > 500 ||
+        typeof option.freeText !== "boolean"
+      ) return null;
+      keys.add(option.key);
+      decisionOptions.push({
+        key: option.key,
+        label: option.label.trim(),
+        basis: option.basis.trim(),
+        freeText: option.freeText,
+      });
+    }
+    if (question.recommendedKey && !keys.has(question.recommendedKey)) return null;
+    slots.add(question.slot);
+    questions.push({
+      slot: question.slot,
+      question: question.question.trim(),
+      kind: question.kind,
+      recommendedKey: question.recommendedKey,
+      citation: question.citation.trim(),
+      options: decisionOptions,
+    });
+  }
+  return questions;
 }
 
 export function isTerminalRunEvent(value: string): value is TerminalRunEvent {

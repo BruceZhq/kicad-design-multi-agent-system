@@ -22,6 +22,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langgraph.types import interrupt
 from pydantic import BaseModel, ConfigDict, Field
 from ratsnestpro.eda import footprints, grounding
 from ratsnestpro.eda.local_library import (
@@ -35,6 +36,21 @@ from agents.ratsnestpro.artifact_publisher import (
     publish_artifact_manifest,
 )
 from agents.ratsnestpro.call_limits import await_with_deadline
+from agents.ratsnestpro.decision_engine import (
+    DECISION_REQUEST_SCHEMA,
+    apply_resolutions,
+    design_decisions,
+    intent_decisions,
+    merge_resolutions,
+    parse_resolutions,
+    public_questions,
+)
+from agents.ratsnestpro.decision_engine import (
+    from_state as decisions_from_state,
+)
+from agents.ratsnestpro.decision_engine import (
+    to_state as decisions_to_state,
+)
 from agents.ratsnestpro.ehe_memory import EheMemory
 from agents.ratsnestpro.hardware_state import (
     actual_artifacts as _actual_artifacts,
@@ -159,6 +175,10 @@ class RatsNestWorkflowState(MessagesState, total=False):
     capability_profile: dict[str, Any]
     capability_profile_error: str
     artifact_manifest: dict[str, Any]
+    human_interaction_version: int
+    open_decisions: list[dict[str, Any]]
+    resolved_decisions: list[dict[str, Any]]
+    resume_after_clarification: bool
 
 
 class _RatsNestRoleState(TypedDict, total=False):
@@ -193,6 +213,10 @@ class _RatsNestRoleState(TypedDict, total=False):
     capability_profile: dict[str, Any]
     capability_profile_error: str
     artifact_manifest: dict[str, Any]
+    human_interaction_version: int
+    open_decisions: list[dict[str, Any]]
+    resolved_decisions: list[dict[str, Any]]
+    resume_after_clarification: bool
 
 
 class _TeamMemberConfig(BaseModel):
@@ -517,7 +541,7 @@ async def _resolve_intent(
         prior_intent=prior_intent,
         has_active_context=has_active_context,
     )
-    needs_llm = decision.needs_clarification or (
+    needs_llm = (decision.needs_clarification and decision.confidence < 0.9) or (
         not decision.in_scope and decision.confidence < 0.9
     )
     if not needs_llm or configurable.get("intent_llm_enabled", True) is False:
@@ -1209,6 +1233,7 @@ async def initialize(
     config: RunnableConfig,
 ) -> dict[str, Any]:
     latest_request = _latest_requirement(state)
+    answered_clarification = bool(state.get("resume_after_clarification"))
     prior_requirement = str(state.get("requirement", "")).strip()
     prior_mode = str(state.get("workflow_mode", "")).strip()
     has_active_context = bool(
@@ -1227,14 +1252,26 @@ async def initialize(
             ),
             routing_prior_mode,
         )
+    routing_request = latest_request
+    if answered_clarification and "USER CLARIFICATION ANSWER:" in latest_request:
+        routing_request = (
+            "KiCad hardware task; confirmed answer:\n"
+            + latest_request.rsplit("USER CLARIFICATION ANSWER:", 1)[1].strip()
+        )
     _workflow_event("intent-router", "started")
     intent = await _resolve_intent(
-        latest_request,
+        routing_request,
         config,
         prior_intent=routing_prior_mode or None,
         has_active_context=has_active_context,
     )
-    if intent.context_relation in {"resume", "diagnose"} and prior_requirement:
+    if answered_clarification:
+        # The clarification node already combined the original question and
+        # human answer. Treat that resolved request as a clean routing input;
+        # otherwise generic "resume" language can silently discard the answer.
+        intent = intent.model_copy(update={"context_relation": "new"})
+        requirement = latest_request
+    elif intent.context_relation in {"resume", "diagnose"} and prior_requirement:
         requirement = prior_requirement
     elif intent.context_relation == "amend" and prior_requirement:
         requirement = f"{prior_requirement}\n\nUSER CHANGE REQUEST:\n{latest_request}"
@@ -1360,6 +1397,27 @@ async def initialize(
         ]
     else:
         message_updates = _history_prune_updates(state.get("messages", []))
+    if answered_clarification:
+        resolved_decisions = [
+            dict(item)
+            for item in state.get("resolved_decisions", [])
+            if isinstance(item, dict) and item.get("slot")
+        ]
+    elif intent.context_relation == "new":
+        resolved_decisions = []
+    else:
+        resolved_decisions = [
+            dict(item)
+            for item in state.get("resolved_decisions", [])
+            if isinstance(item, dict) and item.get("slot")
+        ]
+    settled_slots = frozenset(str(item["slot"]) for item in resolved_decisions)
+    open_decisions = []
+    if not capability_profile_error:
+        if intent.primary_intent == "clarify":
+            open_decisions = intent_decisions(intent.model_dump(mode="json"), requirement)
+        elif intent.primary_intent == "build":
+            open_decisions = design_decisions(requirement, settled=settled_slots)
     return {
         "messages": message_updates,
         "request_id": str(configurable.get("request_id", state.get("request_id", ""))),
@@ -1392,6 +1450,9 @@ async def initialize(
         ),
         "capability_profile": capability_profile,
         "capability_profile_error": capability_profile_error,
+        "open_decisions": decisions_to_state(open_decisions),
+        "resolved_decisions": resolved_decisions,
+        "resume_after_clarification": False,
         "trace": _compact_trace(
             [
                 *prior_trace,
@@ -1451,10 +1512,75 @@ async def intake_phase(
     state: RatsNestWorkflowState,
     config: RunnableConfig,
 ) -> dict[str, Any]:
-    """Return a useful boundary response without invoking hardware agents."""
+    """Answer boundary requests or pause a clarification on the checkpoint."""
 
     intent = state.get("intent", {})
     mode = state.get("workflow_mode", "clarify")
+    open_decisions = decisions_from_state(state.get("open_decisions"))
+    if open_decisions:
+        is_zh = bool(re.search(r"[\u3400-\u9fff]", str(state.get("requirement", ""))))
+        content = (
+            f"有 {len(open_decisions)} 项工程参数需要你确认。每项选择一个选项后，"
+            "我会从同一检查点继续执行。"
+            if is_zh
+            else (
+                f"{len(open_decisions)} engineering parameter(s) need confirmation. "
+                "Choose one option for each and the same run will resume."
+            )
+        )
+        questions = public_questions(open_decisions)
+        version = int(state.get("human_interaction_version", 0) or 0) + 1
+        interaction_id = hashlib.sha256(
+            (
+                f"{state.get('request_id', '')}\0{state.get('workspace_run_name', '')}"
+                f"\0{version}\0{json.dumps(questions, ensure_ascii=False, sort_keys=True)}"
+            ).encode()
+        ).hexdigest()[:32]
+        answer = interrupt(
+            {
+                "interactionId": interaction_id,
+                "kind": "clarification",
+                "question": content,
+                "options": [],
+                "allowFreeText": True,
+                "requestedBy": "supervisor",
+                "stateVersion": version,
+                "schemaVersion": DECISION_REQUEST_SCHEMA,
+                "questions": questions,
+            }
+        )
+        fresh_resolutions = parse_resolutions(str(answer), open_decisions)
+        resolved_decisions = merge_resolutions(
+            [
+                item
+                for item in state.get("resolved_decisions", [])
+                if isinstance(item, dict)
+            ],
+            fresh_resolutions,
+        )
+        clarified_request = apply_resolutions(
+            str(state.get("requirement") or state.get("latest_request") or ""),
+            fresh_resolutions,
+        )
+        return {
+            "messages": [HumanMessage(content=clarified_request)],
+            "latest_request": clarified_request,
+            "requirement": clarified_request,
+            "open_decisions": [],
+            "resolved_decisions": resolved_decisions,
+            "human_interaction_version": version,
+            "resume_after_clarification": True,
+            "trace": _append_trace(
+                state,
+                agent="Supervisor",
+                tool="structured_decision_gate",
+                status="answered",
+                evidence=(
+                    f"interaction_id={interaction_id}; "
+                    f"resolved_slots={','.join(item['slot'] for item in fresh_resolutions)}"
+                ),
+            ),
+        }
     if mode == "diagnose":
         hardware = state.get("hardware", {})
         completed = int(hardware.get("completed_steps", 0) or 0)
@@ -1490,12 +1616,58 @@ async def intake_phase(
             state.get("latest_request", "") or _latest_requirement(state),
             config,
         )
+    elif state.get("capability_profile_error"):
+        # Capability profiles are part of the signed, immutable run envelope.
+        # A text answer cannot safely mutate them in-place; the product UI must
+        # start a new run with the selected profile instead of entering a loop.
+        content = str(intent.get("clarification_question", "")).strip() or str(
+            state["capability_profile_error"]
+        )
     else:
         content = str(intent.get("clarification_question", "")).strip() or (
             "请说明要新建设计、审查已有 KiCad 工程、验证器件，还是查询硬件资料。"
         )
+        version = int(state.get("human_interaction_version", 0) or 0) + 1
+        interaction_id = hashlib.sha256(
+            (
+                f"{state.get('request_id', '')}\0{state.get('workspace_run_name', '')}"
+                f"\0{version}\0{content}"
+            ).encode()
+        ).hexdigest()[:32]
+        answer = interrupt(
+            {
+                "interactionId": interaction_id,
+                "kind": "clarification",
+                "question": content,
+                "options": [],
+                "allowFreeText": True,
+                "requestedBy": "supervisor",
+                "stateVersion": version,
+            }
+        )
+        answer_text = str(answer).strip()
+        if not answer_text:
+            raise ValueError("Clarification answer must not be empty.")
+        clarified_request = (
+            f"{state.get('latest_request', '').strip()}\n\n"
+            f"USER CLARIFICATION ANSWER:\n{answer_text}"
+        ).strip()
+        return {
+            "messages": [HumanMessage(content=clarified_request)],
+            "latest_request": clarified_request,
+            "human_interaction_version": version,
+            "resume_after_clarification": True,
+            "trace": _append_trace(
+                state,
+                agent="Intent Router",
+                tool="human_clarification",
+                status="answered",
+                evidence=f"interaction_id={interaction_id}",
+            ),
+        }
     return {
         "messages": [AIMessage(content=content)],
+        "resume_after_clarification": False,
         "trace": _append_trace(
             state,
             agent="Intent Router",
@@ -2817,12 +2989,59 @@ async def reviewer_phase(
         ),
         "model_type": (type(selected_model).__name__ if selected_model is not None else None),
     }
-    raw, result, _ = await _call_json_with_retry(
-        lambda: ratsnest_review_kicad_project(**args),
+    baseline_args = {
+        **args,
+        "llm_mode": "offline",
+        "model_name": None,
+        "model_type": None,
+    }
+    baseline_raw, baseline_result, _ = await _call_json_with_retry(
+        lambda: ratsnest_review_kicad_project(**baseline_args),
         phase="reviewer",
         tool="ratsnest_review_kicad_project",
-        attempts=2,
+        attempts=1,
     )
+    result = baseline_result
+    review_tool_messages = _tool_messages(
+        "ratsnest_review_kicad_project",
+        baseline_args,
+        baseline_raw,
+    )
+
+    # The optional LLM pass may enrich the advisory section, but it cannot
+    # erase or invalidate the deterministic report already published above.
+    baseline_report_path = Path(str(baseline_result.get("report_path", "")))
+    if baseline_report_path.is_file() and selected_model is not None:
+        advisory_raw, advisory_result, _ = await _call_json_with_retry(
+            lambda: ratsnest_review_kicad_project(**args),
+            phase="reviewer",
+            tool="ratsnest_review_kicad_project_advisory",
+            attempts=1,
+        )
+        review_tool_messages.extend(
+            _tool_messages(
+                "ratsnest_review_kicad_project_advisory",
+                args,
+                advisory_raw,
+            )
+        )
+        advisory_report_path = Path(str(advisory_result.get("report_path", "")))
+        if (
+            advisory_result.get("status") in {"ok", "blocked"}
+            and advisory_report_path.is_file()
+        ):
+            result = advisory_result
+        else:
+            result = dict(baseline_result)
+            result["advisory_review"] = {
+                "schema_version": 1,
+                "status": "unavailable",
+                "source": "deterministic",
+                "can_override_verdict": False,
+                "error": str(
+                    advisory_result.get("error", "advisory review did not complete")
+                ),
+            }
     report_path = Path(str(result.get("report_path", "")))
     report_exists = report_path.is_file()
     status = str(result.get("status", "error"))
@@ -2932,7 +3151,7 @@ async def reviewer_phase(
         f"Status: {status}; report_exists={report_exists}."
     )
     inner_messages = [
-        *_tool_messages("ratsnest_review_kicad_project", args, raw),
+        *review_tool_messages,
         *remediation_messages,
         AIMessage(content=summary),
     ]
@@ -3166,6 +3385,8 @@ _REVIEWER_NODE = "sub-agent-ratsnest-reviewer"
 
 
 def _after_initialize(state: RatsNestWorkflowState) -> str:
+    if state.get("open_decisions"):
+        return "intake_phase"
     if (
         state["workflow_mode"] == "build"
         and state.get("incremental_resume")
@@ -3187,6 +3408,12 @@ def _after_initialize(state: RatsNestWorkflowState) -> str:
         "clarify": "intake_phase",
         "unsupported": "intake_phase",
     }[state["workflow_mode"]]
+
+
+def _after_intake(state: RatsNestWorkflowState) -> str:
+    """Continue only when a checkpointed clarification has been answered."""
+
+    return _SUPERVISOR_NODE if state.get("resume_after_clarification") else END
 
 
 def _after_architect(state: RatsNestWorkflowState) -> str:
@@ -3297,7 +3524,7 @@ builder.add_conditional_edges(_SPECIALIST_NODE, _after_specialists)
 builder.add_conditional_edges(_PARTS_NODE, _after_parts)
 builder.add_conditional_edges(_HARDWARE_NODE, _after_hardware)
 builder.add_conditional_edges(_REVIEWER_NODE, _after_review)
-builder.add_edge("intake_phase", END)
+builder.add_conditional_edges("intake_phase", _after_intake)
 builder.add_edge("final_report", END)
 
 ratsnestpro_multi_agent = builder.compile(name="ratsnestpro-multi-agent")

@@ -1,4 +1,4 @@
-# RatsNest Enterprise Web
+# CircuitFoundry Web
 
 Next.js 16 / React 19 frontend for the Java RatsNest control plane. The browser talks only to same-origin Next.js route handlers; those handlers forward the authenticated OIDC access token to Java. They never create a `user_id` and never call the Python Agent Runtime directly.
 
@@ -60,10 +60,10 @@ source run, and the browser never receives an object-store key or permanent URL.
 ## Commands
 
 ```bash
-npm install
-npm run dev
+npm ci
 npm run typecheck
-npm test
+npm run build
+npm run dev
 ```
 
 ## Container image
@@ -72,13 +72,12 @@ Use the repository root as build context:
 
 ```bash
 docker build -f docker/Dockerfile.frontend -t ratsnest-web .
-docker run --rm -p 3000:3000 \
-  -e CONTROL_PLANE_URL=http://control-plane:8080 \
-  -e CONTROL_PLANE_ACCESS_TOKEN=local-signed-jwt \
-  ratsnest-web
 ```
 
-The image runs the Next.js standalone server as a non-root user.
+The image runs the Next.js standalone server as a non-root user. Do not invent a
+`CONTROL_PLANE_ACCESS_TOKEN`: Java accepts only a real OIDC/JWT credential. Use the
+root Compose OIDC profile for the runnable local product, or supply a token issued by
+the configured test issuer for an isolated BFF integration test.
 
 ## Visual system
 

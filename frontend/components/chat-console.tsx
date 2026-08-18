@@ -10,6 +10,7 @@ import {
   CapabilityProfileMetadata,
   ChatMessage,
   DisplayMessage,
+  HumanInputRequest,
   RunArtifact,
   RunEvent,
   RunSummary,
@@ -20,6 +21,7 @@ import {
   makeMessage,
   parseArtifactList,
   parseChatMessage,
+  parseHumanInputRequest,
   parseRunEvent,
   parseRunSummary,
 } from "@/types/chat";
@@ -40,12 +42,23 @@ interface ActiveRun {
   lastEventId: number;
 }
 
+interface InteractionState {
+  request: HumanInputRequest;
+  runId: string;
+  lastEventId: number;
+  idempotencyKey: string;
+  status: "waiting" | "submitting" | "submitted" | "error";
+  answer?: string;
+  error?: string;
+}
+
 interface WorkspaceContext {
   organization: { tenantId: string; name: string };
   project: { projectId: string; name: string };
 }
 
 class NonRetryableRequestError extends Error {}
+class HumanInputRequestedError extends Error {}
 
 type Channel = "design" | "evidence" | "review";
 type ModelLoadState = "waiting" | "loading" | "ready" | "error";
@@ -191,7 +204,8 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
   const [busy, setBusy] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [status, setStatus] = useState("正在连接服务…");
-  const [runState, setRunState] = useState<"idle" | "running" | TerminalRunEvent | "disconnected" | "rejected">("idle");
+  const [runState, setRunState] = useState<"idle" | "running" | "waiting_for_input" | TerminalRunEvent | "disconnected" | "rejected">("idle");
+  const [interaction, setInteraction] = useState<InteractionState | null>(null);
   const [latestRun, setLatestRun] = useState<RunSummary | null>(null);
   const [artifacts, setArtifacts] = useState<RunArtifact[]>([]);
   const [artifactLoading, setArtifactLoading] = useState(false);
@@ -406,19 +420,35 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     }
   }
 
-  function handleRunEvent(event: RunEvent) {
+  function handleRunEvent(event: RunEvent): HumanInputRequest | null {
+    const humanInput = parseHumanInputRequest(event);
+    if (humanInput) {
+      commitLive();
+      setInteraction((current) => current?.request.interactionId === humanInput.interactionId
+        ? { ...current, request: humanInput, runId: event.runId, lastEventId: event.eventId }
+        : {
+            request: humanInput,
+            runId: event.runId,
+            lastEventId: event.eventId,
+            idempotencyKey: newId(),
+            status: "waiting",
+          });
+      setRunState("waiting_for_input");
+      setStatus(`等待你回复 ${humanInput.requestedBy} 的澄清问题`);
+      return humanInput;
+    }
     const content = typeof event.data.content === "string" ? event.data.content : "";
     if (event.type === "token") {
       updateLive((message) => ({ ...message, content: message.content + content }));
-      return;
+      return null;
     }
     if (event.type === "reasoning") {
       updateLive((message) => ({ ...message, reasoning: `${message.reasoning ?? ""}${content}` }));
-      return;
+      return null;
     }
     if (event.type === "message") {
       const parsed = parseChatMessage(event.data.message);
-      if (!parsed) return;
+      if (!parsed) return null;
       const structured = displayMessage(parsed);
       if (structured.type === "ai") {
         const live = liveRef.current;
@@ -441,7 +471,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
           return [...items, structured];
         });
       }
-      return;
+      return null;
     }
     if (event.type === "error") {
       const detail = typeof event.data.error === "string" ? event.data.error : "智能体报告了执行错误";
@@ -451,11 +481,11 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
         content: message.content || `执行风险：${detail}`,
       }));
       setStatus(code ? `执行风险 · ${code}` : "智能体报告执行风险");
-      return;
+      return null;
     }
     if (event.type === "artifact_manifest") {
       void loadDelivery(event.runId);
-      return;
+      return null;
     }
     if (isTerminalRunEvent(event.type)) {
       setRunState(event.type);
@@ -473,6 +503,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
       }
       void loadDelivery(event.runId);
     }
+    return null;
   }
 
   async function submit(event?: FormEvent) {
@@ -487,7 +518,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
       setStatus(`\u9700\u6c42\u4e2d\u6307\u5b9a\u7684\u80fd\u529b\u8303\u56f4\u4e0d\u53ef\u7528\uff1a${requestedProfile}`);
       return;
     }
-    if (!message || busy || !workspaceReady || !workspace || !model || !selectedProfile) return;
+    if (!message || busy || interaction?.status === "waiting" || interaction?.status === "error" || !workspaceReady || !workspace || !model || !selectedProfile) return;
 
     const idempotencyKey = newId();
     const activeRunProfileReference = latestRun?.capabilityProfile
@@ -518,6 +549,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
       ...(newProject ? [] : current),
       displayMessage(makeMessage("human", message)),
     ]);
+    setInteraction(null);
     setLive(displayMessage(makeMessage("ai", ""), true));
     setDraft("");
     setStatus("智能体团队正在工作");
@@ -532,6 +564,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     let terminal: TerminalRunEvent | null = null;
     let runId: string | null = null;
     let replayRejected = false;
+    let awaitingInput = false;
 
     try {
       for (let attempt = 0; attempt <= MAX_RECONNECTS && terminal === null; attempt += 1) {
@@ -591,10 +624,14 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
               if (activeRun.current?.idempotencyKey === idempotencyKey) {
                 activeRun.current.lastEventId = lastEventId;
               }
-              handleRunEvent(runEvent);
+               if (handleRunEvent(runEvent)) {
+                 awaitingInput = true;
+                 throw new HumanInputRequestedError();
+               }
               if (isTerminalReplayFailure(runEvent)) replayRejected = true;
               if (isTerminalRunEvent(runEvent.type)) terminal = runEvent.type;
-            } catch {
+            } catch (error) {
+              if (error instanceof HumanInputRequestedError) throw error;
               return;
             }
           });
@@ -604,6 +641,10 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
           }
           if (terminal === null) throw new Error("响应流在终态事件前结束");
         } catch (error) {
+          if (error instanceof HumanInputRequestedError) {
+            controller.abort();
+            break;
+          }
           if (controller.signal.aborted) throw error;
           if (error instanceof NonRetryableRequestError) throw error;
           if (attempt === MAX_RECONNECTS) throw error;
@@ -611,7 +652,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
           await waitForRetry(Math.min(reconnectDelay * 2 ** attempt, 5_000), controller.signal);
         }
       }
-      commitLive();
+      if (!awaitingInput) commitLive();
     } catch (error) {
       if (controller.signal.aborted) {
         updateLive((item) => ({ ...item, content: item.content || "已停止接收运行事件，正在确认后端取消状态。", pending: false }));
@@ -632,6 +673,111 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
       }
     } finally {
       if (activeRun.current?.idempotencyKey === idempotencyKey) activeRun.current = null;
+      setBusy(false);
+    }
+  }
+
+  async function respondToInteraction(answer: string, displayAnswer: string = answer): Promise<void> {
+    if (!interaction || !workspace || interaction.status === "submitting" || interaction.status === "submitted") return;
+    const current = interaction;
+    const controller = new AbortController();
+    activeRun.current = {
+      idempotencyKey: current.idempotencyKey,
+      runId: current.runId,
+      controller,
+      lastEventId: current.lastEventId,
+    };
+    setInteraction({ ...current, status: "submitting", answer, error: undefined });
+    setStatus("正在提交澄清信息…");
+
+    try {
+      const response = await fetch(
+        `/api/runs/${encodeURIComponent(current.runId)}/interactions/${encodeURIComponent(current.request.interactionId)}/respond`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            organization_id: workspace.organization.tenantId,
+            request_id: current.idempotencyKey,
+            answer,
+            state_version: current.request.stateVersion,
+          }),
+          signal: controller.signal,
+        },
+      );
+      if (!response.ok) {
+        const detail: unknown = await response.json().catch(() => null);
+        throw new NonRetryableRequestError(errorText(detail, `提交失败（HTTP ${response.status}）`));
+      }
+
+      setMessages((items) => [...items, displayMessage(makeMessage("human", displayAnswer))]);
+      setInteraction({ ...current, status: "submitted", answer, error: undefined });
+      setLive(displayMessage(makeMessage("ai", ""), true));
+      setRunState("running");
+      setBusy(true);
+      setStatus("已提交，智能体团队继续工作");
+
+      let lastEventId = current.lastEventId;
+      let reconnectDelay = 600;
+      let terminal: TerminalRunEvent | null = null;
+      let replayRejected = false;
+      let awaitingInput = false;
+      for (let attempt = 0; attempt <= MAX_RECONNECTS && terminal === null; attempt += 1) {
+        try {
+          const events = await fetch(
+            `/api/runs/${encodeURIComponent(current.runId)}/events?organization_id=${encodeURIComponent(workspace.organization.tenantId)}`,
+            {
+              headers: { Accept: "text/event-stream", "Last-Event-ID": String(lastEventId) },
+              signal: controller.signal,
+            },
+          );
+          if (!events.ok || !events.body) {
+            const detail: unknown = await events.json().catch(() => null);
+            const reason = errorText(detail, `事件订阅失败（HTTP ${events.status}）`);
+            if (events.status < 500) throw new NonRetryableRequestError(reason);
+            throw new Error(reason);
+          }
+          await readSseStream(events.body, (sseEvent) => {
+            if (sseEvent.retry !== undefined) reconnectDelay = Math.max(250, sseEvent.retry);
+            try {
+              const runEvent = parseRunEvent(JSON.parse(sseEvent.data));
+              if (!runEvent || runEvent.runId !== current.runId || runEvent.eventId <= lastEventId) return;
+              lastEventId = runEvent.eventId;
+              if (activeRun.current?.idempotencyKey === current.idempotencyKey) {
+                activeRun.current.lastEventId = lastEventId;
+              }
+              if (handleRunEvent(runEvent)) {
+                awaitingInput = true;
+                throw new HumanInputRequestedError();
+              }
+              if (isTerminalReplayFailure(runEvent)) replayRejected = true;
+              if (isTerminalRunEvent(runEvent.type)) terminal = runEvent.type;
+            } catch (error) {
+              if (error instanceof HumanInputRequestedError) throw error;
+            }
+          });
+          if (replayRejected) throw new NonRetryableRequestError("事件回放窗口已过期，请重新加载会话历史");
+          if (terminal === null) throw new Error("响应流在终态事件前结束");
+        } catch (error) {
+          if (error instanceof HumanInputRequestedError) {
+            controller.abort();
+            break;
+          }
+          if (controller.signal.aborted || error instanceof NonRetryableRequestError || attempt === MAX_RECONNECTS) throw error;
+          setStatus(`连接中断，正在恢复（${attempt + 1}/${MAX_RECONNECTS}）`);
+          await waitForRetry(Math.min(reconnectDelay * 2 ** attempt, 5_000), controller.signal);
+        }
+      }
+      if (!awaitingInput) commitLive();
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        const reason = error instanceof Error ? error.message : "提交澄清信息失败";
+        setInteraction({ ...current, status: "error", answer, error: reason });
+        setStatus(reason);
+        setRunState("disconnected");
+      }
+    } finally {
+      if (activeRun.current?.idempotencyKey === current.idempotencyKey) activeRun.current = null;
       setBusy(false);
     }
   }
@@ -701,6 +847,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     setLatestRun(null);
     setArtifacts([]);
     setArtifactError("");
+    setInteraction(null);
   }
 
   function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -745,7 +892,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     <main className="workbench-page">
       <header className="product-header workbench-topbar">
         <span className="window-dots" aria-hidden="true"><i /><i /><i /></span>
-        <div className="header-center"><span className="workbench-brand">RN</span> RatsNest · {team.name}</div>
+        <div className="header-center"><span className="workbench-brand">CF</span> CircuitFoundry · {team.name}</div>
         <AccountMenu />
       </header>
 
@@ -852,6 +999,9 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
             ) : (
               visibleMessages.map((message) => <MessageCard key={message.clientId} message={message} />)
             )}
+            {channel === "design" && interaction && (
+              <HumanInputCard key={interaction.request.interactionId} interaction={interaction} onRespond={respondToInteraction} />
+            )}
             <div ref={messageEnd} />
           </div>
 
@@ -864,7 +1014,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
               placeholder="描述需求，或在任务进行中补充约束与反馈…"
               rows={2}
               maxLength={100_000}
-              disabled={!workspaceReady}
+              disabled={!workspaceReady || interaction?.status === "waiting" || interaction?.status === "error"}
               aria-label="KiCad 硬件设计需求"
             />
             <div className="composer-footer">
@@ -872,7 +1022,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
               {busy ? (
                 <button className="stop-button" type="button" onClick={() => void cancelRun()}>停止</button>
               ) : (
-                <button className="send-button galaxy-tooltip" data-tooltip="发送给 Supervisor" type="submit" disabled={!draft.trim() || !workspaceReady || !model || !profileReference} aria-label="发送需求"><span>→</span></button>
+                <button className="send-button galaxy-tooltip" data-tooltip="发送给 Supervisor" type="submit" disabled={!draft.trim() || !workspaceReady || !model || !profileReference || interaction?.status === "waiting" || interaction?.status === "error"} aria-label="发送需求"><span>→</span></button>
               )}
             </div>
           </form>
@@ -948,6 +1098,152 @@ function WelcomeState({ setDraft }: { setDraft: (value: string) => void }) {
         <button type="button" onClick={() => setDraft("请审查我已有的 KiCad 工程，列出 ERC、DRC、连接性与制造风险。")}>审查现有工程</button>
       </div>
     </div>
+  );
+}
+
+function HumanInputCard({
+  interaction,
+  onRespond,
+}: {
+  interaction: InteractionState;
+  onRespond: (answer: string, displayAnswer?: string) => Promise<void>;
+}) {
+  const [answer, setAnswer] = useState(interaction.answer ?? "");
+  const [decisionAnswers, setDecisionAnswers] = useState<Record<string, { key: string; text: string }>>({});
+  const locked = interaction.status === "submitting" || interaction.status === "submitted";
+  const hasDecisionForm = interaction.request.questions.length > 0;
+  const decisionComplete = hasDecisionForm && interaction.request.questions.every((question) => {
+    const selected = decisionAnswers[question.slot];
+    if (!selected) return false;
+    const option = question.options.find((candidate) => candidate.key === selected.key);
+    return Boolean(option) && (!option?.freeText || selected.text.trim().length > 0);
+  });
+  const canSubmit = !locked && (hasDecisionForm ? decisionComplete : answer.trim().length > 0);
+
+  function selectDecision(slot: string, key: string): void {
+    setDecisionAnswers((current) => ({
+      ...current,
+      [slot]: { key, text: current[slot]?.key === key ? current[slot].text : "" },
+    }));
+  }
+
+  function submitAnswer(): void {
+    if (!canSubmit) return;
+    if (!hasDecisionForm) {
+      void onRespond(answer.trim());
+      return;
+    }
+    const wireAnswer = JSON.stringify({
+      schemaVersion: "ratsnest.decision-answer.v1",
+      answers: interaction.request.questions.map((question) => ({
+        slot: question.slot,
+        key: decisionAnswers[question.slot].key,
+        text: decisionAnswers[question.slot].text.trim(),
+      })),
+    });
+    const displayAnswer = [
+      "已确认以下工程参数：",
+      ...interaction.request.questions.map((question) => {
+        const selected = decisionAnswers[question.slot];
+        const option = question.options.find((candidate) => candidate.key === selected.key)!;
+        return `- ${question.question}：${option.freeText ? selected.text.trim() : option.label}`;
+      }),
+    ].join("\n");
+    void onRespond(wireAnswer, displayAnswer);
+  }
+
+  return (
+    <article className="human-input-card" aria-label="智能体需要你的补充信息">
+      <header>
+        <span>需要你的确认</span>
+        <small>{interaction.request.requestedBy}</small>
+      </header>
+      <MarkdownContent content={interaction.request.question} />
+      {hasDecisionForm && (
+        <div className="human-decision-list">
+          {interaction.request.questions.map((question, index) => {
+            const selected = decisionAnswers[question.slot];
+            const selectedOption = question.options.find((option) => option.key === selected?.key);
+            return (
+              <fieldset className="human-decision-question" key={question.slot} disabled={locked}>
+                <legend>{index + 1}. {question.question}</legend>
+                {question.citation && <small className="human-decision-citation">依据：{question.citation}</small>}
+                <div className="human-decision-options">
+                  {question.options.map((option) => (
+                    <button
+                      key={option.key}
+                      type="button"
+                      className={selected?.key === option.key ? "selected" : ""}
+                      onClick={() => selectDecision(question.slot, option.key)}
+                    >
+                      <span>{option.key}</span>
+                      <strong>{option.label}</strong>
+                      {option.key === question.recommendedKey && <em>推荐</em>}
+                      {option.basis && <small>{option.basis}</small>}
+                    </button>
+                  ))}
+                </div>
+                {selectedOption?.freeText && (
+                  <textarea
+                    value={selected.text}
+                    onChange={(event) => setDecisionAnswers((current) => ({
+                      ...current,
+                      [question.slot]: { key: selected.key, text: event.target.value },
+                    }))}
+                    disabled={locked}
+                    rows={2}
+                    maxLength={2_000}
+                    placeholder="请输入该参数的自定义值…"
+                    aria-label={`${question.question}的自定义值`}
+                  />
+                )}
+              </fieldset>
+            );
+          })}
+        </div>
+      )}
+      {!hasDecisionForm && interaction.request.options.length > 0 && (
+        <div className="human-input-options">
+          {interaction.request.options.map((option) => (
+            <button
+              key={option}
+              type="button"
+              className={answer === option ? "selected" : ""}
+              disabled={locked}
+              onClick={() => setAnswer(option)}
+            >
+              {option}
+            </button>
+          ))}
+        </div>
+      )}
+      {!hasDecisionForm && interaction.request.allowFreeText && (
+        <textarea
+          value={answer}
+          onChange={(event) => setAnswer(event.target.value)}
+          disabled={locked}
+          rows={3}
+          maxLength={10_000}
+          placeholder="补充约束、选择或说明…"
+          aria-label="澄清问题回复"
+        />
+      )}
+      <footer>
+        <span>
+          {interaction.status === "submitted"
+            ? "已提交，任务正在从原检查点继续"
+            : interaction.status === "submitting"
+              ? "正在提交…"
+              : interaction.error ?? "回复只用于继续当前任务，不会新建 Run"}
+        </span>
+        {interaction.status !== "submitted" && (
+          <button type="button" disabled={!canSubmit} onClick={submitAnswer}>
+            {interaction.status === "submitting" ? "提交中" : interaction.status === "error" ? "重试" : "确认并继续"}
+          </button>
+        )}
+      </footer>
+      <JsonDetails label="查看交互 JSON" value={interaction.request} />
+    </article>
   );
 }
 

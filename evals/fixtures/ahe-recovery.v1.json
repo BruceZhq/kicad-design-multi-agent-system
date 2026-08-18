@@ -1,0 +1,39 @@
+{
+  "outcome": "delivered_with_issues",
+  "intentMode": "build",
+  "executionComplete": true,
+  "completedSteps": 17,
+  "totalSteps": 17,
+  "artifacts": [
+    {
+      "path": "recorded/design.kicad_sch",
+      "exists": true,
+      "valid": true,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "path": "recorded/design.kicad_pcb",
+      "exists": true,
+      "valid": true,
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "releaseBlockers": ["recorded DRC warning retained for human review"],
+  "independentReview": "passed",
+  "roleSequence": [
+    "Supervisor",
+    "Architect",
+    "Parts Specialist",
+    "Hardware Engineer",
+    "Reviewer",
+    "Supervisor"
+  ],
+  "aheRepairCount": 1,
+  "recoveredFromFault": true,
+  "llmTokens": 12000,
+  "wallClockSeconds": 120.0,
+  "invariantResults": {
+    "release-truth": true,
+    "user-constraint-preservation": true
+  }
+}

@@ -79,7 +79,7 @@ docker compose up --build
 To run the supervisor and its sub-agents through DeepSeek V4, configure:
 
 ```dotenv
-DEEPSEEK_API_KEY=sk-your-deepseek-api-key
+DEEPSEEK_API_KEY=<your-deepseek-api-key>
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEFAULT_MODEL=deepseek-v4-flash
 USE_FAKE_MODEL=false

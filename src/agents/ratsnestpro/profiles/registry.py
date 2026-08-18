@@ -36,7 +36,7 @@ class ToolchainSummary(_StrictModel):
 
 class ProfileBudget(_StrictModel):
     max_wall_clock_minutes: int = Field(ge=1, le=120)
-    max_llm_tokens: int = Field(ge=1_000, le=200_000)
+    max_llm_tokens: int = Field(ge=1_000, le=2_000_000)
     max_ahe_repairs: int = Field(ge=0, le=12)
     max_same_failure_retries: int = Field(ge=0, le=4)
 

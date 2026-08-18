@@ -1,6 +1,6 @@
 {
   "realm": "ratsnest-dev",
-  "displayName": "RatsNest Development",
+  "displayName": "CircuitFoundry Development",
   "enabled": true,
   "sslRequired": "none",
   "registrationAllowed": false,
@@ -18,14 +18,18 @@
     "realm": [
       {
         "name": "engineer",
-        "description": "RatsNest development engineer"
+        "description": "CircuitFoundry development engineer"
+      },
+      {
+        "name": "ratsnest-platform-admin",
+        "description": "Development-only harness release administrator"
       }
     ]
   },
   "clients": [
     {
       "clientId": "ratsnest-api",
-      "name": "RatsNest API",
+      "name": "CircuitFoundry API",
       "description": "Bearer-only audience for the Java control plane",
       "enabled": true,
       "protocol": "openid-connect",
@@ -38,7 +42,7 @@
     },
     {
       "clientId": "ratsnest-web",
-      "name": "RatsNest Web",
+      "name": "CircuitFoundry Web",
       "description": "Development-only confidential client used by oauth2-proxy",
       "enabled": true,
       "protocol": "openid-connect",
@@ -75,7 +79,7 @@
     },
     {
       "clientId": "ratsnest-smoke",
-      "name": "RatsNest Smoke Test",
+      "name": "CircuitFoundry Smoke Test",
       "description": "Development-only public client for bounded automated token checks",
       "enabled": true,
       "protocol": "openid-connect",
@@ -107,11 +111,12 @@
       "username": "ratsnest-dev-engineer",
       "enabled": true,
       "emailVerified": true,
-      "firstName": "RatsNest",
+      "firstName": "CircuitFoundry",
       "lastName": "Developer",
       "email": "ratsnest-dev-engineer@localhost.invalid",
       "realmRoles": [
         "engineer",
+        "ratsnest-platform-admin",
         "default-roles-ratsnest-dev"
       ],
       "credentials": [

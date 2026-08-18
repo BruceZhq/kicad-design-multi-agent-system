@@ -57,6 +57,7 @@ exclude-newer = "7 days"
 dev = [
     "langgraph-cli[inmem]",
     "pre-commit",
+    "pytest ~=9.1.1",
     "ruff",
     "pyrefly ~=1.1.1",
     "pymarkdownlnt",

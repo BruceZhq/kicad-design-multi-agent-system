@@ -52,6 +52,8 @@ from service.internal_api import router as internal_router
 from service.redis_run_registry import RedisRunRegistry, RunHandle
 from service.run_coordination import checkpoint_thread_candidates, serialize_thread_run
 from service.run_registry import (
+    InteractionConflictError,
+    InvalidRunTransitionError,
     RunAccessError,
     RunConflictError,
     RunNotFoundError,
@@ -59,7 +61,11 @@ from service.run_registry import (
     RunRecord,
     RunRegistry,
 )
-from service.runtime_identity import effective_user_id, execution_scope
+from service.runtime_identity import (
+    effective_user_id,
+    execution_scope,
+    request_harness_identity,
+)
 from service.utils import (
     convert_message_content_to_string,
     execution_error_payload,
@@ -141,6 +147,8 @@ def _run_registry_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=403, detail="Run does not belong to this user.")
     if isinstance(exc, RunNotFoundError):
         return HTTPException(status_code=404, detail="Run not found.")
+    if isinstance(exc, (InteractionConflictError, InvalidRunTransitionError)):
+        return HTTPException(status_code=409, detail=str(exc))
     return HTTPException(status_code=500, detail="Unexpected run registry error.")
 
 
@@ -364,6 +372,13 @@ async def _handle_input(
     run_id = uuid7()
     client_thread_id = user_input.thread_id or str(uuid4())
     runtime_scope = execution_scope(user_input)
+    try:
+        harness_identity = request_harness_identity(user_input, user_input.agent_config)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
     user_id = effective_user_id(user_input, user_input.user_id) or str(uuid4())
     thread_id = await _checkpoint_thread_id(
         agent,
@@ -388,6 +403,12 @@ async def _handle_input(
                 "project_scope": runtime_scope.project,
             }
         )
+    if harness_identity is not None:
+        configurable["harness_version"] = {
+            "id": harness_identity.version_id,
+            "channel": harness_identity.channel.value,
+            "manifest_digest": harness_identity.manifest_digest,
+        }
     if user_input.model is not None:
         if user_input.model not in settings.AVAILABLE_MODELS:
             raise HTTPException(
@@ -404,7 +425,9 @@ async def _handle_input(
 
         callbacks.append(langfuse_handler)
 
-    if user_input.agent_config:
+    runtime_agent_config = dict(user_input.agent_config)
+    runtime_agent_config.pop("harness_version", None)
+    if runtime_agent_config:
         # Check for reserved keys (including 'model' even if not in configurable)
         reserved_keys = {
             "thread_id",
@@ -417,12 +440,12 @@ async def _handle_input(
             "project_scope",
             "model",
         }
-        if overlap := reserved_keys & user_input.agent_config.keys():
+        if overlap := reserved_keys & runtime_agent_config.keys():
             raise HTTPException(
                 status_code=422,
                 detail=f"agent_config contains reserved keys: {overlap}",
             )
-        configurable.update(user_input.agent_config)
+        configurable.update(runtime_agent_config)
 
     config = RunnableConfig(
         configurable=configurable,
@@ -442,11 +465,17 @@ async def _handle_input(
                 detail="thread_id does not belong to the provided user_id",
             )
 
+    interrupted_tasks = [
+        task for task in state.tasks if hasattr(task, "interrupts") and task.interrupts
+    ]
+
     stored_scope = _state_scope(state)
     stored_request_id = stored_scope.get("request_id")
     stored_fingerprint = stored_scope.get("request_fingerprint")
     if (
-        stored_request_id == user_input.request_id
+        not interrupted_tasks
+        and not state.next
+        and stored_request_id == user_input.request_id
         and stored_fingerprint
         and stored_fingerprint != configurable["request_fingerprint"]
     ):
@@ -454,10 +483,6 @@ async def _handle_input(
             status_code=409,
             detail="request_id was already used for a different request.",
         )
-
-    interrupted_tasks = [
-        task for task in state.tasks if hasattr(task, "interrupts") and task.interrupts
-    ]
 
     input: Command | dict[str, Any] | None
     if interrupted_tasks:
@@ -578,6 +603,7 @@ async def _message_generator_unlocked(
         yield "data: [DONE]\n\n"
         return
 
+    interrupted_for_input = False
     try:
         # Process streamed events from the graph and yield messages over the SSE stream.
         async for stream_event in agent.astream(  # type: ignore[no-matching-overload]
@@ -599,9 +625,26 @@ async def _message_generator_unlocked(
                     # In a more sophisticated implementation, we could add
                     # some structured ChatMessage type to return the interrupt value.
                     if node == "__interrupt__":
-                        interrupt: Interrupt
-                        for interrupt in updates:
-                            new_messages.append(AIMessage(content=interrupt.value))
+                        graph_interrupt: Interrupt
+                        for graph_interrupt in updates:
+                            value = graph_interrupt.value
+                            if isinstance(value, dict) and value.get("kind") == "clarification":
+                                interrupted_for_input = True
+                                ag_ui_event = {
+                                    "type": "CUSTOM",
+                                    "name": "ratsnest.human-input-required.v1",
+                                    "value": value,
+                                }
+                                yield (
+                                    "data: "
+                                    + json.dumps(
+                                        {"type": "ag_ui", "content": ag_ui_event},
+                                        ensure_ascii=False,
+                                    )
+                                    + "\n\n"
+                                )
+                                continue
+                            new_messages.append(AIMessage(content=str(value)))
                         continue
                     updates = updates or {}
                     update_messages = updates.get("messages", [])
@@ -718,7 +761,8 @@ async def _message_generator_unlocked(
         logger.exception("Agent execution stream failed")
         yield f"data: {json.dumps(execution_error_payload(e))}\n\n"
     finally:
-        yield "data: [DONE]\n\n"
+        if not interrupted_for_input:
+            yield "data: [DONE]\n\n"
 
 
 async def message_generator(
@@ -782,23 +826,7 @@ async def stream(user_input: StreamInput, agent_id: str = DEFAULT_AGENT) -> Stre
     owner_id = effective_user_id(user_input, user_input.user_id)
 
     async def producer(record: RunRecordLike) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        async for event in message_generator(user_input, agent_id):
-            await run_registry.set_run_id(record, _event_run_id(event))
-            manifest = _event_artifact_manifest(event)
-            if manifest is not None:
-                result = {
-                    "artifact_manifest": manifest,
-                    "delivery_status": manifest.get("delivery_status"),
-                }
-            if _is_error_event(event):
-                await run_registry.mark_stream_failed(
-                    record,
-                    code="agent_stream_error",
-                    message="The agent stream reported an error.",
-                )
-            await run_registry.append_event(record, event)
-        return result
+        return await _produce_stream_events(record, user_input, agent_id)
 
     try:
         record, _ = await run_registry.start(
@@ -825,6 +853,81 @@ async def stream(user_input: StreamInput, agent_id: str = DEFAULT_AGENT) -> Stre
     )
 
 
+async def _produce_stream_events(
+    record: RunRecordLike,
+    user_input: StreamInput,
+    agent_id: str,
+) -> dict[str, Any]:
+    """Persist one execution segment, stopping cleanly at a human interrupt."""
+
+    result: dict[str, Any] = {}
+    async for event in message_generator(user_input, agent_id):
+        await run_registry.set_run_id(record, _event_run_id(event))
+        interaction = _event_human_interaction(event)
+        manifest = _event_artifact_manifest(event)
+        if manifest is not None:
+            result = {
+                "artifact_manifest": manifest,
+                "delivery_status": manifest.get("delivery_status"),
+            }
+        if _is_error_event(event):
+            await run_registry.mark_stream_failed(
+                record,
+                code="agent_stream_error",
+                message="The agent stream reported an error.",
+            )
+        if interaction is not None:
+            await run_registry.pause_for_input(
+                record,
+                interaction_id=str(interaction["interactionId"]),
+                state_version=int(interaction["stateVersion"]),
+                payload=event,
+            )
+            break
+        await run_registry.append_event(record, event)
+    return result
+
+
+async def resume_interaction(
+    user_input: StreamInput,
+    *,
+    interaction_id: str,
+    response_request_id: str,
+    state_version: int,
+    agent_id: str = DEFAULT_AGENT,
+) -> RunStatus:
+    """Resume the original run/checkpoint after an idempotent human response."""
+
+    _get_agent_or_404(agent_id)
+    request_id = _ensure_request_id(user_input)
+    thread_id = _ensure_thread_id(user_input)
+    owner_id = effective_user_id(user_input, user_input.user_id)
+    try:
+        current = await run_registry.get(request_id, owner_id)
+        if current.agent_id != agent_id or current.thread_id != thread_id:
+            raise InteractionConflictError("Interaction does not belong to this agent thread.")
+
+        async def producer(record: RunRecordLike) -> dict[str, Any]:
+            return await _produce_stream_events(record, user_input, agent_id)
+
+        record, _ = await run_registry.resume(
+            request_id=request_id,
+            user_id=owner_id,
+            interaction_id=interaction_id,
+            response_request_id=response_request_id,
+            state_version=state_version,
+            producer=producer,
+        )
+    except (
+        InteractionConflictError,
+        InvalidRunTransitionError,
+        RunAccessError,
+        RunNotFoundError,
+    ) as exc:
+        raise _run_registry_error(exc) from exc
+    return RunStatus.model_validate(record.public_dict())
+
+
 def _is_error_event(event: str) -> bool:
     for line in event.splitlines():
         if not line.startswith("data: "):
@@ -838,6 +941,37 @@ def _is_error_event(event: str) -> bool:
             return False
         return payload.get("type") == "error"
     return False
+
+
+def _event_human_interaction(event: str) -> dict[str, Any] | None:
+    """Return one validated clarification request from an AG-UI SSE event."""
+
+    for line in event.splitlines():
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        try:
+            payload = json.loads(line[6:])
+        except json.JSONDecodeError:
+            return None
+        content = payload.get("content") if isinstance(payload, dict) else None
+        if (
+            payload.get("type") != "ag_ui"
+            or not isinstance(content, dict)
+            or content.get("type") != "CUSTOM"
+            or content.get("name") != "ratsnest.human-input-required.v1"
+            or not isinstance(content.get("value"), dict)
+        ):
+            return None
+        value = content["value"]
+        if (
+            not isinstance(value.get("interactionId"), str)
+            or not value["interactionId"]
+            or not isinstance(value.get("stateVersion"), int)
+            or value["stateVersion"] <= 0
+        ):
+            return None
+        return value
+    return None
 
 
 def _event_run_id(event: str) -> str | None:

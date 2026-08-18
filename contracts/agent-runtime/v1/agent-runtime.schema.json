@@ -160,6 +160,24 @@
       },
       "additionalProperties": false
     },
+    "resumeRunCommand": {
+      "type": "object",
+      "required": [
+        "run", "interactionId", "responseRequestId", "answer",
+        "stateVersion", "config"
+      ],
+      "properties": {
+        "run": { "$ref": "#/$defs/runReference" },
+        "interactionId": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,200}$" },
+        "responseRequestId": { "type": "string", "format": "uuid" },
+        "answer": { "type": "string", "minLength": 1, "maxLength": 100000 },
+        "stateVersion": { "type": "integer", "minimum": 1 },
+        "model": { "type": ["string", "null"], "maxLength": 200 },
+        "timeoutSeconds": { "type": ["number", "null"], "minimum": 1, "maximum": 86400 },
+        "config": { "$ref": "#/$defs/runtimeConfig" }
+      },
+      "additionalProperties": false
+    },
     "eventSubscription": {
       "type": "object",
       "required": ["command", "lastEventId"],
@@ -199,7 +217,7 @@
         "runId": { "type": ["string", "null"] },
         "kind": { "enum": ["invoke", "stream"] },
         "state": {
-          "enum": ["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"]
+          "enum": ["QUEUED", "RUNNING", "WAITING_FOR_INPUT", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"]
         },
         "agentId": { "type": "string" },
         "threadId": { "type": "string" },
@@ -241,6 +259,8 @@
             "token",
             "reasoning",
             "artifact_manifest",
+            "ag_ui",
+            "waiting_for_input",
             "error",
             "completed",
             "failed",
@@ -321,6 +341,19 @@
       },
       "additionalProperties": false
     },
+    "internalInteractionResponseRequest": {
+      "type": "object",
+      "required": ["response_request_id", "answer", "state_version", "agent_config"],
+      "properties": {
+        "response_request_id": { "type": "string", "format": "uuid" },
+        "answer": { "type": "string", "minLength": 1, "maxLength": 100000 },
+        "state_version": { "type": "integer", "minimum": 1 },
+        "model": { "type": ["string", "null"], "maxLength": 200 },
+        "timeout_seconds": { "type": ["number", "null"], "minimum": 1, "maximum": 86400 },
+        "agent_config": { "$ref": "#/$defs/runtimeConfig" }
+      },
+      "additionalProperties": false
+    },
     "runtimeRunWire": {
       "type": "object",
       "required": [
@@ -346,7 +379,7 @@
         "run_id": { "type": ["string", "null"] },
         "kind": { "enum": ["invoke", "stream"] },
         "status": {
-          "enum": ["queued", "running", "completed", "failed", "cancelled", "timed_out"]
+          "enum": ["queued", "running", "waiting_for_input", "completed", "failed", "cancelled", "timed_out"]
         },
         "agent_id": { "type": "string", "minLength": 1 },
         "thread_id": { "type": "string", "minLength": 1, "maxLength": 200 },
@@ -379,7 +412,7 @@
       "properties": {
         "request_id": { "type": "string", "minLength": 1, "maxLength": 200 },
         "status": {
-          "enum": ["queued", "running", "completed", "failed", "cancelled", "timed_out"]
+          "enum": ["queued", "running", "waiting_for_input", "completed", "failed", "cancelled", "timed_out"]
         }
       },
       "additionalProperties": false
@@ -486,12 +519,32 @@
       },
       "additionalProperties": false
     },
+    "runtimeSseAgUiEnvelope": {
+      "type": "object",
+      "required": ["type", "content", "event_id"],
+      "properties": {
+        "type": { "const": "ag_ui" },
+        "content": {
+          "type": "object",
+          "required": ["type", "name", "value"],
+          "properties": {
+            "type": { "const": "CUSTOM" },
+            "name": { "const": "ratsnest.human-input-required.v1" },
+            "value": { "type": "object" }
+          },
+          "additionalProperties": false
+        },
+        "event_id": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
     "runtimeSseEnvelope": {
       "description": "JSON carried in an SSE data field. The terminal data value [DONE] is a non-JSON sentinel with its own SSE id.",
       "oneOf": [
         { "$ref": "#/$defs/runtimeSseMessageEnvelope" },
         { "$ref": "#/$defs/runtimeSseTextEnvelope" },
         { "$ref": "#/$defs/runtimeSseArtifactManifestEnvelope" },
+        { "$ref": "#/$defs/runtimeSseAgUiEnvelope" },
         { "$ref": "#/$defs/runtimeSseErrorEnvelope" }
       ]
     },

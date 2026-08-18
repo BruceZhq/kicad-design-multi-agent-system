@@ -27,6 +27,8 @@ from fastapi import HTTPException
 
 from service.kafka_audit import KafkaAuditEvent
 from service.run_registry import (
+    InteractionConflictError,
+    InvalidRunTransitionError,
     RunAccessError,
     RunConflictError,
     RunKind,
@@ -116,6 +118,8 @@ class RunHandle:
     http_status: int = 500
     stream_failed: bool = False
     terminal_event_emitted: bool = False
+    interaction_id: str | None = None
+    interaction_state_version: int | None = None
     next_event_id: int = 1
     oldest_event_id: int | None = None
     newest_event_id: int | None = None
@@ -146,6 +150,8 @@ class RunHandle:
             "newest_event_id": self.newest_event_id,
             "error_code": self.error_code,
             "error": self.error,
+            "interaction_id": self.interaction_id,
+            "interaction_state_version": self.interaction_state_version,
             "artifact_manifest": result.get("artifact_manifest"),
             "delivery_status": result.get("delivery_status"),
         }
@@ -174,6 +180,9 @@ if redis.call('EXISTS', state) == 1 then
   end
 
   local status = redis.call('HGET', state, 'status') or ''
+  if status == 'waiting_for_input' then
+    return {0, tonumber(redis.call('HGET', state, 'fencing_token') or '0')}
+  end
   if status == 'completed' or status == 'failed'
      or status == 'cancelled' or status == 'timed_out' then
     return {0, tonumber(redis.call('HGET', state, 'fencing_token') or '0')}
@@ -224,6 +233,7 @@ redis.call('HSET', state,
   'started_at', '', 'finished_at', '', 'result_json', '',
   'error_code', '', 'error', '', 'http_status', '500',
   'stream_failed', '0', 'terminal_event_emitted', '0',
+  'interaction_id', '', 'interaction_state_version', '',
   'last_event_id', '0', 'owner_id', ARGV[10], 'fencing_token', '1',
   'lease_until_ms', lease_until, 'state_version', '1')
 redis.call('ZADD', active, lease_until, state)
@@ -252,6 +262,7 @@ end
 local status = redis.call('HGET', KEYS[1], 'status') or ''
 if status == 'completed' or status == 'failed'
    or status == 'cancelled' or status == 'timed_out' then return {-3, 0} end
+if status == 'waiting_for_input' and ARGV[6] == '1' then return {-4, 0} end
 if ARGV[5] ~= '' then
   local prior = redis.call('HGET', KEYS[3], ARGV[5])
   if prior then return {0, tonumber(prior)} end
@@ -314,6 +325,7 @@ if redis.call('HGET', KEYS[1], 'owner_id') ~= ARGV[1]
   return 0
 end
 local status = redis.call('HGET', KEYS[1], 'status') or ''
+if status == 'waiting_for_input' then return 0 end
 if status == 'completed' or status == 'failed'
    or status == 'cancelled' or status == 'timed_out' then return 0 end
 local clock = redis.call('TIME')
@@ -340,6 +352,7 @@ if redis.call('HGET', KEYS[1], 'owner_id') ~= ARGV[1]
   return 0
 end
 local status = redis.call('HGET', KEYS[1], 'status') or ''
+if status == 'waiting_for_input' then return 1 end
 if status == 'completed' or status == 'failed'
    or status == 'cancelled' or status == 'timed_out' then return 0 end
 redis.call('HSET', KEYS[1], 'lease_until_ms', '0')
@@ -499,6 +512,99 @@ redis.call('XADD', KEYS[2], '*',
   'status', status, 'timestamp', ARGV[6], 'owner_id', ARGV[1],
   'fencing_token', ARGV[2], 'error_code', ARGV[3], 'detail_digest', ARGV[8])
 return 1
+"""
+
+
+# KEYS: state, events, event-dedupe, lifecycle, audit, active, running, metrics
+# ARGV: owner, fence, interaction-id, interaction-version, payload, max-events,
+#       event-key, timestamp, audit-id, stream-audit-payload
+_PAUSE_FOR_INPUT_LUA = r"""
+if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, 0} end
+if redis.call('HGET', KEYS[1], 'owner_id') ~= ARGV[1]
+   or tonumber(redis.call('HGET', KEYS[1], 'fencing_token') or '0') ~= tonumber(ARGV[2]) then
+  return {-2, 0}
+end
+local old = redis.call('HGET', KEYS[1], 'status') or ''
+if old == 'waiting_for_input' then
+  if redis.call('HGET', KEYS[1], 'interaction_id') == ARGV[3]
+     and tonumber(redis.call('HGET', KEYS[1], 'interaction_state_version') or '-1') == tonumber(ARGV[4]) then
+    return {0, tonumber(redis.call('HGET', KEYS[3], ARGV[7]) or '0')}
+  end
+  return {-4, 0}
+end
+if old ~= 'running' then return {-3, 0} end
+local event_id = redis.call('HINCRBY', KEYS[1], 'last_event_id', 1)
+redis.call('XADD', KEYS[2], event_id .. '-0', 'payload', ARGV[5])
+redis.call('XTRIM', KEYS[2], 'MAXLEN', tonumber(ARGV[6]))
+redis.call('HSET', KEYS[3], ARGV[7], event_id)
+redis.call('HSET', KEYS[1],
+  'status', 'waiting_for_input', 'interaction_id', ARGV[3],
+  'interaction_state_version', ARGV[4], 'lease_until_ms', '0',
+  'finished_at', '',
+  'state_version', tonumber(redis.call('HGET', KEYS[1], 'state_version') or '0') + 1)
+redis.call('ZREM', KEYS[6], KEYS[1])
+redis.call('ZREM', KEYS[7], KEYS[1])
+redis.call('HINCRBY', KEYS[8], 'running', -1)
+redis.call('HINCRBY', KEYS[8], 'waiting_for_input', 1)
+redis.call('XADD', KEYS[4], '*', 'type', 'status', 'status', 'waiting_for_input',
+  'interaction_id', ARGV[3], 'state_version', ARGV[4], 'timestamp', ARGV[8])
+redis.call('XADD', KEYS[5], '*', 'event_id', ARGV[9], 'schema_version', '1',
+  'event_type', 'RunWaitingForInput',
+  'request_id', redis.call('HGET', KEYS[1], 'request_id'),
+  'agent_id', redis.call('HGET', KEYS[1], 'agent_id'),
+  'thread_id', redis.call('HGET', KEYS[1], 'thread_id'),
+  'status', 'waiting_for_input', 'timestamp', ARGV[8],
+  'owner_id', ARGV[1], 'fencing_token', ARGV[2])
+if ARGV[10] ~= '' then redis.call('XADD', KEYS[5], '*', 'payload', ARGV[10]) end
+return {1, event_id}
+"""
+
+
+# KEYS: state, lifecycle, audit, active, running, metrics, response-dedupe
+# ARGV: user-id, interaction-id, response-request-id, interaction-version,
+#       new-owner, lease-ms, timestamp, audit-id
+_RESUME_LUA = r"""
+if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, 0} end
+local stored_user = redis.call('HGET', KEYS[1], 'user_id') or ''
+if stored_user ~= '' and stored_user ~= ARGV[1] then return {-2, 0} end
+local response_key = 'response:' .. ARGV[3]
+local prior = redis.call('HGET', KEYS[7], response_key)
+local response_identity = ARGV[2] .. ':' .. ARGV[4]
+if prior then
+  if prior == response_identity then
+    return {0, tonumber(redis.call('HGET', KEYS[1], 'fencing_token') or '0')}
+  end
+  return {-5, 0}
+end
+if redis.call('HGET', KEYS[1], 'status') ~= 'waiting_for_input' then return {-3, 0} end
+if redis.call('HGET', KEYS[1], 'interaction_id') ~= ARGV[2]
+   or tonumber(redis.call('HGET', KEYS[1], 'interaction_state_version') or '-1') ~= tonumber(ARGV[4]) then
+  return {-4, 0}
+end
+local clock = redis.call('TIME')
+local now_ms = (tonumber(clock[1]) * 1000) + math.floor(tonumber(clock[2]) / 1000)
+local fence = redis.call('HINCRBY', KEYS[1], 'fencing_token', 1)
+local lease_until = now_ms + tonumber(ARGV[6])
+redis.call('HSET', KEYS[1],
+  'status', 'queued', 'owner_id', ARGV[5], 'lease_until_ms', lease_until,
+  'interaction_id', '', 'interaction_state_version', '', 'finished_at', '',
+  'error_code', '', 'error', '',
+  'state_version', tonumber(redis.call('HGET', KEYS[1], 'state_version') or '0') + 1)
+redis.call('HSET', KEYS[7], response_key, response_identity)
+redis.call('ZADD', KEYS[4], lease_until, KEYS[1])
+redis.call('ZREM', KEYS[5], KEYS[1])
+redis.call('HINCRBY', KEYS[6], 'waiting_for_input', -1)
+redis.call('HINCRBY', KEYS[6], 'queued', 1)
+redis.call('XADD', KEYS[2], '*', 'type', 'status', 'status', 'queued',
+  'interaction_id', ARGV[2], 'state_version', ARGV[4], 'timestamp', ARGV[7])
+redis.call('XADD', KEYS[3], '*', 'event_id', ARGV[8], 'schema_version', '1',
+  'event_type', 'RunInputAccepted',
+  'request_id', redis.call('HGET', KEYS[1], 'request_id'),
+  'agent_id', redis.call('HGET', KEYS[1], 'agent_id'),
+  'thread_id', redis.call('HGET', KEYS[1], 'thread_id'),
+  'status', 'queued', 'timestamp', ARGV[7],
+  'owner_id', ARGV[5], 'fencing_token', fence)
+return {1, fence}
 """
 
 
@@ -674,12 +780,131 @@ class RedisRunRegistry:
             raise RunConflictError("Run ownership changed; stale writer was fenced.")
         if code == -3:
             raise RunConflictError("Cannot append an event to a terminal run.")
+        if code == -4:
+            raise InvalidRunTransitionError(
+                "A run waiting for input cannot emit a terminal stream marker."
+            )
         record.next_event_id = max(record.next_event_id, event_id + 1)
         record.newest_event_id = event_id
         record.oldest_event_id = record.oldest_event_id or event_id
         if "data: [DONE]" in payload:
             record.terminal_event_emitted = True
         return event_id
+
+    async def pause_for_input(
+        self,
+        record: RunHandle,
+        *,
+        interaction_id: str,
+        state_version: int,
+        payload: str,
+    ) -> RunHandle:
+        if len(payload.encode("utf-8")) > self.max_event_bytes:
+            raise InvalidRunTransitionError(
+                f"Human-input event exceeded the {self.max_event_bytes}-byte service limit."
+            )
+        keys = self._keys(record.request_id)
+        client = await self._client()
+        event_key = f"interaction:{interaction_id}:{state_version}"
+        audit_payload = self._stream_audit_payload(record, payload)
+        reply = await client.eval(
+            _PAUSE_FOR_INPUT_LUA,
+            8,
+            keys["state"],
+            keys["events"],
+            keys["dedupe"],
+            keys["lifecycle"],
+            keys["audit"],
+            keys["active"],
+            keys["running"],
+            keys["metrics"],
+            self.instance_id,
+            record.fencing_token,
+            interaction_id,
+            state_version,
+            payload,
+            record.event_buffer_size,
+            event_key,
+            _iso_now(),
+            uuid.uuid4().hex,
+            audit_payload,
+        )
+        code, event_id = int(reply[0]), int(reply[1])
+        if code in {-1, -2}:
+            self._raise_owner_write_error(code, record.request_id)
+        if code == -3:
+            current = await self._load_handle(record.request_id)
+            raise InvalidRunTransitionError(
+                f"Cannot pause a run in state {current.status!r}."
+            )
+        if code == -4:
+            raise InteractionConflictError("Run is waiting for a different interaction.")
+        record.status = "waiting_for_input"
+        record.interaction_id = interaction_id
+        record.interaction_state_version = state_version
+        record.lease_until_ms = 0
+        if event_id:
+            record.next_event_id = max(record.next_event_id, event_id + 1)
+            record.newest_event_id = event_id
+            record.oldest_event_id = record.oldest_event_id or event_id
+        return record
+
+    async def resume(
+        self,
+        *,
+        request_id: str,
+        user_id: str | None,
+        interaction_id: str,
+        response_request_id: str,
+        state_version: int,
+        producer: Producer,
+    ) -> tuple[RunHandle, bool]:
+        keys = self._keys(request_id)
+        client = await self._client()
+        reply = await client.eval(
+            _RESUME_LUA,
+            7,
+            keys["state"],
+            keys["lifecycle"],
+            keys["audit"],
+            keys["active"],
+            keys["running"],
+            keys["metrics"],
+            keys["dedupe"],
+            user_id or "",
+            interaction_id,
+            response_request_id,
+            state_version,
+            self.instance_id,
+            self._lease_ms,
+            _iso_now(),
+            uuid.uuid4().hex,
+        )
+        code, fence = int(reply[0]), int(reply[1])
+        if code == -1:
+            raise RunNotFoundError(request_id)
+        if code == -2:
+            raise RunAccessError(request_id)
+        if code == -3:
+            current = await self._load_handle(request_id)
+            raise InvalidRunTransitionError(
+                f"Cannot resume a run in state {current.status!r}."
+            )
+        if code in {-4, -5}:
+            raise InteractionConflictError("Interaction response conflicts with durable state.")
+
+        handle = await self._load_handle(request_id)
+        if code == 0:
+            return handle, False
+        handle.fencing_token = fence
+        async with self._tasks_guard:
+            task = asyncio.create_task(
+                self._execute(handle, producer),
+                name=f"redis-agent-run-resume:{request_id}",
+            )
+            self._tasks[request_id] = task
+            handle.task = task
+        return handle, True
 
     async def subscribe(
         self,
@@ -726,8 +951,9 @@ class RedisRunRegistry:
             if not values:
                 raise RunNotFoundError(record.request_id)
             terminal = values.get("status") in _TERMINAL_STATES
+            waiting = values.get("status") == "waiting_for_input"
             newest = int(values.get("last_event_id", "0"))
-            if terminal and cursor >= newest:
+            if (terminal or waiting) and cursor >= newest:
                 return
 
             response = await self._xread_or_idle(
@@ -763,8 +989,9 @@ class RedisRunRegistry:
             if not values:
                 raise RunNotFoundError(record.request_id)
             terminal = values.get("status") in _TERMINAL_STATES
+            waiting = values.get("status") == "waiting_for_input"
             newest = int(values.get("last_event_id", "0"))
-            if terminal and cursor >= newest:
+            if (terminal or waiting) and cursor >= newest:
                 return
 
     async def get(self, request_id: str, user_id: str | None) -> RunHandle:
@@ -927,6 +1154,7 @@ class RedisRunRegistry:
             for state in (
                 "queued",
                 "running",
+                "waiting_for_input",
                 "completed",
                 "failed",
                 "cancelled",
@@ -960,6 +1188,12 @@ class RedisRunRegistry:
             async with asyncio.timeout(record.timeout_seconds):
                 result = await producer(record)
             refreshed = await self.get(record.request_id, record.user_id)
+            if (
+                refreshed.fencing_token != record.fencing_token
+                or refreshed.owner_id != self.instance_id
+                or refreshed.status == "waiting_for_input"
+            ):
+                return
             if record.kind == "stream" and not refreshed.terminal_event_emitted:
                 await self.append_event(
                     record,
@@ -977,6 +1211,13 @@ class RedisRunRegistry:
                 http_status=refreshed.http_status,
             )
         except TimeoutError:
+            current = await self._load_handle(record.request_id)
+            if (
+                current.fencing_token != record.fencing_token
+                or current.owner_id != self.instance_id
+                or current.status == "waiting_for_input"
+            ):
+                return
             await self._append_terminal_error(
                 record,
                 "Run exceeded its configured timeout.",
@@ -998,6 +1239,12 @@ class RedisRunRegistry:
                 await self._release_execution_lease(record)
             else:
                 current = await self._load_handle(record.request_id)
+                if (
+                    current.fencing_token != record.fencing_token
+                    or current.owner_id != self.instance_id
+                    or current.status == "waiting_for_input"
+                ):
+                    return
                 if not current.is_terminal:
                     await self._append_terminal_error(
                         record,
@@ -1013,6 +1260,13 @@ class RedisRunRegistry:
                         http_status=409,
                     )
         except HTTPException as exc:
+            current = await self._load_handle(record.request_id)
+            if (
+                current.fencing_token != record.fencing_token
+                or current.owner_id != self.instance_id
+                or current.status == "waiting_for_input"
+            ):
+                return
             await self._append_terminal_error(
                 record,
                 str(exc.detail),
@@ -1027,6 +1281,13 @@ class RedisRunRegistry:
                 http_status=exc.status_code,
             )
         except Exception:
+            current = await self._load_handle(record.request_id)
+            if (
+                current.fencing_token != record.fencing_token
+                or current.owner_id != self.instance_id
+                or current.status == "waiting_for_input"
+            ):
+                return
             await self._append_terminal_error(
                 record,
                 "Internal server error",
@@ -1044,7 +1305,12 @@ class RedisRunRegistry:
             for helper in (lease_task, cancellation_task):
                 helper.cancel()
             await asyncio.gather(lease_task, cancellation_task, return_exceptions=True)
-            record.done.set()
+            try:
+                current = await self._load_handle(record.request_id)
+            except RunNotFoundError:
+                current = None
+            if current is not None and current.is_terminal:
+                record.done.set()
             async with self._tasks_guard:
                 if self._tasks.get(record.request_id) is current_task:
                     self._tasks.pop(record.request_id, None)
@@ -1091,6 +1357,9 @@ class RedisRunRegistry:
         client = await self._client()
         while not owner_task.done():
             await asyncio.sleep(self.lease_seconds / 3)
+            current = await self._load_handle(record.request_id)
+            if current.status == "waiting_for_input":
+                return
             try:
                 renewed = int(
                     await client.eval(
@@ -1140,6 +1409,8 @@ class RedisRunRegistry:
         cursor = _text(latest[0][0]) if latest else "0-0"
         while not owner_task.done():
             current = await self._load_handle(record.request_id)
+            if current.status == "waiting_for_input":
+                return
             if current.is_terminal:
                 owner_task.cancel()
                 return
@@ -1266,6 +1537,12 @@ class RedisRunRegistry:
             result=result,
             error_code=values.get("error_code") or None,
             error=values.get("error") or None,
+            interaction_id=values.get("interaction_id") or None,
+            interaction_state_version=(
+                int(values["interaction_state_version"])
+                if values.get("interaction_state_version")
+                else None
+            ),
             http_status=int(values.get("http_status", "500")),
             stream_failed=values.get("stream_failed") == "1",
             terminal_event_emitted=values.get("terminal_event_emitted") == "1",

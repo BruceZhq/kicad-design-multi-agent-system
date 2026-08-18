@@ -14,7 +14,7 @@
     "required": ["KiCad schematic and PCB tools", "kicad-cli ERC and DRC", "manufacturing export"],
     "optional": ["Freerouting", "field-bus compliance analysis"]
   },
-  "budget": {"max_wall_clock_minutes": 60, "max_llm_tokens": 120000, "max_ahe_repairs": 6, "max_same_failure_retries": 2},
+  "budget": {"max_wall_clock_minutes": 60, "max_llm_tokens": 1200000, "max_ahe_repairs": 6, "max_same_failure_retries": 2},
   "acceptance": {
     "required_artifacts": ["editable KiCad project", "BOM and placement data", "Gerber and drill outputs", "risk and evidence report"],
     "verification": ["ERC and DRC findings are reported without concealment.", "External interfaces, power domains, and grounding receive independent review.", "Unsupported environmental or certification assumptions are identified."],

@@ -18,6 +18,7 @@ RunKind = Literal["invoke", "stream"]
 RunState = Literal[
     "queued",
     "running",
+    "waiting_for_input",
     "completed",
     "failed",
     "cancelled",
@@ -45,6 +46,14 @@ class RunAccessError(Exception):
     pass
 
 
+class InteractionConflictError(Exception):
+    pass
+
+
+class InvalidRunTransitionError(Exception):
+    pass
+
+
 @dataclass
 class RunRecord:
     request_id: str
@@ -66,6 +75,10 @@ class RunRecord:
     http_status: int = 500
     stream_failed: bool = False
     terminal_event_emitted: bool = False
+    interaction_id: str | None = None
+    interaction_state_version: int | None = None
+    accepted_responses: dict[str, tuple[str, int]] = field(default_factory=dict)
+    execution_generation: int = 1
     events: deque[tuple[int, str]] = field(init=False)
     next_event_id: int = 1
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
@@ -98,6 +111,8 @@ class RunRecord:
             "newest_event_id": newest,
             "error_code": self.error_code,
             "error": self.error,
+            "interaction_id": self.interaction_id,
+            "interaction_state_version": self.interaction_state_version,
             "artifact_manifest": result.get("artifact_manifest"),
             "delivery_status": result.get("delivery_status"),
         }
@@ -174,7 +189,10 @@ class RunRegistry:
                 self._validate_existing(existing, fingerprint, kind, user_id)
                 return existing, False
 
-            pending = sum(not record.is_terminal for record in self._records.values())
+            pending = sum(
+                not record.is_terminal and record.status != "waiting_for_input"
+                for record in self._records.values()
+            )
             if pending >= self.max_concurrent + self.max_queued:
                 raise RunOverloadedError(
                     "The agent run queue is full; retry after an active run completes."
@@ -196,19 +214,127 @@ class RunRegistry:
             )
             self._records[request_id] = record
             record.task = asyncio.create_task(
-                self._execute(record, producer),
+                self._execute(record, producer, record.execution_generation),
                 name=f"agent-run:{request_id}",
             )
             return record, True
 
-    async def _execute(self, record: RunRecord, producer: Producer) -> None:
+    async def pause_for_input(
+        self,
+        record: RunRecord,
+        *,
+        interaction_id: str,
+        state_version: int,
+        payload: str,
+    ) -> RunRecord:
+        """Atomically publish a question and release execution for its answer."""
+
+        if len(payload.encode("utf-8")) > self.max_event_bytes:
+            raise InvalidRunTransitionError(
+                f"Human-input event exceeded the {self.max_event_bytes}-byte service limit."
+            )
+
+        async with self._guard:
+            current = self._records.get(record.request_id)
+            if current is None:
+                raise RunNotFoundError(record.request_id)
+            if current.status == "waiting_for_input":
+                if (
+                    current.interaction_id == interaction_id
+                    and current.interaction_state_version == state_version
+                ):
+                    return current
+                raise InteractionConflictError("Run is waiting for a different interaction.")
+            if current.status != "running":
+                raise InvalidRunTransitionError(
+                    f"Cannot pause a run in state {current.status!r}."
+                )
+            current.status = "waiting_for_input"
+            current.interaction_id = interaction_id
+            current.interaction_state_version = state_version
+            current.finished_at = None
+            current.done.clear()
+            event_id = current.next_event_id
+            current.next_event_id += 1
+            current.events.append((event_id, payload))
+        await self._notify(record)
+        return record
+
+    async def resume(
+        self,
+        *,
+        request_id: str,
+        user_id: str | None,
+        interaction_id: str,
+        response_request_id: str,
+        state_version: int,
+        producer: Producer,
+    ) -> tuple[RunRecord, bool]:
+        """CAS a waiting run to queued and schedule its checkpoint continuation."""
+
+        async with self._guard:
+            self._cleanup_locked()
+            record = self._records.get(request_id)
+            if record is None:
+                raise RunNotFoundError(request_id)
+            self._validate_owner(record, user_id)
+            response_identity = (interaction_id, state_version)
+            prior = record.accepted_responses.get(response_request_id)
+            if prior is not None:
+                if prior != response_identity:
+                    raise InteractionConflictError(
+                        "response_request_id was already used for another interaction."
+                    )
+                return record, False
+            if record.status != "waiting_for_input":
+                raise InvalidRunTransitionError(
+                    f"Cannot resume a run in state {record.status!r}."
+                )
+            if record.interaction_id != interaction_id:
+                raise InteractionConflictError("interaction_id does not match the pending request.")
+            if record.interaction_state_version != state_version:
+                raise InteractionConflictError("Interaction state_version is stale.")
+
+            record.accepted_responses[response_request_id] = response_identity
+            record.status = "queued"
+            record.interaction_id = None
+            record.interaction_state_version = None
+            record.finished_at = None
+            record.error_code = None
+            record.error = None
+            record.done.clear()
+            record.execution_generation += 1
+            generation = record.execution_generation
+            task = asyncio.create_task(
+                self._execute(record, producer, generation),
+                name=f"agent-run-resume:{request_id}",
+            )
+            record.task = task
+        await self._notify(record)
+        return record, True
+
+    async def _execute(
+        self,
+        record: RunRecord,
+        producer: Producer,
+        generation: int,
+    ) -> None:
         try:
             async with self._semaphore:
-                record.status = "running"
-                record.started_at = datetime.now(UTC)
+                async with self._guard:
+                    if record.execution_generation != generation or record.status != "queued":
+                        return
+                    record.status = "running"
+                    record.started_at = record.started_at or datetime.now(UTC)
                 await self._notify(record)
                 async with asyncio.timeout(record.timeout_seconds):
-                    record.result = await producer(record)
+                    result = await producer(record)
+                if (
+                    record.execution_generation != generation
+                    or record.status == "waiting_for_input"
+                ):
+                    return
+                record.result = result
                 if record.kind == "stream" and not record.terminal_event_emitted:
                     await self.append_event(record, "data: [DONE]\n\n")
                 record.status = "failed" if record.stream_failed else "completed"
@@ -216,6 +342,8 @@ class RunRegistry:
                     record.error_code = record.error_code or "stream_error"
                     record.error = record.error or "The agent stream reported an error."
         except TimeoutError:
+            if record.status == "waiting_for_input":
+                return
             record.status = "timed_out"
             record.error_code = "run_timeout"
             record.error = f"Run exceeded {record.timeout_seconds:g} seconds."
@@ -228,12 +356,16 @@ class RunRegistry:
             record.http_status = 409
             await self._emit_terminal_stream_error(record)
         except HTTPException as exc:
+            if record.status == "waiting_for_input":
+                return
             record.status = "failed"
             record.error_code = "request_rejected"
             record.error = str(exc.detail)
             record.http_status = exc.status_code
             await self._emit_terminal_stream_error(record)
         except Exception:
+            if record.status == "waiting_for_input":
+                return
             logger.exception("Unhandled agent run failure request_id=%s", record.request_id)
             record.status = "failed"
             record.error_code = "internal_error"
@@ -241,11 +373,16 @@ class RunRegistry:
             record.http_status = 500
             await self._emit_terminal_stream_error(record)
         finally:
-            record.finished_at = datetime.now(UTC)
-            record.done.set()
+            if record.is_terminal:
+                record.finished_at = datetime.now(UTC)
+                record.done.set()
             await self._notify(record)
 
     async def append_event(self, record: RunRecord, payload: str) -> int:
+        if record.status == "waiting_for_input" and "data: [DONE]" in payload:
+            raise InvalidRunTransitionError(
+                "A run waiting for input cannot emit a terminal stream marker."
+            )
         encoded_size = len(payload.encode("utf-8"))
         if encoded_size > self.max_event_bytes:
             record.stream_failed = True
@@ -296,7 +433,8 @@ class RunRegistry:
             async with record.condition:
                 available = [event for event in record.events if event[0] > cursor]
                 terminal = record.is_terminal
-                if not available and not terminal:
+                waiting = record.status == "waiting_for_input"
+                if not available and not terminal and not waiting:
                     try:
                         await asyncio.wait_for(
                             record.condition.wait(),
@@ -307,13 +445,15 @@ class RunRegistry:
             if heartbeat:
                 yield ": heartbeat\n\n"
                 continue
-            if not available and not terminal:
+            if not available and not terminal and not waiting:
                 continue
 
             for event_id, payload in available:
                 cursor = event_id
                 yield self._format_event(event_id, payload)
             if terminal and cursor >= record.next_event_id - 1:
+                return
+            if waiting and cursor >= record.next_event_id - 1:
                 return
 
     async def get(self, request_id: str, user_id: str | None) -> RunRecord:
@@ -327,7 +467,9 @@ class RunRegistry:
 
     async def cancel(self, request_id: str, user_id: str | None) -> RunRecord:
         record = await self.get(request_id, user_id)
-        if not record.is_terminal and record.task is not None:
+        if record.is_terminal:
+            return record
+        if record.task is not None and not record.task.done():
             record.error_code = "cancel_requested"
             record.error = "Cancellation requested."
             record.task.cancel()
@@ -338,6 +480,15 @@ class RunRegistry:
                 )
             except TimeoutError:
                 pass
+        elif record.status == "waiting_for_input":
+            record.status = "cancelled"
+            record.error_code = "run_cancelled"
+            record.error = "Run was cancelled."
+            record.http_status = 409
+            record.finished_at = datetime.now(UTC)
+            await self._emit_terminal_stream_error(record)
+            record.done.set()
+            await self._notify(record)
         return record
 
     async def shutdown(self) -> None:
@@ -360,6 +511,7 @@ class RunRegistry:
                 for state in (
                     "queued",
                     "running",
+                    "waiting_for_input",
                     "completed",
                     "failed",
                     "cancelled",

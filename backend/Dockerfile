@@ -13,6 +13,7 @@ RUN java -XshowSettings:properties -version 2>&1 \
     | grep -Eq 'java\.specification\.version = 21$'
 COPY .mvn .mvn
 COPY mvnw pom.xml ./
+RUN chmod 0755 mvnw
 COPY --from=contracts /agent-runtime/v1 /contracts/agent-runtime/v1
 RUN --mount=type=cache,id=ratsnest-maven,target=/root/.m2,sharing=locked \
     ./mvnw -B -ntp dependency:go-offline
@@ -24,7 +25,8 @@ FROM ${JAVA_RUNTIME_IMAGE}
 
 WORKDIR /app
 RUN java -XshowSettings:properties -version 2>&1 \
-    | grep -Eq 'java\.specification\.version = 21$'
+    | grep -Eq 'java\.specification\.version = 21$' \
+    && command -v wget >/dev/null
 COPY --from=build /workspace/target/ratsnest-control-plane-*.jar app.jar
 USER 10001:10001
 EXPOSE 8080

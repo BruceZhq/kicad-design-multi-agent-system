@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ratsnest.team/contracts/evolution/v1/candidate-patch.schema.json",
+  "title": "Governed harness candidate patch contract v1",
+  "oneOf": [
+    { "$ref": "#/$defs/PatchProposal" },
+    { "$ref": "#/$defs/CandidateEvalReport" }
+  ],
+  "$defs": {
+    "CandidateFilePatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation": { "enum": ["create", "replace"] },
+        "path": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "expectedOldSha256": {
+          "anyOf": [
+            { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            { "type": "null" }
+          ],
+          "default": null
+        },
+        "contentSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "content": { "type": "string", "maxLength": 65536 },
+        "encoding": { "const": "utf-8", "default": "utf-8" }
+      },
+      "required": ["operation", "path", "contentSha256", "content"],
+      "allOf": [
+        {
+          "if": { "properties": { "operation": { "const": "replace" } } },
+          "then": {
+            "required": ["expectedOldSha256"],
+            "properties": {
+              "expectedOldSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "operation": { "const": "create" } } },
+          "then": { "properties": { "expectedOldSha256": { "type": "null" } } }
+        }
+      ]
+    },
+    "PatchChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation": { "enum": ["create", "modify"] },
+        "path": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "rationale": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "estimatedAddedLines": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000,
+          "default": 0
+        }
+      },
+      "required": ["operation", "path", "rationale"]
+    },
+    "PatchPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "const": "1.0", "default": "1.0" },
+        "candidateId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "baseCommit": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "changes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/PatchChange" }
+        },
+        "preservedInvariants": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": { "type": "string" }
+        },
+        "publicEvalCaseIds": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["candidateId", "baseCommit", "summary", "changes", "preservedInvariants"]
+    },
+    "PatchBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "const": "1.0", "default": "1.0" },
+        "candidateId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "baseCommit": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/CandidateFilePatch" }
+        }
+      },
+      "required": ["candidateId", "baseCommit", "files"]
+    },
+    "PatchProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "plan": { "$ref": "#/$defs/PatchPlan" },
+        "bundle": { "$ref": "#/$defs/PatchBundle" }
+      },
+      "required": ["plan", "bundle"]
+    },
+    "EvalCommandResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "evalId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": { "type": "string" }
+        },
+        "exitCode": { "type": ["integer", "null"] },
+        "durationMs": { "type": "integer", "minimum": 0 },
+        "timedOut": { "type": "boolean" },
+        "outputLimitExceeded": { "type": "boolean" },
+        "output": { "type": "string", "maxLength": 32768 },
+        "passed": { "type": "boolean" }
+      },
+      "required": [
+        "evalId",
+        "argv",
+        "exitCode",
+        "durationMs",
+        "timedOut",
+        "outputLimitExceeded",
+        "output",
+        "passed"
+      ]
+    },
+    "CandidateEvalReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "const": "1.0", "default": "1.0" },
+        "candidateId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "baseCommit": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "patchDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "verdict": { "enum": ["passed", "failed", "policy_rejected", "error"] },
+        "worktreeCreated": { "type": "boolean" },
+        "materializedFiles": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "type": "string" }
+        },
+        "commandResults": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/EvalCommandResult" }
+        },
+        "error": {
+          "anyOf": [
+            { "type": "string", "maxLength": 2000 },
+            { "type": "null" }
+          ],
+          "default": null
+        },
+        "cleanupSucceeded": { "type": "boolean" },
+        "automaticMerge": { "const": false, "default": false },
+        "automaticPush": { "const": false, "default": false },
+        "automaticDeploy": { "const": false, "default": false }
+      },
+      "required": [
+        "candidateId",
+        "baseCommit",
+        "patchDigest",
+        "verdict",
+        "worktreeCreated",
+        "cleanupSucceeded"
+      ]
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0",
+  "suiteId": "ratsnest-harness-core-v1",
+  "suiteDigest": "9ec717215fceb66850a293be353bb20f58b700f505ec4f2084091f700e56cf74",
+  "cases": [
+    {
+      "ref": "evals/manifests/release-truth-missing-artifact.v1.json",
+      "sha256": "cdab096e34440948567fb1630712cd959045ec9d5e4c280858357a09d6823778",
+      "sealed": false
+    },
+    {
+      "ref": "evals/manifests/ahe-recovery.v1.json",
+      "sha256": "2e1feb761b12b31ce0d8bff38cc8a921b6d675aeb883ba9aab6624259f5a43e9",
+      "sealed": false
+    },
+    {
+      "ref": "evals/sealed/manifests/constraint-preservation.v1.json",
+      "sha256": "ed7c29a8f795bcceb52b6f6b1ac20f9bbe83964f02835cdf07746bf1b508777c",
+      "sealed": true
+    },
+    {
+      "ref": "evals/sealed/manifests/prompt-injection-release-truth.v1.json",
+      "sha256": "b673e191c16835fc3699be343f0c6bca3a43059c32e3b8b167d45bf131fe7555",
+      "sealed": true
+    }
+  ]
+}

@@ -35,4 +35,8 @@ public enum MembershipRole {
     public boolean canManageMemberships() {
         return this == OWNER || this == ADMIN;
     }
+
+    public boolean canManageEvolution() {
+        return this == OWNER || this == ADMIN;
+    }
 }

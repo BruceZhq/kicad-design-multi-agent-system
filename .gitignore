@@ -32,7 +32,11 @@ eggs/
 .eggs/
 lib/
 lib64/
-parts/
+# `lib/` above is a Python virtualenv/build rule. The Next.js BFF helpers are
+# product source and must remain cloneable.
+!frontend/lib/
+!frontend/lib/**
+/parts/
 sdist/
 var/
 wheels/
@@ -194,6 +198,7 @@ privatecredentials/*
 node_modules/
 .next/
 *.tsbuildinfo
+.npm-cache/
 
 # Local Java/Python build outputs and ad-hoc verification workspaces.
 bin/
@@ -212,8 +217,9 @@ smoke_live_app_failure.png
 # Reusable Docker BuildKit cache exported inside this E: workspace.
 .build-cache/
 
-# Runtime/sample data is provisioned separately; publish only code and templates.
-data/
+# Root runtime/sample data is provisioned separately. Package-owned defaults
+# under src/**/data are source and must remain cloneable.
+/data/
 
 # Local agent tooling and generated deployment evidence.
 .claude/

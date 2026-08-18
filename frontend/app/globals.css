@@ -283,6 +283,34 @@ pre { max-height: 360px; margin: 0; padding: 11px; overflow: auto; border-top: 1
 .workflow-event details { grid-column: 2 / 4; width: 100%; }
 .workflow-event.tool-event { background: #fafafa; }
 
+.human-input-card { width: min(100%,900px); margin: 0 auto 24px; padding: 18px; border: 1px solid #a1a1aa; border-radius: 16px; background: #fff; box-shadow: 0 15px 36px rgba(0,0,0,0.08); }
+.human-input-card > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.human-input-card > header span { color: #18181b; font-size: 13px; font-weight: 750; }
+.human-input-card > header small { color: #71717a; font: 10px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.human-input-options { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.human-input-options button { padding: 8px 12px; border: 1px solid #d4d4d8; border-radius: 999px; background: #fafafa; color: #3f3f46; font-size: 11px; }
+.human-input-options button.selected { border-color: #18181b; background: #18181b; color: #fff; }
+.human-input-card textarea { display: block; width: 100%; margin-top: 12px; padding: 11px 12px; resize: vertical; border: 1px solid #d4d4d8; border-radius: 10px; outline: none; background: #fafafa; color: #18181b; font: inherit; line-height: 1.55; }
+.human-input-card textarea:focus { border-color: #71717a; box-shadow: 0 0 0 3px rgba(0,0,0,0.06); }
+.human-decision-list { display: grid; gap: 14px; margin-top: 16px; }
+.human-decision-question { min-width: 0; padding: 14px; border: 1px solid #e4e4e7; border-radius: 12px; background: #fafafa; }
+.human-decision-question legend { padding: 0 6px; color: #18181b; font-size: 12px; font-weight: 720; }
+.human-decision-citation { display: block; margin: 0 0 10px; color: #71717a; font-size: 10px; }
+.human-decision-options { display: grid; gap: 8px; }
+.human-decision-options button { display: grid; grid-template-columns: 24px 1fr auto; align-items: center; gap: 8px; width: 100%; padding: 10px 12px; border: 1px solid #d4d4d8; border-radius: 10px; background: #fff; color: #27272a; text-align: left; }
+.human-decision-options button > span { display: grid; place-items: center; width: 22px; height: 22px; border: 1px solid #a1a1aa; border-radius: 50%; font: 700 10px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.human-decision-options button > strong { font-size: 11px; font-weight: 650; }
+.human-decision-options button > em { padding: 3px 7px; border-radius: 999px; background: #e4e4e7; color: #3f3f46; font-size: 9px; font-style: normal; }
+.human-decision-options button > small { grid-column: 2 / -1; color: #71717a; font-size: 9px; }
+.human-decision-options button.selected { border-color: #18181b; background: #18181b; color: #fff; }
+.human-decision-options button.selected > span { border-color: #fff; }
+.human-decision-options button.selected > em { background: #fff; color: #18181b; }
+.human-decision-options button.selected > small { color: #d4d4d8; }
+.human-input-card > footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 12px; }
+.human-input-card > footer span { color: #71717a; font-size: 10px; }
+.human-input-card > footer button { min-height: 38px; padding: 0 15px; border: 0; border-radius: 10px; background: #18181b; color: #fff; font-size: 11px; font-weight: 700; }
+.human-input-card button:disabled, .human-input-card textarea:disabled { cursor: not-allowed; opacity: 0.55; }
+
 .json-details { margin-top: 9px; border: 0; background: transparent; }
 .json-details > summary {
   display: inline-flex;

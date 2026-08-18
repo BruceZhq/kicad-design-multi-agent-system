@@ -50,11 +50,11 @@ Vertex AI includes both **stable** and **experimental/preview** models. Experime
 - Click **Add Key** > **Create New Key**, select **JSON**, and click **Create**.
 - The JSON key file will download. **Store it securely**—you won’t be able to download it again.
 
-#### 3. Add the JSON Key File to the [File-based Credentials](docs/File_Based_Credentials.md) Path
+#### 3. Add the JSON Key File to the [File-based Credentials](File_Based_Credentials.md) Path
 
 Place the downloaded JSON file in the `privatecredentials/` of your project (e.g., `privatecredentials/service-account-key.json`).
 
-Contents of the [File-based Credentials](docs/File_Based_Credentials.md) path are made available to your container at runtime in `/privatecredentials/` , but are excluded from git commits and docker builds.
+Contents of the [File-based Credentials](File_Based_Credentials.md) path are made available to your container at runtime in `/privatecredentials/` , but are excluded from git commits and docker builds.
 
 #### 4. Set the `GOOGLE_APPLICATION_CREDENTIALS` Environment Variable
 
@@ -101,4 +101,4 @@ Test your credentials with:
 
 ### Production Note
 
-This setup is ideal for development. In production, consider more secure alternatives. Some options are listed on the [File-based Credentials](docs/File_Based_Credentials.md) page.
+This setup is ideal for development. In production, consider more secure alternatives. Some options are listed on the [File-based Credentials](File_Based_Credentials.md) page.

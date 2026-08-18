@@ -30,6 +30,7 @@ import team.ratsnest.runtime.v1.AgentRuntimeServiceGrpc;
 import team.ratsnest.runtime.v1.ControlRunRequest;
 import team.ratsnest.runtime.v1.GetRunRequest;
 import team.ratsnest.runtime.v1.RunEvent;
+import team.ratsnest.runtime.v1.ResumeRunRequest;
 import team.ratsnest.runtime.v1.SubscribeRunEventsRequest;
 import tools.jackson.databind.ObjectMapper;
 
@@ -46,6 +47,7 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
     private static final String START_PATH = SERVICE + "StartRun";
     private static final String GET_PATH = SERVICE + "GetRun";
     private static final String CONTROL_PATH = SERVICE + "ControlRun";
+    private static final String RESUME_PATH = SERVICE + "ResumeRun";
     private static final String EVENTS_PATH = SERVICE + "SubscribeRunEvents";
     private static final Metadata.Key<String> AUTHORIZATION = Metadata.Key.of(
             "authorization", Metadata.ASCII_STRING_MARSHALLER);
@@ -53,7 +55,8 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
             "x-request-id", Metadata.ASCII_STRING_MARSHALLER);
     private static final long UNARY_TIMEOUT_SECONDS = 20;
 
-    private final ManagedChannel channel;
+    private final ManagedChannel stableChannel;
+    private final ManagedChannel canaryChannel;
     private final InternalTaskSigner signer;
     private final ObjectMapper objectMapper;
     private final HttpAgentRuntimeGateway compatibilityGateway;
@@ -61,10 +64,17 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
     public GrpcAgentRuntimeGateway(
             @Value("${ratsnest.agent-runtime.grpc-target:}") String target,
             @Value("${ratsnest.agent-runtime.grpc-plaintext:false}") boolean plaintext,
+            @Value("${ratsnest.agent-runtime.canary-grpc-target:}") String canaryTarget,
+            @Value("${ratsnest.agent-runtime.canary-grpc-plaintext:false}") boolean canaryPlaintext,
             InternalTaskSigner signer,
             ObjectMapper objectMapper,
             HttpAgentRuntimeGateway compatibilityGateway) {
-        this(buildChannel(target, plaintext), signer, objectMapper, compatibilityGateway);
+        this(
+                buildChannel(target, plaintext),
+                optionalChannel(canaryTarget, canaryPlaintext),
+                signer,
+                objectMapper,
+                compatibilityGateway);
     }
 
     GrpcAgentRuntimeGateway(
@@ -72,7 +82,17 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
             InternalTaskSigner signer,
             ObjectMapper objectMapper,
             HttpAgentRuntimeGateway compatibilityGateway) {
-        this.channel = Objects.requireNonNull(channel, "channel");
+        this(channel, null, signer, objectMapper, compatibilityGateway);
+    }
+
+    GrpcAgentRuntimeGateway(
+            ManagedChannel stableChannel,
+            ManagedChannel canaryChannel,
+            InternalTaskSigner signer,
+            ObjectMapper objectMapper,
+            HttpAgentRuntimeGateway compatibilityGateway) {
+        this.stableChannel = Objects.requireNonNull(stableChannel, "stableChannel");
+        this.canaryChannel = canaryChannel;
         this.signer = Objects.requireNonNull(signer, "signer");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
         this.compatibilityGateway = Objects.requireNonNull(
@@ -98,6 +118,7 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
         team.ratsnest.runtime.v1.StartRunRequest request = builder.build();
         try {
             return runtimeRun(blockingStub(
+                            runtimeChannel(command.config()),
                             START_PATH,
                             request.toByteArray(),
                             command.identity(),
@@ -113,6 +134,7 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
         GetRunRequest request = runRequest(reference);
         try {
             return runtimeRun(blockingStub(
+                            reference.runtimeChannel(),
                             GET_PATH,
                             request.toByteArray(),
                             reference.identity(),
@@ -134,11 +156,41 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
                 .build();
         try {
             return runtimeRun(blockingStub(
+                            command.run().runtimeChannel(),
                             CONTROL_PATH,
                             request.toByteArray(),
                             command.run().identity(),
                             command.run().requestId())
                     .controlRun(request));
+        } catch (StatusRuntimeException exception) {
+            throw runtimeFailure(exception);
+        }
+    }
+
+    @Override
+    public RuntimeRun resumeRun(ResumeRunCommand command) {
+        ResumeRunRequest.Builder builder = ResumeRunRequest.newBuilder()
+                .setRun(runRequest(command.run()))
+                .setInteractionId(command.interactionId())
+                .setResponseRequestId(command.responseRequestId())
+                .setAnswer(command.answer())
+                .setStateVersion(command.stateVersion())
+                .setConfigJson(canonicalJson(command.config()));
+        if (command.model() != null) {
+            builder.setModel(command.model());
+        }
+        if (command.timeoutSeconds() != null) {
+            builder.setTimeoutSeconds(command.timeoutSeconds());
+        }
+        ResumeRunRequest request = builder.build();
+        try {
+            return runtimeRun(blockingStub(
+                            command.run().runtimeChannel(),
+                            RESUME_PATH,
+                            request.toByteArray(),
+                            command.run().identity(),
+                            command.run().requestId())
+                    .resumeRun(request));
         } catch (StatusRuntimeException exception) {
             throw runtimeFailure(exception);
         }
@@ -165,25 +217,30 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
 
     @PreDestroy
     void close() {
-        channel.shutdownNow();
+        stableChannel.shutdownNow();
+        if (canaryChannel != null && canaryChannel != stableChannel) {
+            canaryChannel.shutdownNow();
+        }
     }
 
     private AgentRuntimeServiceGrpc.AgentRuntimeServiceBlockingStub blockingStub(
+            String runtimeChannel,
             String path,
             byte[] body,
             RuntimeIdentity identity,
             String requestId) {
-        return AgentRuntimeServiceGrpc.newBlockingStub(channel)
+        return AgentRuntimeServiceGrpc.newBlockingStub(channel(runtimeChannel))
                 .withInterceptors(headers(path, body, identity, requestId))
                 .withDeadlineAfter(UNARY_TIMEOUT_SECONDS, TimeUnit.SECONDS);
     }
 
     private AgentRuntimeServiceGrpc.AgentRuntimeServiceStub asyncStub(
+            String runtimeChannel,
             String path,
             byte[] body,
             RuntimeIdentity identity,
             String requestId) {
-        return AgentRuntimeServiceGrpc.newStub(channel)
+        return AgentRuntimeServiceGrpc.newStub(channel(runtimeChannel))
                 .withInterceptors(headers(path, body, identity, requestId));
     }
 
@@ -257,6 +314,7 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
         return switch (value) {
             case RUN_STATE_QUEUED -> RunState.QUEUED;
             case RUN_STATE_RUNNING -> RunState.RUNNING;
+            case RUN_STATE_WAITING_FOR_INPUT -> RunState.WAITING_FOR_INPUT;
             case RUN_STATE_COMPLETED -> RunState.COMPLETED;
             case RUN_STATE_FAILED -> RunState.FAILED;
             case RUN_STATE_CANCELLED -> RunState.CANCELLED;
@@ -293,6 +351,15 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
                     Map.of());
         }
         if ("artifact_manifest".equals(type)) {
+            return new RuntimeEvent(
+                    sequence,
+                    type,
+                    null,
+                    null,
+                    null,
+                    object(envelope.get("content")));
+        }
+        if ("ag_ui".equals(type)) {
             return new RuntimeEvent(
                     sequence,
                     type,
@@ -481,6 +548,30 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
         return builder.build();
     }
 
+    private static ManagedChannel optionalChannel(String target, boolean plaintext) {
+        return target == null || target.isBlank() ? null : buildChannel(target, plaintext);
+    }
+
+    private ManagedChannel channel(String runtimeChannel) {
+        if (!"canary".equals(runtimeChannel)) {
+            return stableChannel;
+        }
+        if (canaryChannel == null) {
+            throw new AgentRuntimeException(
+                    503, "Canary Agent Runtime gRPC endpoint is not configured");
+        }
+        return canaryChannel;
+    }
+
+    private String runtimeChannel(Map<String, Object> config) {
+        Object harness = config.get("harness_version");
+        if (harness instanceof Map<?, ?> values
+                && "canary".equals(values.get("channel"))) {
+            return "canary";
+        }
+        return "stable";
+    }
+
     private final class GrpcEventSubscription
             implements Flow.Subscription,
                     ClientResponseObserver<SubscribeRunEventsRequest, RunEvent> {
@@ -494,6 +585,8 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
         private boolean cancelPending;
         private long pendingDemand;
         private long lastSequence;
+        private boolean pauseSeen;
+        private boolean terminalSeen;
 
         private GrpcEventSubscription(
                 Flow.Subscriber<? super RuntimeEvent> subscriber,
@@ -514,6 +607,7 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
         private void start() {
             try {
                 asyncStub(
+                                runtimeChannel(subscription.command().config()),
                                 EVENTS_PATH,
                                 request.toByteArray(),
                                 subscription.command().identity(),
@@ -592,6 +686,13 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
                                 502, "Agent Runtime event sequence is not strictly increasing");
                     }
                     lastSequence = mapped.eventId();
+                    if ("ag_ui".equals(mapped.type())
+                            && "ratsnest.human-input-required.v1".equals(mapped.data().get("name"))) {
+                        pauseSeen = true;
+                    }
+                    if (terminalEvent(mapped.type())) {
+                        terminalSeen = true;
+                    }
                 }
                 subscriber.onNext(mapped);
             } catch (RuntimeException exception) {
@@ -622,7 +723,12 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
                 return;
             }
             cancelled = true;
-            subscriber.onComplete();
+            if (pauseSeen || terminalSeen) {
+                subscriber.onComplete();
+            } else {
+                subscriber.onError(new AgentRuntimeException(
+                        502, "Agent Runtime ended its event stream before publishing a terminal or waiting state"));
+            }
         }
 
         private void requestUpstream(long count) {

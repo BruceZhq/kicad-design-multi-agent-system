@@ -15,6 +15,8 @@ public interface AgentRuntimeGateway {
 
     RuntimeRun controlRun(ControlRunCommand command);
 
+    RuntimeRun resumeRun(ResumeRunCommand command);
+
     Flow.Publisher<RuntimeEvent> subscribeEvents(EventSubscription subscription);
 
     RuntimeInfo getInfo(RuntimeIdentity identity);
@@ -28,6 +30,7 @@ public interface AgentRuntimeGateway {
     enum RunState {
         QUEUED,
         RUNNING,
+        WAITING_FOR_INPUT,
         COMPLETED,
         FAILED,
         CANCELLED,
@@ -55,10 +58,25 @@ public interface AgentRuntimeGateway {
             String projectId) {
     }
 
-    record RunReference(String requestId, RuntimeIdentity identity) {
+    record RunReference(String requestId, RuntimeIdentity identity, String runtimeChannel) {
     }
 
     record ControlRunCommand(RunReference run, RunControl control) {
+    }
+
+    record ResumeRunCommand(
+            RunReference run,
+            String interactionId,
+            String responseRequestId,
+            String answer,
+            long stateVersion,
+            String model,
+            Double timeoutSeconds,
+            Map<String, Object> config) {
+
+        public ResumeRunCommand {
+            config = immutableMap(config);
+        }
     }
 
     record EventSubscription(StartRunCommand command, long lastEventId) {

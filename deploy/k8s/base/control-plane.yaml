@@ -24,6 +24,9 @@ spec:
             - name: RATSNEST_AGENT_RUNTIME_URL
               valueFrom:
                 configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_AGENT_RUNTIME_URL }
+            - name: RATSNEST_AGENT_RUNTIME_CANARY_URL
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_AGENT_RUNTIME_CANARY_URL }
             - name: RATSNEST_AGENT_RUNTIME_TRANSPORT
               valueFrom:
                 configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_AGENT_RUNTIME_TRANSPORT }
@@ -33,6 +36,12 @@ spec:
             - name: RATSNEST_AGENT_RUNTIME_GRPC_PLAINTEXT
               valueFrom:
                 configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_AGENT_RUNTIME_GRPC_PLAINTEXT }
+            - name: RATSNEST_AGENT_RUNTIME_CANARY_GRPC_TARGET
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_AGENT_RUNTIME_CANARY_GRPC_TARGET }
+            - name: RATSNEST_AGENT_RUNTIME_CANARY_GRPC_PLAINTEXT
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_AGENT_RUNTIME_CANARY_GRPC_PLAINTEXT }
             - name: RATSNEST_KAFKA_BOOTSTRAP_SERVERS
               valueFrom:
                 configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_KAFKA_BOOTSTRAP_SERVERS }

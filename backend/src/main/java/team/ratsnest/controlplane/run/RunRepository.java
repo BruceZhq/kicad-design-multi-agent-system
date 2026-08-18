@@ -23,6 +23,7 @@ class RunRepository {
             thread_id, idempotency_key,
             request_fingerprint, message, model, runtime_config,
             profile_id, profile_version, profile_digest, runtime_principal_id,
+            harness_version_id, harness_manifest_digest, harness_channel,
             created_by_issuer, created_by_subject, state, delivery_status,
             runtime_run_id, event_count, oldest_event_id, newest_event_id,
             error_code, error, created_at, started_at, finished_at
@@ -43,6 +44,7 @@ class RunRepository {
                             thread_id,
                             idempotency_key, request_fingerprint, message, model,
                             runtime_config, profile_id, profile_version, profile_digest,
+                            harness_version_id, harness_manifest_digest, harness_channel,
                             runtime_principal_id, state,
                             created_by_issuer, created_by_subject
                         ) values (
@@ -50,6 +52,7 @@ class RunRepository {
                             :threadId,
                             :idempotencyKey, :fingerprint, :message, :model,
                             cast(:runtimeConfig as jsonb), :profileId, :profileVersion, :profileDigest,
+                            :harnessVersionId, :harnessManifestDigest, :harnessChannel,
                             :runtimePrincipalId, :state,
                             :issuer, :subject
                         )
@@ -69,6 +72,9 @@ class RunRepository {
                 .param("profileId", run.profileId())
                 .param("profileVersion", run.profileVersion())
                 .param("profileDigest", run.profileDigest())
+                .param("harnessVersionId", run.harnessVersionId())
+                .param("harnessManifestDigest", run.harnessManifestDigest())
+                .param("harnessChannel", run.harnessChannel())
                 .param("runtimePrincipalId", run.runtimePrincipalId())
                 .param("state", run.state().name())
                 .param("issuer", actor.issuer())
@@ -172,11 +178,15 @@ class RunRepository {
                           and state not in ('COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT')
                           and (
                               (state = 'QUEUED' and :state in (
-                                  'QUEUED', 'RUNNING', 'COMPLETED', 'FAILED',
+                                  'QUEUED', 'RUNNING', 'WAITING_FOR_INPUT', 'COMPLETED', 'FAILED',
                                   'CANCELLED', 'TIMED_OUT'))
                               or
                               (state = 'RUNNING' and :state in (
-                                  'RUNNING', 'COMPLETED', 'FAILED',
+                                  'RUNNING', 'WAITING_FOR_INPUT', 'COMPLETED', 'FAILED',
+                                  'CANCELLED', 'TIMED_OUT'))
+                              or
+                              (state = 'WAITING_FOR_INPUT' and :state in (
+                                  'WAITING_FOR_INPUT', 'QUEUED', 'RUNNING', 'COMPLETED', 'FAILED',
                                   'CANCELLED', 'TIMED_OUT'))
                           )
                         """)
@@ -194,13 +204,25 @@ class RunRepository {
                 .update() == 1;
     }
 
+    boolean markWaitingForInput(UUID tenantId, UUID runId) {
+        return jdbcClient.sql("""
+                        update control_plane.runs
+                        set state = 'WAITING_FOR_INPUT'
+                        where tenant_id = :tenantId and run_id = :runId
+                          and state in ('QUEUED', 'RUNNING')
+                        """)
+                .param("tenantId", tenantId)
+                .param("runId", runId)
+                .update() == 1;
+    }
+
     boolean markFailed(UUID tenantId, UUID runId, String code, String error) {
         return jdbcClient.sql("""
                         update control_plane.runs
                         set state = 'FAILED', error_code = :code, error = :error,
                             finished_at = now()
                         where tenant_id = :tenantId and run_id = :runId
-                          and state in ('QUEUED', 'RUNNING')
+                          and state in ('QUEUED', 'RUNNING', 'WAITING_FOR_INPUT')
                         """)
                 .param("tenantId", tenantId)
                 .param("runId", runId)
@@ -254,6 +276,9 @@ class RunRepository {
                 resultSet.getString("profile_id"),
                 resultSet.getString("profile_version"),
                 resultSet.getString("profile_digest"),
+                resultSet.getString("harness_version_id"),
+                resultSet.getString("harness_manifest_digest"),
+                resultSet.getString("harness_channel"),
                 resultSet.getString("runtime_principal_id"),
                 resultSet.getString("created_by_issuer"),
                 resultSet.getString("created_by_subject"),

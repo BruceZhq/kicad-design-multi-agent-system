@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import re
 from datetime import UTC, datetime
 from typing import Any, NoReturn
+from uuid import UUID
 
 import grpc
 from fastapi import HTTPException
@@ -26,6 +28,7 @@ _SERVICE_PATH = "/ratsnest.runtime.v1.AgentRuntimeService"
 _STATE = {
     "queued": pb.RUN_STATE_QUEUED,
     "running": pb.RUN_STATE_RUNNING,
+    "waiting_for_input": pb.RUN_STATE_WAITING_FOR_INPUT,
     "completed": pb.RUN_STATE_COMPLETED,
     "failed": pb.RUN_STATE_FAILED,
     "cancelled": pb.RUN_STATE_CANCELLED,
@@ -322,6 +325,55 @@ class AgentRuntimeGrpcService(pb_grpc.AgentRuntimeServiceServicer):
         return await _status_or_abort(
             self._runtime, request.run.request_id, _owner_id(claims), context
         )
+
+    async def ResumeRun(self, request: pb.ResumeRunRequest, context: Any) -> pb.Run:
+        claims = await _authenticate(
+            request,
+            context,
+            "ResumeRun",
+            request.run.request_id,
+            request.run.identity,
+        )
+        try:
+            if not re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", request.interaction_id):
+                raise ValueError("interaction_id is invalid")
+            response_request_id = str(UUID(request.response_request_id))
+            if request.state_version < 1:
+                raise ValueError("state_version must be positive")
+            current = await self._runtime.run_status(
+                request.run.request_id, _owner_id(claims)
+            )
+            runtime_input = StreamInput(
+                message=request.answer,
+                model=request.model if request.HasField("model") else None,
+                thread_id=current.thread_id,
+                user_id=claims.subject,
+                request_id=request.run.request_id,
+                timeout_seconds=(
+                    request.timeout_seconds
+                    if request.HasField("timeout_seconds")
+                    else None
+                ),
+                agent_config=_config(request.config_json),
+                stream_tokens=True,
+            )
+            runtime_input.bind_runtime_identity(
+                principal_id=claims.subject,
+                tenant_id=claims.tenant_id,
+                project_id=claims.project_id,
+            )
+            status = await self._runtime.resume_interaction(
+                runtime_input,
+                interaction_id=request.interaction_id,
+                response_request_id=response_request_id,
+                state_version=int(request.state_version),
+                agent_id=_AGENT_ID,
+            )
+        except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+            await _abort(context, grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        except HTTPException as exc:
+            await _abort_http(context, exc)
+        return _run_message(status)
 
     async def SubscribeRunEvents(
         self,

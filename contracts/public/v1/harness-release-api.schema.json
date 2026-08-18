@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ratsnest.team/contracts/public/v1/harness-release-api.schema.json",
+  "title": "Governed harness release API v1",
+  "$defs": {
+    "versionId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{1,120}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "registerVersion": {
+      "type": "object",
+      "required": [
+        "harnessVersionId", "version", "sourceCommit", "sourceTreeDigest",
+        "dirty", "runtimeImageDigest", "bundleDigest", "contractDigest",
+        "policyDigest", "manifestObjectKey", "manifestDigest"
+      ],
+      "properties": {
+        "harnessVersionId": { "$ref": "#/$defs/versionId" },
+        "version": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "parentVersionId": {
+          "oneOf": [{ "$ref": "#/$defs/versionId" }, { "type": "null" }]
+        },
+        "sourceCommit": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "sourceTreeDigest": { "$ref": "#/$defs/digest" },
+        "dirty": { "type": "boolean" },
+        "runtimeImageDigest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "toolchainDigest": {
+          "type": ["string", "null"],
+          "pattern": "^(?:sha256:)?[0-9a-f]{64}$"
+        },
+        "bundleDigest": { "$ref": "#/$defs/digest" },
+        "contractDigest": { "$ref": "#/$defs/digest" },
+        "policyDigest": { "$ref": "#/$defs/digest" },
+        "manifestObjectKey": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "manifestDigest": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false
+    },
+    "versionTransition": {
+      "type": "object",
+      "required": ["expectedVersion", "targetStatus", "reason"],
+      "properties": {
+        "expectedVersion": { "type": "integer", "minimum": 1 },
+        "targetStatus": { "enum": ["APPROVED", "RETIRED"] },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 2000 }
+      },
+      "additionalProperties": false
+    },
+    "configureCanary": {
+      "type": "object",
+      "required": ["expectedVersion", "canaryPercent"],
+      "properties": {
+        "expectedVersion": { "type": "integer", "minimum": 1 },
+        "canaryVersionId": {
+          "oneOf": [{ "$ref": "#/$defs/versionId" }, { "type": "null" }]
+        },
+        "canaryPercent": { "type": "integer", "minimum": 0, "maximum": 100 }
+      },
+      "additionalProperties": false
+    },
+    "rolloutTransition": {
+      "type": "object",
+      "required": ["expectedVersion", "canaryVersionId"],
+      "properties": {
+        "expectedVersion": { "type": "integer", "minimum": 1 },
+        "canaryVersionId": { "$ref": "#/$defs/versionId" }
+      },
+      "additionalProperties": false
+    },
+    "rollbackTransition": {
+      "type": "object",
+      "required": ["expectedVersion", "targetVersionId"],
+      "properties": {
+        "expectedVersion": { "type": "integer", "minimum": 1 },
+        "targetVersionId": { "$ref": "#/$defs/versionId" }
+      },
+      "additionalProperties": false
+    },
+    "rollout": {
+      "type": "object",
+      "required": [
+        "rolloutId", "stableVersionId", "canaryPercent",
+        "rowVersion", "updatedAt"
+      ],
+      "properties": {
+        "rolloutId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "stableVersionId": { "$ref": "#/$defs/versionId" },
+        "previousStableVersionId": {
+          "oneOf": [{ "$ref": "#/$defs/versionId" }, { "type": "null" }]
+        },
+        "canaryVersionId": {
+          "oneOf": [{ "$ref": "#/$defs/versionId" }, { "type": "null" }]
+        },
+        "canaryPercent": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "rowVersion": { "type": "integer", "minimum": 1 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

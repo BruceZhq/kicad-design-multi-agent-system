@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "1.0",
+  "policyId": "ratsnest-harness-governance",
+  "policyVersion": "1.0.0",
+  "invariants": [
+    {
+      "id": "tenant-isolation",
+      "description": "A run, checkpoint, memory record, artifact, and trace must remain scoped to its authenticated tenant and project.",
+      "mutableByEvolution": false
+    },
+    {
+      "id": "release-truth",
+      "description": "Narrative output cannot override artifact existence, KiCad validation, routing, ERC, DRC, or independent-review evidence.",
+      "mutableByEvolution": false
+    },
+    {
+      "id": "no-fabricated-eda-evidence",
+      "description": "KiCad symbols, footprints, pin-pad compatibility, tool results, and manufacturing artifacts must be grounded in actual files or tool output.",
+      "mutableByEvolution": false
+    },
+    {
+      "id": "user-constraint-preservation",
+      "description": "A repair cannot silently remove or weaken an accepted user hard constraint in order to pass a grader.",
+      "mutableByEvolution": false
+    },
+    {
+      "id": "immutable-run-version",
+      "description": "A run is pinned to one harness, policy, profile, model-policy, and toolchain identity for its complete lifetime.",
+      "mutableByEvolution": false
+    },
+    {
+      "id": "sealed-evaluation",
+      "description": "A patch-producing agent cannot read or modify sealed holdout cases, adversarial graders, or release-policy decisions.",
+      "mutableByEvolution": false
+    },
+    {
+      "id": "human-governed-release",
+      "description": "An evolution candidate may create evidence and a draft patch, but production promotion requires an authenticated approval and a reversible rollout.",
+      "mutableByEvolution": false
+    }
+  ],
+  "changePolicy": {
+    "allowedLowRiskGlobs": [
+      "src/agents/ratsnestpro/intent_router.py",
+      "src/agents/ratsnestpro/decision_engine.py",
+      "src/agents/ratsnestpro/retry_policy.py",
+      "src/agents/ratsnestpro/remediation_search.py",
+      "src/agents/ratsnestpro/profiles/*.json",
+      "docs/**/*.md",
+      "tests/evolution/**/*.py"
+    ],
+    "deniedGlobs": [
+      ".github/workflows/**",
+      "backend/src/main/resources/db/migration/**",
+      "backend/src/main/java/**/identity/**",
+      "backend/src/main/java/**/security/**",
+      "contracts/evolution/**/sealed/**",
+      "evals/sealed/**",
+      "deploy/**",
+      "privatecredentials/**",
+      "**/.env",
+      "**/*secret*",
+      "**/*credential*"
+    ],
+    "maxChangedFiles": 8,
+    "maxAddedLines": 500,
+    "allowAutomaticMerge": false,
+    "allowAutomaticProductionPromotion": false
+  }
+}

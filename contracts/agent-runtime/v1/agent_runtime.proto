@@ -12,6 +12,7 @@ service AgentRuntimeService {
   rpc StartRun(StartRunRequest) returns (Run);
   rpc GetRun(GetRunRequest) returns (Run);
   rpc ControlRun(ControlRunRequest) returns (Run);
+  rpc ResumeRun(ResumeRunRequest) returns (Run);
   rpc SubscribeRunEvents(SubscribeRunEventsRequest) returns (stream RunEvent);
 }
 
@@ -49,6 +50,17 @@ message ControlRunRequest {
   RunControl control = 2;
 }
 
+message ResumeRunRequest {
+  GetRunRequest run = 1;
+  string interaction_id = 2;
+  string response_request_id = 3;
+  string answer = 4;
+  uint64 state_version = 5;
+  optional string model = 6;
+  optional double timeout_seconds = 7;
+  string config_json = 8;
+}
+
 message SubscribeRunEventsRequest {
   GetRunRequest run = 1;
   uint64 last_event_seq = 2;
@@ -62,6 +74,7 @@ enum RunState {
   RUN_STATE_FAILED = 4;
   RUN_STATE_CANCELLED = 5;
   RUN_STATE_TIMED_OUT = 6;
+  RUN_STATE_WAITING_FOR_INPUT = 7;
 }
 
 message Run {

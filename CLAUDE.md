@@ -8,19 +8,10 @@
 - Exception: brand-new files may start with a short, genuinely useful module/file-level docstring. This does not license verbose inline comments throughout the rest of the file.
 - When editing an existing file, match its existing comment density and style rather than introducing a heavier style than what's already there.
 
-## Maintainer scaffolding vs. template content
+## Project constraints
 
-This repo is a GitHub template. `.github/workflows/template-cleanup.yml` strips
-maintainer-only scaffolding from downstream clones on first instantiation, driven by
-conventions rather than a hardcoded list. Put new scaffolding where the cleanup already
-covers it:
-
-- Maintainer automation (skills, hooks, scheduled runs) goes in `.claude/` or
-  `docs/maintenance/` — whole-directory buckets, removed entirely, auto-covered.
-- A maintainer-only *workflow* must carry the owner-guard
-  `if: github.repository == 'JoshuaC215/agent-service-toolkit'` line; the cleanup
-  removes any guarded workflow, so this is auto-covered too.
-- ONLY when a maintainer-only file must live in a shared dir (`scripts/`, etc.) and
-  can't carry the guard marker do you add it to the explicit list in
-  `template-cleanup.yml`. Adding such a file without updating the cleanup is the one
-  case that leaks scaffolding into clones.
+- Keep `ratsnestpro` and `ratsnest-*` internal IDs stable even when user-facing branding changes.
+- The Java control plane owns SaaS identity and Run state; the Python runtime owns Agent execution.
+- Never hardcode a board answer or report EDA evidence that was not produced by the toolchain.
+- Harness evolution may prepare and evaluate a candidate, but it must not merge, push, or deploy it.
+- Prefer narrow unit/static gates; do not start LLM, KiCad, Freerouting, or full Docker for routine edits.

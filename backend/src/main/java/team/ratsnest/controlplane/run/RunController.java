@@ -29,6 +29,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import team.ratsnest.controlplane.agentgateway.AgentRuntimeGateway.CapabilityProfile;
@@ -90,6 +91,26 @@ public class RunController {
             @PathVariable UUID runId,
             @AuthenticationPrincipal Jwt jwt) {
         return RunResponse.from(runs.cancel(tenantId, runId, AuthenticatedActor.from(jwt)));
+    }
+
+    @PostMapping("/runs/{runId}/interactions/{interactionId}:respond")
+    ResponseEntity<RunResponse> respond(
+            @RequestHeader(ORGANIZATION_HEADER) UUID tenantId,
+            @PathVariable UUID runId,
+            @PathVariable @Pattern(regexp = "[A-Za-z0-9._:-]{1,200}") String interactionId,
+            @RequestHeader(IDEMPOTENCY_HEADER)
+            @Pattern(regexp = "[A-Za-z0-9._:-]{8,200}") String idempotencyKey,
+            @Valid @RequestBody InteractionResponseRequest request,
+            @AuthenticationPrincipal Jwt jwt) {
+        Run run = runs.respond(
+                tenantId,
+                runId,
+                interactionId,
+                idempotencyKey,
+                request.answer().strip(),
+                request.stateVersion(),
+                AuthenticatedActor.from(jwt));
+        return ResponseEntity.accepted().body(RunResponse.from(run));
     }
 
     @PostMapping("/runs/{runId}/revisions")
@@ -212,6 +233,11 @@ public class RunController {
     record RevisionRequest(@NotBlank @Size(max = 99_979) String feedback) {
     }
 
+    record InteractionResponseRequest(
+            @NotBlank @Size(max = 100_000) String answer,
+            @Positive long stateVersion) {
+    }
+
     record RunResponse(
             UUID runId,
             UUID projectId,
@@ -220,6 +246,7 @@ public class RunController {
             int revisionNumber,
             String threadId,
             CapabilityProfileSnapshot capabilityProfile,
+            HarnessVersionSnapshot harnessVersion,
             String state,
             String deliveryStatus,
             Instant createdAt,
@@ -243,6 +270,10 @@ public class RunController {
                                     run.profileId(),
                                     run.profileVersion(),
                                     run.profileDigest()),
+                    new HarnessVersionSnapshot(
+                            run.harnessVersionId(),
+                            run.harnessManifestDigest(),
+                            run.harnessChannel()),
                     run.state().name(),
                     run.deliveryStatus() == null ? null : run.deliveryStatus().apiValue(),
                     run.createdAt(),
@@ -255,6 +286,9 @@ public class RunController {
     }
 
     record CapabilityProfileSnapshot(String id, String version, String digest) {
+    }
+
+    record HarnessVersionSnapshot(String id, String manifestDigest, String channel) {
     }
 
     record RunEventResponse(

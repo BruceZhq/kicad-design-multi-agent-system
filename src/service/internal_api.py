@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hmac
 from typing import Annotated, Any
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 
@@ -55,6 +56,17 @@ class InternalHistoryRequest(BaseModel):
 
     request_id: str = Field(min_length=8, max_length=200)
     thread_id: str = Field(min_length=1, max_length=200)
+
+
+class InternalInteractionResponseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    response_request_id: UUID
+    answer: str = Field(min_length=1, max_length=100_000)
+    state_version: int = Field(ge=1)
+    model: SerializeAsAny[AllModelEnum] | None = None
+    timeout_seconds: float | None = Field(default=None, ge=1, le=86_400)
+    agent_config: dict[str, Any] = Field(default_factory=dict)
 
 
 router = APIRouter(prefix="/internal/v1")
@@ -152,6 +164,44 @@ async def internal_run_status(
     from service.service import run_status
 
     return await run_status(request_id, _owner_id(claims))
+
+
+@router.post("/runs/{request_id}/interactions/{interaction_id}/responses")
+async def internal_resume_interaction(
+    request_id: str,
+    interaction_id: Annotated[
+        str,
+        Path(pattern=r"^[A-Za-z0-9._:-]{1,200}$"),
+    ],
+    input: InternalInteractionResponseRequest,
+    claims: Annotated[InternalClaims, Depends(verified_internal_claims)],
+) -> RunStatus:
+    _require_request_run(claims, request_id)
+    from service.service import resume_interaction, run_status
+
+    current = await run_status(request_id, _owner_id(claims))
+    runtime_input = StreamInput(
+        message=input.answer,
+        model=input.model,
+        thread_id=current.thread_id,
+        user_id=claims.subject,
+        request_id=request_id,
+        timeout_seconds=input.timeout_seconds,
+        agent_config=input.agent_config,
+        stream_tokens=True,
+    )
+    runtime_input.bind_runtime_identity(
+        principal_id=claims.subject,
+        tenant_id=claims.tenant_id,
+        project_id=claims.project_id,
+    )
+    return await resume_interaction(
+        runtime_input,
+        interaction_id=interaction_id,
+        response_request_id=str(input.response_request_id),
+        state_version=input.state_version,
+        agent_id=_AGENT_ID,
+    )
 
 
 @router.delete("/runs/{request_id}")

@@ -3,13 +3,29 @@ kind: Deployment
 metadata:
   name: ratsnest-agent-service
   namespace: ratsnest
+  labels:
+    app.kubernetes.io/part-of: ratsnestpro
+    ratsnest.io/release-track: stable
+  annotations:
+    ratsnest.io/harness-version: legacy-baseline
+    ratsnest.io/runtime-image-digest: replace-me
+    ratsnest.io/harness-manifest-digest: 0000000000000000000000000000000000000000000000000000000000000000
 spec:
   replicas: 2
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
   selector:
     matchLabels: { app: ratsnest-agent-service }
   template:
     metadata:
-      labels: { app: ratsnest-agent-service, app.kubernetes.io/part-of: ratsnestpro }
+      labels:
+        app: ratsnest-agent-service
+        app.kubernetes.io/part-of: ratsnestpro
+        ratsnest.io/release-track: stable
+        ratsnest.io/harness-version: legacy-baseline
+      annotations:
+        ratsnest.io/runtime-image-digest: replace-me
+        ratsnest.io/harness-manifest-digest: 0000000000000000000000000000000000000000000000000000000000000000
     spec:
       serviceAccountName: ratsnest-runtime
       securityContext:
@@ -29,6 +45,10 @@ spec:
           envFrom:
             - configMapRef: { name: ratsnest-runtime-config }
             - secretRef: { name: ratsnest-runtime-secrets }
+          env:
+            - { name: RATSNEST_HARNESS_VERSION_ID, value: legacy-baseline }
+            - { name: RATSNEST_HARNESS_CHANNEL, value: stable }
+            - { name: RATSNEST_HARNESS_MANIFEST_DIGEST, value: 0000000000000000000000000000000000000000000000000000000000000000 }
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: [ALL] }
@@ -65,13 +85,29 @@ kind: Deployment
 metadata:
   name: ratsnest-temporal-worker
   namespace: ratsnest
+  labels:
+    app.kubernetes.io/part-of: ratsnestpro
+    ratsnest.io/release-track: stable
+  annotations:
+    ratsnest.io/harness-version: legacy-baseline
+    ratsnest.io/runtime-image-digest: replace-me
+    ratsnest.io/harness-manifest-digest: 0000000000000000000000000000000000000000000000000000000000000000
 spec:
   replicas: 2
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
   selector:
     matchLabels: { app: ratsnest-temporal-worker }
   template:
     metadata:
-      labels: { app: ratsnest-temporal-worker, app.kubernetes.io/part-of: ratsnestpro }
+      labels:
+        app: ratsnest-temporal-worker
+        app.kubernetes.io/part-of: ratsnestpro
+        ratsnest.io/release-track: stable
+        ratsnest.io/harness-version: legacy-baseline
+      annotations:
+        ratsnest.io/runtime-image-digest: replace-me
+        ratsnest.io/harness-manifest-digest: 0000000000000000000000000000000000000000000000000000000000000000
     spec:
       serviceAccountName: ratsnest-runtime
       terminationGracePeriodSeconds: 90
@@ -89,6 +125,10 @@ spec:
           envFrom:
             - configMapRef: { name: ratsnest-runtime-config }
             - secretRef: { name: ratsnest-runtime-secrets }
+          env:
+            - { name: RATSNEST_HARNESS_VERSION_ID, value: legacy-baseline }
+            - { name: RATSNEST_HARNESS_CHANNEL, value: stable }
+            - { name: RATSNEST_HARNESS_MANIFEST_DIGEST, value: 0000000000000000000000000000000000000000000000000000000000000000 }
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: [ALL] }

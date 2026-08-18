@@ -59,10 +59,20 @@ ratsnest:
     download-ttl: ${RATSNEST_ARTIFACT_DOWNLOAD_TTL:5m}
   agent-runtime:
     base-url: ${RATSNEST_AGENT_RUNTIME_URL:}
+    canary-base-url: ${RATSNEST_AGENT_RUNTIME_CANARY_URL:}
     transport: ${RATSNEST_AGENT_RUNTIME_TRANSPORT:http}
     grpc-target: ${RATSNEST_AGENT_RUNTIME_GRPC_TARGET:}
     grpc-plaintext: ${RATSNEST_AGENT_RUNTIME_GRPC_PLAINTEXT:false}
+    canary-grpc-target: ${RATSNEST_AGENT_RUNTIME_CANARY_GRPC_TARGET:}
+    canary-grpc-plaintext: ${RATSNEST_AGENT_RUNTIME_CANARY_GRPC_PLAINTEXT:false}
     signing-secret: ${RATSNEST_INTERNAL_SIGNING_SECRET:}
+  harness:
+    version-id: ${RATSNEST_HARNESS_VERSION_ID:legacy-baseline}
+    channel: ${RATSNEST_HARNESS_CHANNEL:stable}
+    rollout-id: ${RATSNEST_HARNESS_ROLLOUT_ID:production}
+    routing-secret: ${RATSNEST_HARNESS_ROUTING_SECRET:${RATSNEST_INTERNAL_SIGNING_SECRET:}}
+  evolution:
+    fingerprint-secret: ${RATSNEST_EVOLUTION_FINGERPRINT_SECRET:${RATSNEST_INTERNAL_SIGNING_SECRET:}}
   database:
     verify-isolation: true
   run-outbox:

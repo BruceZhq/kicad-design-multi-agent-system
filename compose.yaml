@@ -15,6 +15,32 @@ services:
       timeout: 5s
       retries: 5
 
+  # Idempotent local role/schema bootstrap. Existing volumes with legacy object
+  # owners fail closed and require an operator-reviewed ownership migration.
+  postgres_control_plane_bootstrap:
+    profiles: [control-plane]
+    image: postgres:16
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - PGHOST=postgres
+      - PGDATABASE=${POSTGRES_DB:-agent_service}
+      - PGUSER=${POSTGRES_USER:-postgres}
+      - PGPASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - RATSNEST_DB_PASSWORD=${RATSNEST_DB_PASSWORD:-${POSTGRES_PASSWORD:-postgres}}
+      - RATSNEST_FLYWAY_PASSWORD=${RATSNEST_FLYWAY_PASSWORD:-${POSTGRES_PASSWORD:-postgres}}
+    volumes:
+      - ./docker/postgres/bootstrap-control-plane.sql:/bootstrap/bootstrap-control-plane.sql:ro
+    command:
+      - /bin/sh
+      - -ec
+      - >-
+        psql --set=app_password="$$RATSNEST_DB_PASSWORD"
+        --set=migrator_password="$$RATSNEST_FLYWAY_PASSWORD"
+        --file=/bootstrap/bootstrap-control-plane.sql
+    restart: "no"
+
   redis:
     image: redis:8.2.8-alpine
     command:
@@ -153,12 +179,11 @@ services:
 
   # Optional local S3-compatible store for Increment 7 acceptance. The
   # profile is opt-in so normal agent development does not consume memory or
-  # disk. The image is deliberately preloaded-only to avoid an implicit pull
-  # into Docker Desktop's system disk.
+  # disk. The image remains configurable for mirrored or digest-pinned
+  # registries, while a clean clone may pull the documented default.
   minio:
-    profiles: [artifact-store]
+    profiles: [artifact-store, identity]
     image: ${RATSNEST_MINIO_IMAGE:-pgsty/minio:RELEASE.2026-03-25T00-00-00Z}
-    pull_policy: never
     command: ["server", "/data", "--console-address", ":9001"]
     ports:
       - "127.0.0.1:${RATSNEST_MINIO_API_PORT:-9000}:9000"
@@ -176,9 +201,8 @@ services:
       retries: 20
 
   minio_init:
-    profiles: [artifact-store]
+    profiles: [artifact-store, identity]
     image: ${RATSNEST_MINIO_IMAGE:-pgsty/minio:RELEASE.2026-03-25T00-00-00Z}
-    pull_policy: never
     depends_on:
       minio:
         condition: service_healthy
@@ -306,6 +330,9 @@ services:
       - RATSNEST_INTERNAL_GRPC_ENABLED=${RATSNEST_INTERNAL_GRPC_ENABLED:-false}
       - RATSNEST_INTERNAL_GRPC_HOST=0.0.0.0
       - RATSNEST_INTERNAL_GRPC_PORT=${RATSNEST_INTERNAL_GRPC_PORT:-9090}
+      - RATSNEST_HARNESS_VERSION_ID=${RATSNEST_HARNESS_VERSION_ID:-legacy-baseline}
+      - RATSNEST_HARNESS_CHANNEL=${RATSNEST_HARNESS_CHANNEL:-stable}
+      - RATSNEST_HARNESS_MANIFEST_DIGEST=${RATSNEST_HARNESS_MANIFEST_DIGEST:-0000000000000000000000000000000000000000000000000000000000000000}
     develop:
       watch:
         - path: src/agents/
@@ -375,6 +402,42 @@ services:
       - RATSNESTPRO_REQUIRE_FREEROUTING=${RATSNESTPRO_REQUIRE_FREEROUTING:-true}
       - RATSNESTPRO_MAX_ROUTE_INVOCATIONS=${RATSNESTPRO_MAX_ROUTE_INVOCATIONS:-3}
       - RATSNESTPRO_ROUTER_TIMEOUT_SECONDS=${RATSNESTPRO_ROUTER_TIMEOUT_SECONDS:-600}
+      - RATSNEST_HARNESS_VERSION_ID=${RATSNEST_HARNESS_VERSION_ID:-legacy-baseline}
+      - RATSNEST_HARNESS_CHANNEL=${RATSNEST_HARNESS_CHANNEL:-stable}
+      - RATSNEST_HARNESS_MANIFEST_DIGEST=${RATSNEST_HARNESS_MANIFEST_DIGEST:-0000000000000000000000000000000000000000000000000000000000000000}
+
+  # Opt-in developer worker for governed Harness Evolution. It uses the
+  # already-built Runtime as a named build context, adds only Git plus the
+  # locked test toolchain, and never starts with the normal product profile.
+  # The repository mount is intentionally writable because `git worktree`
+  # stores registration metadata under .git; candidate files themselves are
+  # materialized only in the separate sandbox volume.
+  evolution_worker:
+    profiles: [evolution]
+    image: ratsnestpro-evolution-worker:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.evolution
+      additional_contexts:
+        agent_runtime: service:agent_service
+    command: ["python", "-m", "evolution.temporal.worker"]
+    env_file:
+      - .env
+    depends_on:
+      temporal:
+        condition: service_healthy
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    volumes:
+      - ./:/repository
+      - evolution_sandbox:/evolution-sandbox
+    environment:
+      - TEMPORAL_ADDRESS=${TEMPORAL_ADDRESS:-temporal:7233}
+      - TEMPORAL_NAMESPACE=${TEMPORAL_NAMESPACE:-default}
+      - RATSNEST_EVOLUTION_TEMPORAL_TASK_QUEUE=${RATSNEST_EVOLUTION_TEMPORAL_TASK_QUEUE:-ratsnest-evolution}
+      - RATSNEST_EVOLUTION_REPOSITORY_ROOT=/repository
+      - RATSNEST_EVOLUTION_SANDBOX_ROOT=/evolution-sandbox
 
   kafka_audit_relay:
     image: ratsnestpro-agent-runtime:local
@@ -407,8 +470,24 @@ services:
       - KAFKA_AUDIT_BATCH_SIZE=${KAFKA_AUDIT_BATCH_SIZE:-100}
       - KAFKA_AUDIT_POLL_MS=${KAFKA_AUDIT_POLL_MS:-1000}
 
-  # Opt-in until an external migrator has created the schema and the
-  # NOSUPERUSER/NOBYPASSRLS ratsnest_app login has been provisioned.
+  control_plane_migrate:
+    profiles: [control-plane]
+    image: agent-service-toolkit-main-control_plane:latest
+    depends_on:
+      postgres_control_plane_bootstrap:
+        condition: service_completed_successfully
+    environment:
+      - RATSNEST_FLYWAY_URL=${RATSNEST_FLYWAY_URL:-jdbc:postgresql://postgres:5432/${POSTGRES_DB:-agent_service}}
+      - RATSNEST_FLYWAY_USER=${RATSNEST_FLYWAY_USER:-ratsnest_migrator}
+      - RATSNEST_FLYWAY_PASSWORD=${RATSNEST_FLYWAY_PASSWORD:-${POSTGRES_PASSWORD:-postgres}}
+    entrypoint: ["java"]
+    command:
+      - -Dloader.main=team.ratsnest.controlplane.bootstrap.FlywayMigrationMain
+      - -cp
+      - /app/app.jar
+      - org.springframework.boot.loader.launch.PropertiesLauncher
+    restart: "no"
+
   control_plane:
     profiles: [control-plane]
     image: agent-service-toolkit-main-control_plane:latest
@@ -427,8 +506,8 @@ services:
     ports:
       - "127.0.0.1:8081:8080"
     depends_on:
-      postgres:
-        condition: service_healthy
+      control_plane_migrate:
+        condition: service_completed_successfully
       agent_service:
         condition: service_healthy
     init: true
@@ -446,7 +525,7 @@ services:
       retries: 10
     environment:
       - SPRING_PROFILES_ACTIVE=${SPRING_PROFILES_ACTIVE:-dev}
-      - RATSNEST_DB_URL=${RATSNEST_DB_URL:-jdbc:postgresql://postgres:5432/agent_service}
+      - RATSNEST_DB_URL=${RATSNEST_DB_URL:-jdbc:postgresql://postgres:5432/${POSTGRES_DB:-agent_service}}
       - RATSNEST_DB_USER=${RATSNEST_DB_USER:-ratsnest_app}
       - RATSNEST_DB_PASSWORD=${RATSNEST_DB_PASSWORD:-${POSTGRES_PASSWORD:-postgres}}
       - RATSNEST_OIDC_ISSUER_URI=${RATSNEST_OIDC_ISSUER_URI:-http://auth.localhost:8180/realms/ratsnest-dev}
@@ -458,9 +537,15 @@ services:
       - RATSNEST_DEV_OIDC_JWK_SET_URI=${RATSNEST_OIDC_JWK_SET_URI:-http://auth.localhost:8180/realms/ratsnest-dev/protocol/openid-connect/certs}
       - RATSNEST_DEV_OIDC_AUDIENCE=${RATSNEST_OIDC_AUDIENCE:-ratsnest-api}
       - RATSNEST_AGENT_RUNTIME_URL=http://agent-service:8080
+      - RATSNEST_AGENT_RUNTIME_CANARY_URL=${RATSNEST_AGENT_RUNTIME_CANARY_URL:-}
       - RATSNEST_AGENT_RUNTIME_TRANSPORT=${RATSNEST_AGENT_RUNTIME_TRANSPORT:-http}
       - RATSNEST_AGENT_RUNTIME_GRPC_TARGET=${RATSNEST_AGENT_RUNTIME_GRPC_TARGET:-agent-service:9090}
       - RATSNEST_AGENT_RUNTIME_GRPC_PLAINTEXT=${RATSNEST_AGENT_RUNTIME_GRPC_PLAINTEXT:-true}
+      - RATSNEST_AGENT_RUNTIME_CANARY_GRPC_TARGET=${RATSNEST_AGENT_RUNTIME_CANARY_GRPC_TARGET:-}
+      - RATSNEST_AGENT_RUNTIME_CANARY_GRPC_PLAINTEXT=${RATSNEST_AGENT_RUNTIME_CANARY_GRPC_PLAINTEXT:-true}
+      - RATSNEST_HARNESS_ROLLOUT_ID=${RATSNEST_HARNESS_ROLLOUT_ID:-production}
+      - RATSNEST_HARNESS_ROUTING_SECRET=${RATSNEST_HARNESS_ROUTING_SECRET:-${RATSNEST_INTERNAL_SIGNING_SECRET:-}}
+      - RATSNEST_EVOLUTION_FINGERPRINT_SECRET=${RATSNEST_EVOLUTION_FINGERPRINT_SECRET:-${RATSNEST_INTERNAL_SIGNING_SECRET:-}}
       - RATSNEST_INTERNAL_SIGNING_SECRET=${RATSNEST_INTERNAL_SIGNING_SECRET:-}
       - RATSNEST_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
       - RATSNEST_KAFKA_SECURITY_PROTOCOL=${RATSNEST_KAFKA_SECURITY_PROTOCOL:-PLAINTEXT}
@@ -486,7 +571,9 @@ services:
       context: .
       dockerfile: docker/Dockerfile.frontend
     ports:
-      - "3000:3000"
+      # Direct port is loopback-only for health/debug. The product entry point
+      # is oauth2-proxy on :8088, which injects the verified OIDC token.
+      - "127.0.0.1:3000:3000"
     depends_on:
       control_plane:
         condition: service_healthy
@@ -554,3 +641,4 @@ volumes:
   kafka_data:
   temporal_data:
   minio_data:
+  evolution_sandbox:

@@ -44,7 +44,8 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
     private static final Set<String> PROFILE_FIELDS = Set.of(
             "id", "version", "digest", "title", "description");
 
-    private final URI baseUri;
+    private final URI stableBaseUri;
+    private final URI canaryBaseUri;
     private final InternalTaskSigner signer;
     private final ObjectMapper objectMapper;
     private final ExecutorService executor;
@@ -52,9 +53,13 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
 
     public HttpAgentRuntimeGateway(
             @Value("${ratsnest.agent-runtime.base-url:}") String baseUrl,
+            @Value("${ratsnest.agent-runtime.canary-base-url:}") String canaryBaseUrl,
             InternalTaskSigner signer,
             ObjectMapper objectMapper) {
-        this.baseUri = validateBaseUri(baseUrl);
+        this.stableBaseUri = validateBaseUri(baseUrl);
+        this.canaryBaseUri = canaryBaseUrl == null || canaryBaseUrl.isBlank()
+                ? null
+                : validateBaseUri(canaryBaseUrl);
         this.signer = signer;
         this.objectMapper = objectMapper;
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -72,7 +77,9 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
     public RuntimeRun startRun(StartRunCommand command) {
         byte[] body = jsonBytes(streamBody(command, 0));
         HttpResponse<InputStream> response = send(
-                request("POST", streamPath(), body, command.identity(), command.requestId(), "text/event-stream"),
+                routedRequest(
+                        "POST", streamPath(), body, command.identity(), command.requestId(),
+                        "text/event-stream", channel(command.config())),
                 HttpResponse.BodyHandlers.ofInputStream());
         try {
             requireStreamSuccess(response);
@@ -104,26 +111,12 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
     public RuntimeRun getRun(RunReference reference) {
         String path = "/internal/v1/runs/" + encodePathSegment(reference.requestId());
         HttpResponse<byte[]> response = send(
-                request("GET", path, EMPTY_BODY, reference.identity(), reference.requestId(), "application/json"),
+                routedRequest(
+                        "GET", path, EMPTY_BODY, reference.identity(), reference.requestId(),
+                        "application/json", reference.runtimeChannel()),
                 HttpResponse.BodyHandlers.ofByteArray());
         requireSuccess(response.statusCode(), response.body());
-        Map<String, Object> value = jsonObject(response.body());
-        return new RuntimeRun(
-                text(value, "request_id"),
-                nullableText(value.get("run_id")),
-                text(value, "kind"),
-                state(text(value, "status")),
-                text(value, "agent_id"),
-                text(value, "thread_id"),
-                instant(value.get("created_at")),
-                nullableInstant(value.get("started_at")),
-                nullableInstant(value.get("finished_at")),
-                number(value.get("event_count"), "event_count"),
-                nullableNumber(value.get("oldest_event_id"), "oldest_event_id"),
-                nullableNumber(value.get("newest_event_id"), "newest_event_id"),
-                nullableText(value.get("error_code")),
-                nullableText(value.get("error")),
-                runtimeResult(value));
+        return runtimeRun(jsonObject(response.body()));
     }
 
     @Override
@@ -134,10 +127,34 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
         RunReference reference = command.run();
         String path = "/internal/v1/runs/" + encodePathSegment(reference.requestId());
         HttpResponse<byte[]> response = send(
-                request("DELETE", path, EMPTY_BODY, reference.identity(), reference.requestId(), "application/json"),
+                routedRequest(
+                        "DELETE", path, EMPTY_BODY, reference.identity(), reference.requestId(),
+                        "application/json", reference.runtimeChannel()),
                 HttpResponse.BodyHandlers.ofByteArray());
         requireSuccess(response.statusCode(), response.body());
         return getRun(reference);
+    }
+
+    @Override
+    public RuntimeRun resumeRun(ResumeRunCommand command) {
+        RunReference reference = command.run();
+        String path = "/internal/v1/runs/" + encodePathSegment(reference.requestId())
+                + "/interactions/" + encodePathSegment(command.interactionId()) + "/responses";
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("response_request_id", command.responseRequestId());
+        request.put("answer", command.answer());
+        request.put("state_version", command.stateVersion());
+        request.put("model", command.model());
+        request.put("timeout_seconds", command.timeoutSeconds());
+        request.put("agent_config", command.config());
+        byte[] body = jsonBytes(request);
+        HttpResponse<byte[]> response = send(
+                routedRequest(
+                        "POST", path, body, reference.identity(), reference.requestId(),
+                        "application/json", reference.runtimeChannel()),
+                HttpResponse.BodyHandlers.ofByteArray());
+        requireSuccess(response.statusCode(), response.body());
+        return runtimeRun(jsonObject(response.body()));
     }
 
     @Override
@@ -214,7 +231,21 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
             RuntimeIdentity identity,
             String runId,
             String accept) {
-        return requestBuilder(method, path, body, identity, runId, accept)
+        return requestBuilder(stableBaseUri, method, path, body, identity, runId, accept)
+                .timeout(UNARY_TIMEOUT)
+                .build();
+    }
+
+    private HttpRequest routedRequest(
+            String method,
+            String path,
+            byte[] body,
+            RuntimeIdentity identity,
+            String runId,
+            String accept,
+            String runtimeChannel) {
+        return requestBuilder(
+                        baseUri(runtimeChannel), method, path, body, identity, runId, accept)
                 .timeout(UNARY_TIMEOUT)
                 .build();
     }
@@ -226,10 +257,24 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
             RuntimeIdentity identity,
             String runId,
             String accept) {
-        return requestBuilder(method, path, body, identity, runId, accept).build();
+        return requestBuilder(stableBaseUri, method, path, body, identity, runId, accept).build();
+    }
+
+    private HttpRequest routedStreamingRequest(
+            String method,
+            String path,
+            byte[] body,
+            RuntimeIdentity identity,
+            String runId,
+            String accept,
+            String runtimeChannel) {
+        return requestBuilder(
+                        baseUri(runtimeChannel), method, path, body, identity, runId, accept)
+                .build();
     }
 
     private HttpRequest.Builder requestBuilder(
+            URI baseUri,
             String method,
             String path,
             byte[] body,
@@ -249,6 +294,26 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
 
     private String streamPath() {
         return "/internal/v1/runs/" + AGENT_ID + "/stream";
+    }
+
+    private URI baseUri(String runtimeChannel) {
+        if (!"canary".equals(runtimeChannel)) {
+            return stableBaseUri;
+        }
+        if (canaryBaseUri == null) {
+            throw new AgentRuntimeException(
+                    503, "Canary Agent Runtime endpoint is not configured");
+        }
+        return canaryBaseUri;
+    }
+
+    private String channel(Map<String, Object> config) {
+        Object harness = config.get("harness_version");
+        if (harness instanceof Map<?, ?> values
+                && "canary".equals(values.get("channel"))) {
+            return "canary";
+        }
+        return "stable";
     }
 
     private <T> HttpResponse<T> send(
@@ -300,6 +365,7 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
                 case CANCELLED -> "cancelled";
                 case TIMED_OUT -> "timed_out";
                 case FAILED -> "failed";
+                case WAITING_FOR_INPUT -> "waiting_for_input";
                 default -> throw new AgentRuntimeException(
                         502,
                         "Agent Runtime ended its event stream before publishing a terminal state");
@@ -317,6 +383,15 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
             return new RuntimeEvent(eventId, "message", message, null, null, Map.of());
         }
         if ("artifact_manifest".equals(type)) {
+            return new RuntimeEvent(
+                    eventId,
+                    type,
+                    null,
+                    null,
+                    null,
+                    object(envelope.get("content")));
+        }
+        if ("ag_ui".equals(type)) {
             return new RuntimeEvent(
                     eventId,
                     type,
@@ -345,7 +420,8 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
     }
 
     private RuntimeRun awaitTerminalRun(StartRunCommand command) {
-        RunReference reference = new RunReference(command.requestId(), command.identity());
+        RunReference reference = new RunReference(
+                command.requestId(), command.identity(), channel(command.config()));
         RuntimeRun run = getRun(reference);
         for (int attempt = 0; !isTerminal(run.state()) && attempt < 20; attempt++) {
             try {
@@ -360,10 +436,30 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
     }
 
     private boolean isTerminal(RunState state) {
-        return state == RunState.COMPLETED
+        return state == RunState.WAITING_FOR_INPUT
+                || state == RunState.COMPLETED
                 || state == RunState.FAILED
                 || state == RunState.CANCELLED
                 || state == RunState.TIMED_OUT;
+    }
+
+    private RuntimeRun runtimeRun(Map<String, Object> value) {
+        return new RuntimeRun(
+                text(value, "request_id"),
+                nullableText(value.get("run_id")),
+                text(value, "kind"),
+                state(text(value, "status")),
+                text(value, "agent_id"),
+                text(value, "thread_id"),
+                instant(value.get("created_at")),
+                nullableInstant(value.get("started_at")),
+                nullableInstant(value.get("finished_at")),
+                number(value.get("event_count"), "event_count"),
+                nullableNumber(value.get("oldest_event_id"), "oldest_event_id"),
+                nullableNumber(value.get("newest_event_id"), "newest_event_id"),
+                nullableText(value.get("error_code")),
+                nullableText(value.get("error")),
+                runtimeResult(value));
     }
 
     private RuntimeMessage runtimeMessage(Map<String, Object> value) {
@@ -586,6 +682,8 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
         private volatile boolean cancelled;
         private volatile InputStream input;
         private long demand;
+        private boolean pauseSeen;
+        private boolean terminalSeen;
 
         EventStreamSubscription(
                 Flow.Subscriber<? super RuntimeEvent> subscriber,
@@ -629,19 +727,25 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
             byte[] body = jsonBytes(streamBody(command, subscription.lastEventId()));
             try {
                 HttpResponse<InputStream> response = send(
-                        HttpAgentRuntimeGateway.this.streamingRequest(
+                        HttpAgentRuntimeGateway.this.routedStreamingRequest(
                                 "POST",
                                 streamPath(),
                                 body,
                                 command.identity(),
                                 command.requestId(),
-                                "text/event-stream"),
+                                "text/event-stream",
+                                channel(command.config())),
                         HttpResponse.BodyHandlers.ofInputStream());
                 input = response.body();
                 requireStreamSuccess(response);
                 readEvents(input, command);
                 if (!cancelled) {
-                    subscriber.onComplete();
+                    if (pauseSeen || terminalSeen) {
+                        subscriber.onComplete();
+                    } else {
+                        subscriber.onError(new AgentRuntimeException(
+                                502, "Agent Runtime ended its event stream before publishing a terminal or waiting state"));
+                    }
                 }
             } catch (Exception exception) {
                 if (!cancelled) {
@@ -683,6 +787,16 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
         }
 
         private void emit(RuntimeEvent event) {
+            if ("ag_ui".equals(event.type())
+                    && "ratsnest.human-input-required.v1".equals(event.data().get("name"))) {
+                pauseSeen = true;
+            }
+            if ("completed".equals(event.type())
+                    || "failed".equals(event.type())
+                    || "cancelled".equals(event.type())
+                    || "timed_out".equals(event.type())) {
+                terminalSeen = true;
+            }
             synchronized (demandMonitor) {
                 while (!cancelled && demand == 0) {
                     try {

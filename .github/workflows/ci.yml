@@ -1,0 +1,102 @@
+name: CircuitFoundry infrastructure gates
+
+on:
+  pull_request:
+  push:
+    branches: [main, "codex/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infrastructure-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PYTHONPATH: src
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the pinned package manager
+        run: python -m pip install uv==0.11.29
+
+      - name: Install locked Python dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Validate governed evolution code
+        run: |
+          uv run --frozen ruff check src/evolution tests/evolution
+          uv run --frozen pytest -q tests/evolution
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install locked frontend dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Type-check and build the production frontend
+        run: |
+          npm run typecheck
+          npm run build
+
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Compile and test the Java control plane
+        run: |
+          chmod 0755 mvnw
+          ./mvnw -B -ntp verify
+
+  infrastructure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubectl for local Kustomize rendering
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.31.0
+
+      - name: Validate workflows, Kustomize and release scripts
+        shell: pwsh
+        run: ./scripts/check_infrastructure.ps1
+
+      - name: Validate the clean-clone Compose model
+        shell: bash
+        run: |
+          cp .env.example .env
+          docker compose --profile control-plane --profile identity --profile artifact-store config --quiet

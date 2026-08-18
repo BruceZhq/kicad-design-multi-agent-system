@@ -1,0 +1,19 @@
+{
+  "outcome": "release_ready",
+  "intentMode": "build",
+  "executionComplete": false,
+  "completedSteps": 0,
+  "totalSteps": 17,
+  "artifacts": [],
+  "releaseBlockers": [],
+  "independentReview": "not_run",
+  "roleSequence": ["Supervisor", "Architect"],
+  "aheRepairCount": 0,
+  "recoveredFromFault": false,
+  "llmTokens": 2000,
+  "wallClockSeconds": 30.0,
+  "invariantResults": {
+    "release-truth": false,
+    "no-fabricated-eda-evidence": false
+  }
+}

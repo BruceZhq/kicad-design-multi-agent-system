@@ -20,6 +20,7 @@ class RunState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     RUN_STATE_FAILED: _ClassVar[RunState]
     RUN_STATE_CANCELLED: _ClassVar[RunState]
     RUN_STATE_TIMED_OUT: _ClassVar[RunState]
+    RUN_STATE_WAITING_FOR_INPUT: _ClassVar[RunState]
 RUN_CONTROL_UNSPECIFIED: RunControl
 RUN_CONTROL_CANCEL: RunControl
 RUN_STATE_UNSPECIFIED: RunState
@@ -29,6 +30,7 @@ RUN_STATE_COMPLETED: RunState
 RUN_STATE_FAILED: RunState
 RUN_STATE_CANCELLED: RunState
 RUN_STATE_TIMED_OUT: RunState
+RUN_STATE_WAITING_FOR_INPUT: RunState
 
 class RuntimeIdentity(_message.Message):
     __slots__ = ("principal_id", "tenant_id", "project_id")
@@ -75,6 +77,26 @@ class ControlRunRequest(_message.Message):
     run: GetRunRequest
     control: RunControl
     def __init__(self, run: _Optional[_Union[GetRunRequest, _Mapping]] = ..., control: _Optional[_Union[RunControl, str]] = ...) -> None: ...
+
+class ResumeRunRequest(_message.Message):
+    __slots__ = ("run", "interaction_id", "response_request_id", "answer", "state_version", "model", "timeout_seconds", "config_json")
+    RUN_FIELD_NUMBER: _ClassVar[int]
+    INTERACTION_ID_FIELD_NUMBER: _ClassVar[int]
+    RESPONSE_REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    ANSWER_FIELD_NUMBER: _ClassVar[int]
+    STATE_VERSION_FIELD_NUMBER: _ClassVar[int]
+    MODEL_FIELD_NUMBER: _ClassVar[int]
+    TIMEOUT_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_JSON_FIELD_NUMBER: _ClassVar[int]
+    run: GetRunRequest
+    interaction_id: str
+    response_request_id: str
+    answer: str
+    state_version: int
+    model: str
+    timeout_seconds: float
+    config_json: str
+    def __init__(self, run: _Optional[_Union[GetRunRequest, _Mapping]] = ..., interaction_id: _Optional[str] = ..., response_request_id: _Optional[str] = ..., answer: _Optional[str] = ..., state_version: _Optional[int] = ..., model: _Optional[str] = ..., timeout_seconds: _Optional[float] = ..., config_json: _Optional[str] = ...) -> None: ...
 
 class SubscribeRunEventsRequest(_message.Message):
     __slots__ = ("run", "last_event_seq")

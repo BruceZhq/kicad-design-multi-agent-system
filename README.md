@@ -1,6 +1,6 @@
-# RatsNestPro
+# CircuitFoundry
 
-RatsNestPro 是面向版本化 KiCad 硬件设计场景的企业级多智能体系统。它把自然语言需求转换成可审查的 KiCad 工程、制造文件和风险报告，并通过 Java 控制面提供多租户、身份、任务、产物和审计能力。
+CircuitFoundry 是面向版本化 KiCad 硬件设计场景的企业级多智能体系统。它把自然语言需求转换成可审查的 KiCad 工程、制造文件和风险报告，并通过 Java 控制面提供多租户、身份、任务、产物和审计能力。为保持数据库迁移、内部 API 和既有工程兼容，源码中的 `ratsnestpro`、`ratsnest-*` 仍作为稳定的内部标识存在。
 
 当前生产产品只注册一个 Agent：`ratsnestpro-multi-agent`。旧的通用聊天、RAG、AG-UI、语音和多 Agent 示例代码已经从运行时移除，避免启动时加载无关图和错误地把普通聊天 Agent 当成硬件设计 Agent。
 
@@ -81,17 +81,17 @@ sequenceDiagram
     Web-->>User: Markdown、角色进度、产物和风险
 ```
 
-## AG-UI 是什么
+## AG-UI 前端交互标准
 
 AG-UI（Agent User Interaction）是一个面向 Agent 与前端之间交互事件的通用协议/适配层，通常用于把 Agent 的消息、工具调用、状态更新和流式事件转换为前端可消费的事件流。它适合通用 Copilot 或 Agent UI 集成，但它不是 LangGraph 本身，也不是身份认证协议，更不是 KiCad 执行引擎。
 
-本项目早期曾有 `src/service/agui.py` 和 AG-UI 示例客户端。当前正式产品链路已经固定为：
+CircuitFoundry 将 AG-UI 作为 Agent 事件的前端交互标准，但不把 AG-UI 当作公网认证入口。正式产品链路固定为：
 
 ```text
 浏览器 → OAuth2 Proxy → Next.js BFF → Java Control Plane → Python internal_api/gRPC → RatsNestPro LangGraph
 ```
 
-因此 AG-UI 不再作为正式公网入口。当前前端直接使用 Java 提供的 REST + SSE 契约，浏览器通过 `fetch()` 和 `ReadableStream` 接收有序 `RunEvent`。这避免了两套事件协议、两套认证边界和通用 Agent 路由造成的状态歧义。
+浏览器仍只连接 Java 的 REST + SSE；Java 把 Python Runtime 的消息、工具证据、状态、产物和人工确认事件规范化为 AG-UI 事件。Next.js 通过 `fetch()` 和 `ReadableStream` 消费有序 `RunEvent`，并用 `Last-Event-ID` 恢复。AG-UI 的 `CUSTOM/ratsnest.human-input-required.v1` 驱动同一 Run 的暂停与恢复；普通 Markdown、reasoning 摘要和工具 JSON 则使用各自的可视组件。这样既获得 AG-UI 的前端生态兼容性，又保持 OIDC、租户、审计和 Run 状态只有一条权威链路。
 
 ## 多智能体执行流程
 
@@ -124,7 +124,7 @@ flowchart TD
 
 LangGraph 是 Agent 的有向状态图运行时。它将每一步输入、输出、共享 State、消息列表、节点转移和 checkpoint 明确化，适合需要长流程、可恢复、可审计和人工反馈的工程任务。
 
-在 RatsNestPro 中，Supervisor 是图入口。Architect、Parts Specialist、Hardware Engineer 和 Reviewer 不是互相随意调用的聊天机器人，而是具有边界的阶段节点。确定性工具负责文件、引脚、网络、ERC/DRC 和门禁；LLM 负责资料理解、需求分解、候选选择和解释。
+在 CircuitFoundry 中，Supervisor 是图入口。Architect、Parts Specialist、Hardware Engineer 和 Reviewer 不是互相随意调用的聊天机器人，而是具有边界的阶段节点。确定性工具负责文件、引脚、网络、ERC/DRC 和门禁；LLM 负责资料理解、需求分解、候选选择和解释。
 
 ```mermaid
 stateDiagram-v2
@@ -183,7 +183,7 @@ AHE（Agentic Harness Engineer）处理框架自身的可恢复缺陷，例如�
 
 ### EHE
 
-EHE（Evolutionary Harness Engineer）只记录经过匿名化和独立验证的跨任务失败签名。它不会在运行中自动改写源码；候选策略必须经过回归验证、代码审查和版本发布后才进入下一版本 Harness。
+EHE（Evolutionary Harness Engineer）把匿名化的跨项目失败签名聚合为受治理候选。每个 Run 固化 Harness 版本；候选只能修改低风险白名单文件，不能读取 sealed holdout，也不能改身份、迁移、部署或发布真值。候选必须在隔离 worktree 通过历史、恢复、holdout、对抗和成本 Eval，经人工批准后才能进入 Kubernetes Canary；系统不会自动合并或自动提升到生产。
 
 ## 状态、并发和恢复
 
@@ -235,8 +235,10 @@ flowchart LR
 Copy-Item .env.example .env
 # 编辑 .env，至少配置可用的 LLM 和内部服务密钥
 
-docker compose --profile control-plane --profile identity --profile artifact-store up -d
+docker compose --profile control-plane --profile identity --profile artifact-store up -d --build
 ```
+
+Compose 会先幂等预置 `ratsnest_app` 与 `ratsnest_migrator`，再用独立的 Flyway 进程执行 V1–V10，成功后才启动 Java 控制面。生产环境仍应由平台预置数据库角色，并通过独立 Kubernetes Flyway Job 执行迁移。
 
 访问地址：
 
@@ -249,6 +251,14 @@ docker compose --profile control-plane --profile identity --profile artifact-sto
 | `http://localhost:9001` | MinIO 控制台 |
 
 修改 Python 依赖后需要重新构建 Agent Runtime；修改前端依赖后需要重新构建 Frontend。日常验证优先使用静态检查和轻量 smoke，不要默认启动真实 LLM、KiCad 或 Freerouting。
+
+受治理 Harness Evolution Worker 不随产品默认启动。只有发布工程师准备了候选、Eval 与人工审批流程时，才显式启动单并发 worker：
+
+```powershell
+docker compose --profile evolution up -d --build evolution_worker
+```
+
+该本地入口把当前仓库挂载为候选基线，并只在独立 volume 中建立 detached worktree；它不会 merge、push 或 deploy。该隔离属于受治理的进程/文件边界，不是面向恶意代码的 VM 沙箱。生产环境仍须使用低权限、网络受限的专用 Worker/Pod，并由控制面记录 Trial 与审批证据。
 
 ## 配置与安全
 
@@ -265,6 +275,7 @@ docker compose --profile control-plane --profile identity --profile artifact-sto
 - [LangGraph + Temporal 架构](docs/RATSNESTPRO_LANGGRAPH_TEMPORAL_ARCHITECTURE.md)
 - [生产 Runtime 与恢复](docs/RATSNESTPRO_PRODUCTION_RUNTIME.md)
 - [分布式 Runtime](docs/DISTRIBUTED_RUNTIME.md)
+- [Harness Canary、Flyway 与回滚手册](docs/HARNESS_CANARY_RUNBOOK.md)
 - [完整技术报告](docs/RATSNESTPRO_COMPLETE_PROJECT_TECHNICAL_REPORT_ZH.md)
 
 ## 当前已知边界

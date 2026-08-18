@@ -14,7 +14,7 @@
     "required": ["KiCad schematic and PCB tools", "kicad-cli ERC and DRC", "manufacturing export"],
     "optional": ["Freerouting for non-critical auxiliary routing", "external field or network simulation"]
   },
-  "budget": {"max_wall_clock_minutes": 60, "max_llm_tokens": 120000, "max_ahe_repairs": 6, "max_same_failure_retries": 2},
+  "budget": {"max_wall_clock_minutes": 60, "max_llm_tokens": 1200000, "max_ahe_repairs": 6, "max_same_failure_retries": 2},
   "acceptance": {
     "required_artifacts": ["editable KiCad project", "BOM and placement data", "Gerber and drill outputs", "risk and evidence report"],
     "verification": ["ERC and DRC findings are reported without concealment.", "Impedance assumptions are marked for fabricator review.", "Measurement topology and return paths receive independent review."],

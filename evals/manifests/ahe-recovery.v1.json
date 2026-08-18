@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0",
+  "caseId": "harness.ahe-bounded-recovery.v1",
+  "title": "A bounded AHE repair preserves a complete editable delivery",
+  "suite": "optimization",
+  "inputRef": "evals/fixtures/ahe-recovery.v1.json",
+  "profileReference": "sipi-channel-pdn-eval@1.0",
+  "profileDigest": "de4382568f3c7b3420d19405f09337817c500a7a14f5f65d4b03fb0d688ebb25",
+  "baselineHarnessDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "sealed": false,
+  "invariants": [
+    "release-truth",
+    "user-constraint-preservation"
+  ],
+  "graderIds": [
+    "trajectory",
+    "artifact",
+    "release_truth",
+    "recovery",
+    "security",
+    "cost"
+  ],
+  "expectation": {
+    "allowedOutcomes": ["delivered_with_issues"],
+    "expectedIntent": "build",
+    "requiredArtifacts": [".kicad_sch", ".kicad_pcb"],
+    "minCompletedSteps": 17,
+    "requireExecutionComplete": true,
+    "requireIndependentReview": true,
+    "requireAheRecovery": true,
+    "expectedRoleSequence": [
+      "Supervisor",
+      "Architect",
+      "Parts Specialist",
+      "Hardware Engineer",
+      "Reviewer",
+      "Supervisor"
+    ],
+    "maxAheRepairs": 6,
+    "maxLlmTokens": 1200000,
+    "maxWallClockSeconds": 3600.0
+  },
+  "faultInjection": {
+    "kind": "recorded_structured_output_failure",
+    "step": "schematic_connections",
+    "attempts": 1
+  }
+}

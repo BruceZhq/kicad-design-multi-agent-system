@@ -15,9 +15,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from time import monotonic
 from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import ValidationError
-from ratsnestpro.agents import Architect, LlmError, LlmMode, parse_mode
+from ratsnestpro.agents import Architect, LlmError, LlmMode, Reviewer, parse_mode
 from ratsnestpro.eda import footprints, grounding, symbols
 from ratsnestpro.eda.adapter import kicad_cli_available, run_erc
 from ratsnestpro.eda.local_library import (
@@ -138,6 +139,20 @@ _MANUFACTURE_CHANGE = re.compile(
 
 def _json(data: dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Replace a text artifact only after its complete contents are flushed."""
+
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _contract_clauses(text: str) -> tuple[str, ...]:
@@ -545,7 +560,7 @@ class _ToolkitLlmClient:
         *,
         transcript_path: Path | None = None,
         phase: str = "hardware-engineer",
-        max_llm_tokens: int = 120_000,
+        max_llm_tokens: int = 1_200_000,
     ) -> None:
         from core import get_model, get_model_for_plain_call, settings
 
@@ -1354,11 +1369,11 @@ def _run_pcb_pipeline_unlocked(
         max_llm_tokens = min(
             _env_int(
                 "RATSNESTPRO_AHE_MAX_LLM_TOKENS",
-                default=120_000,
+                default=1_200_000,
                 minimum=1_000,
-                maximum=200_000,
+                maximum=2_000_000,
             ),
-            max(1_000, int(budget.get("max_llm_tokens", 120_000))),
+            max(1_000, int(budget.get("max_llm_tokens", 1_200_000))),
         )
         client = (
             None
@@ -1943,18 +1958,9 @@ def ratsnest_review_kicad_project(
     try:
         project = _workspace_path(project_path)
         mode = parse_mode(llm_mode)
-        client = (
-            None
-            if mode == LlmMode.OFFLINE
-            else _ToolkitLlmClient(
-                model_name=model_name,
-                model_type=model_type,
-                transcript_path=(project if project.is_dir() else project.parent)
-                / "llm_outputs-review.jsonl",
-                phase="reviewer",
-            )
-        )
-        reviewed = review_project(project, mode=mode, client=client)
+        # The deterministic review is the release authority and must exist on
+        # disk before an advisory model call can block, fail, or be cancelled.
+        reviewed = review_project(project, mode=LlmMode.OFFLINE, client=None)
         schematic_path, pcb_path = _paired_project_files(
             project,
             reviewed.schematic_path,
@@ -2026,8 +2032,9 @@ def ratsnest_review_kicad_project(
                 ),
             ]
         )
-        advisory_review = {
+        advisory_review: dict[str, Any] = {
             "schema_version": 1,
+            "status": "not_requested" if mode == LlmMode.OFFLINE else "pending",
             "source": reviewed.result.source,
             "can_override_verdict": False,
             "markdown": reviewed.advisory_markdown,
@@ -2058,20 +2065,67 @@ def ratsnest_review_kicad_project(
                 ),
             ]
         )
-        review_markdown = "\n\n".join(
-            [
-                verdict_markdown,
-                _verification_markdown(verification),
-                placement_markdown,
-                advisory_review["markdown"],
-            ]
-        )
         report_dir = _workspace_root() / "reviews"
         report_dir.mkdir(parents=True, exist_ok=True)
         report_path = report_dir / _name(report_name, "design-review.md")
         if report_path.suffix.lower() != ".md":
             report_path = report_path.with_suffix(".md")
-        report_path.write_text(review_markdown, encoding="utf-8")
+
+        def render_review() -> str:
+            return "\n\n".join(
+                [
+                    verdict_markdown,
+                    _verification_markdown(verification),
+                    placement_markdown,
+                    str(advisory_review["markdown"]),
+                ]
+            )
+
+        # Phase 1: publish the complete deterministic report atomically. This
+        # artifact remains valid even if the optional advisory phase times out.
+        review_markdown = render_review()
+        _atomic_write_text(report_path, review_markdown)
+
+        # Phase 2: enrich only the non-authoritative advisory section. The
+        # deterministic verdict and all release-gate evidence remain unchanged.
+        if mode != LlmMode.OFFLINE:
+            try:
+                client = _ToolkitLlmClient(
+                    model_name=model_name,
+                    model_type=model_type,
+                    transcript_path=(project if project.is_dir() else project.parent)
+                    / "llm_outputs-review.jsonl",
+                    phase="reviewer",
+                )
+                enriched = Reviewer().review(
+                    reviewed.result.report,
+                    mode=mode,
+                    client=client,
+                )
+                advisory_review = {
+                    "schema_version": 1,
+                    "status": (
+                        "completed" if enriched.source != "deterministic" else "fallback"
+                    ),
+                    "source": enriched.source,
+                    "can_override_verdict": False,
+                    "markdown": enriched.advisory_markdown,
+                }
+                review_markdown = render_review()
+                _atomic_write_text(report_path, review_markdown)
+            except (LlmError, ValueError, KeyError, TypeError) as exc:
+                advisory_review = {
+                    **advisory_review,
+                    "status": "unavailable",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "markdown": (
+                        f"{advisory_review['markdown']}\n\n"
+                        "> LLM advisory enrichment was unavailable; the "
+                        "deterministic review above remains authoritative."
+                    ),
+                }
+                review_markdown = render_review()
+                _atomic_write_text(report_path, review_markdown)
         return _json(
             {
                 "status": "blocked" if blocked else "ok",
