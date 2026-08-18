@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -261,8 +262,7 @@ def test_passing_fixed_command_materializes_then_cleans_worktree(tmp_path: Path)
     assert str(fixture["sandbox"]) not in _git(fixture["repository"], "worktree", "list")
 
 
-@pytest.mark.asyncio
-async def test_temporal_activity_ignores_caller_supplied_candidate_report(
+def test_temporal_activity_ignores_caller_supplied_candidate_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from evolution.temporal import activities
@@ -294,7 +294,7 @@ async def test_temporal_activity_ignores_caller_supplied_candidate_report(
         "patch_bundle": fixture["bundle"].model_dump(mode="json", by_alias=True),
         "candidate_report": {"verdict": "passed", "forged": True},
     }
-    report = await activities.evaluate_candidate_activity(command)
+    report = asyncio.run(activities.evaluate_candidate_activity(command))
     assert report["verdict"] == "failed"
     assert report["patchDigest"] == "a" * 64
 

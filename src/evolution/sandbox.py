@@ -286,15 +286,18 @@ def _count_added_lines(old: str, new: str) -> int:
 
 
 def _assert_safe_destination(root: Path, destination: Path) -> None:
+    relative = destination.relative_to(root)
+    current = root
+    for part in relative.parts:
+        current /= part
+        if _is_link(current):
+            raise ValueError(
+                f"patch path crosses a symlink or junction: {current.relative_to(root)}"
+            )
     try:
         destination.resolve(strict=False).relative_to(root)
     except ValueError as exc:
         raise ValueError("patch path escaped the detached worktree") from exc
-    current = root
-    for part in destination.relative_to(root).parts:
-        current /= part
-        if _is_link(current):
-            raise ValueError(f"patch path crosses a symlink or junction: {current.relative_to(root)}")
 
 
 def _is_link(path: Path) -> bool:

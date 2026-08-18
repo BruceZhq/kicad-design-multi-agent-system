@@ -3,7 +3,7 @@ name: CircuitFoundry infrastructure gates
 on:
   pull_request:
   push:
-    branches: [main, "codex/**"]
+    branches: [main, "governed-harness-evolution-*"]
   workflow_dispatch:
 
 permissions:
