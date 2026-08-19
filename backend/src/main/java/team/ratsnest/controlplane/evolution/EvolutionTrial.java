@@ -9,6 +9,9 @@ public record EvolutionTrial(
         String candidateId,
         int attempt,
         String inputDigest,
+        String baseManifestDigest,
+        String candidateDigest,
+        String evalSuiteDigest,
         String temporalWorkflowId,
         String patchCommit,
         String patchSha256,
@@ -20,10 +23,13 @@ public record EvolutionTrial(
         Map<String, Object> candidateMetrics,
         Map<String, Object> guardrailResults,
         String verdict,
+        String reportDigest,
+        Map<String, Object> authoritativeReport,
         String reportObjectKey,
         long llmTokens,
         long wallClockMs,
         long rowVersion,
         Instant createdAt,
-        Instant updatedAt) {
+        Instant updatedAt,
+        Instant completedAt) {
 }

@@ -93,6 +93,7 @@ class CandidateEvalReport(EvolutionModel):
     command_results: list[EvalCommandResult] = Field(default_factory=list, max_length=8)
     error: str | None = Field(default=None, max_length=_MAX_ERROR_CHARS)
     cleanup_succeeded: bool
+    executor_mode: Literal["local_process", "kubernetes_job"] = "local_process"
     automatic_merge: Literal[False] = False
     automatic_push: Literal[False] = False
     automatic_deploy: Literal[False] = False
@@ -128,6 +129,9 @@ def materialize_and_evaluate_candidate(
     trial_root: Path | None = None
 
     try:
+        selected = _select_eval_commands(eval_ids, eval_registry)
+        if harness_manifest.calculated_manifest_digest() != harness_manifest.manifest_digest:
+            raise ValueError("base harness manifest digest is invalid")
         validate_patch_plan(
             plan,
             candidate=candidate,
@@ -135,7 +139,6 @@ def materialize_and_evaluate_candidate(
             policy=policy,
         )
         validate_patch_bundle(bundle, plan=plan, policy=policy)
-        selected = _select_eval_commands(eval_ids, eval_registry)
         repository = repository_root.resolve(strict=True)
         sandbox = _validated_sandbox_root(repository, sandbox_root)
         trial_root = sandbox / f"t-{secrets.token_hex(4)}"
@@ -157,9 +160,13 @@ def materialize_and_evaluate_candidate(
         if not create_result.passed:
             raise RuntimeError(f"detached worktree creation failed: {create_result.output}")
         created = True
-        materialized = _materialize_files(
-            directory,
-            bundle,
+        materialized = validate_and_materialize_candidate(
+            candidate=candidate,
+            harness_manifest=harness_manifest,
+            plan=plan,
+            bundle=bundle,
+            policy=policy,
+            worktree=directory,
             max_added_lines=policy.change_policy.max_added_lines,
         )
         for command in selected:
@@ -205,6 +212,42 @@ def materialize_and_evaluate_candidate(
         command_results=results,
         error=error,
         cleanup_succeeded=cleanup_succeeded,
+    )
+
+
+def validate_and_materialize_candidate(
+    *,
+    candidate: EvolutionCandidate,
+    harness_manifest: HarnessManifest,
+    plan: PatchPlan,
+    bundle: PatchBundle,
+    policy: GovernancePolicy,
+    worktree: Path,
+    max_added_lines: int | None = None,
+) -> list[str]:
+    """Validate trusted contracts and write whole files into an isolated checkout.
+
+    This boundary deliberately does not execute candidate code.  It is shared by
+    the local developer evaluator and the immutable Kubernetes materializer.
+    """
+
+    if harness_manifest.calculated_manifest_digest() != harness_manifest.manifest_digest:
+        raise ValueError("base harness manifest digest is invalid")
+    validate_patch_plan(
+        plan,
+        candidate=candidate,
+        harness_manifest=harness_manifest,
+        policy=policy,
+    )
+    validate_patch_bundle(bundle, plan=plan, policy=policy)
+    return _materialize_files(
+        worktree,
+        bundle,
+        max_added_lines=(
+            policy.change_policy.max_added_lines
+            if max_added_lines is None
+            else max_added_lines
+        ),
     )
 
 

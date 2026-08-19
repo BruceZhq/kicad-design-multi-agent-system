@@ -102,6 +102,18 @@ spec:
             - name: RATSNEST_INTERNAL_SIGNING_SECRET
               valueFrom:
                 secretKeyRef: { name: ratsnest-runtime-secrets, key: RATSNEST_INTERNAL_SIGNING_SECRET }
+            - name: RATSNEST_EVOLUTION_OPTIMIZATION_SUITE_DIGEST
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_EVOLUTION_OPTIMIZATION_SUITE_DIGEST }
+            - name: RATSNEST_EVOLUTION_HOLDOUT_SUITE_DIGEST
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_EVOLUTION_HOLDOUT_SUITE_DIGEST }
+            - name: RATSNEST_EVOLUTION_ADVERSARIAL_SUITE_DIGEST
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_EVOLUTION_ADVERSARIAL_SUITE_DIGEST }
+            - name: RATSNEST_EVOLUTION_REQUIRED_EXECUTOR_MODE
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_EVOLUTION_REQUIRED_EXECUTOR_MODE }
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: [ALL] }

@@ -62,7 +62,7 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
     _git(repository, "add", ".")
     _git(repository, "commit", "-qm", "base")
     commit = _git(repository, "rev-parse", "HEAD")
-    manifest = HarnessManifest(
+    manifest_seed = HarnessManifest(
         source_commit=commit,
         source_tree_digest="1" * 64,
         dirty=False,
@@ -70,6 +70,9 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
         contract_digest="3" * 64,
         policy_digest="4" * 64,
         manifest_digest="5" * 64,
+    )
+    manifest = manifest_seed.model_copy(
+        update={"manifest_digest": manifest_seed.calculated_manifest_digest()}
     )
     candidate = EvolutionCandidate(
         candidate_id="6" * 64,
@@ -266,6 +269,9 @@ def test_temporal_activity_ignores_caller_supplied_candidate_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from evolution.temporal import activities
+
+    monkeypatch.setenv("RATSNEST_EVOLUTION_SANDBOX_MODE", "local_process")
+    monkeypatch.setenv("RATSNEST_EVOLUTION_ALLOW_LOCAL_SANDBOX", "true")
 
     fixture = _fixture(tmp_path)
     generated = CandidateEvalReport(

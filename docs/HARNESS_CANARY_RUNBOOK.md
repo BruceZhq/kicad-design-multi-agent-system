@@ -1,4 +1,4 @@
-# CircuitFoundry Harness Canary 与 Flyway 发布手册
+# CircuitFoundry Harness Canary、Evolution Worker 与 Flyway 发布手册
 
 本手册只描述 Harness Runtime 的版本化发布。浏览器、Java 控制面和数据库迁移保持各自独立的发布边界。所有示例都要求显式传入 Kubernetes context，避免误操作当前默认集群。
 
@@ -62,7 +62,7 @@ kubectl --context $context -n ratsnest wait --for=condition=complete "job/$job" 
 kubectl --context $context -n ratsnest logs "job/$job"
 ```
 
-成功日志必须包含 `Flyway migration completed`，且当前发布必须看到 V9 与 V10 的 `success=true`；V10 保存 promote 前的可验证 stable 回滚目标。随后使用只读查询保存版本、描述、checksum 和成功状态作为发布证据：
+成功日志必须包含 `Flyway migration completed`，且当前发布必须看到 V9、V10 与 V11 的 `success=true`；V10 保存 promote 前的可验证 stable 回滚目标，V11 保存 Trial 的不可变输入、权威评测证明及唯一 pending/workflow 约束。随后使用只读查询保存版本、描述、checksum 和成功状态作为发布证据：
 
 ```sql
 SELECT installed_rank, version, description, checksum, installed_on, success
@@ -307,3 +307,47 @@ Canary task queue 隔离了候选运行。stable Deployment 的滚动更新仍�
 - promote/rollback 操作者、时间和 request/trace ID
 
 Kubernetes 提供的是可执行版本切换和 ReplicaSet 回滚；PostgreSQL/Flyway、Temporal history 和 S3 Artifact 分别保持自己的不可变审计链，不能用 Deployment 状态替代这些证据。
+
+## 9. 显式启用生产 Evolution 执行面
+
+该 overlay 默认创建两个 `replicas: 0` 的独立信任域，绝不随产品启动：
+
+- `ratsnest-evolution-controller` 是受信控制器。它运行 Workflow、生成/签署证明并回调控制面，持有唯一的内部签名密钥；它没有 Kubernetes Token、Git/PVC 挂载，也不执行候选代码。
+- `ratsnest-evolution-sandbox-coordinator` 只运行固定评测 Activity。它没有业务、模型、数据库或签名密钥；其 namespace Role 只能管理临时 Job、ConfigMap，并读取 Pod 终态。
+- 每个候选由一次性 Job 执行。Job 不挂载 ServiceAccount Token，不持有 Secret，基线 Git mirror 只读，补丁和工作区位于临时卷，NetworkPolicy 禁止全部 ingress/egress。结果由协调器读取 Kubernetes 终态生成，候选不能自行声明通过。
+
+两个 Worker 都使用 `python -m evolution.temporal.worker`，但分别设置 `RATSNEST_EVOLUTION_WORKER_ROLE=controller` 和 `sandbox-coordinator`。控制 queue 是 `ratsnest-evolution-production`，评测 Activity 固定投递到 `ratsnest-evolution-sandbox`；二者均单并发。占位镜像必须同时替换成同一个经过验证的 `repository@sha256:<digest>`。Git mirror PVC 必须由独立、受审计的发布流程预置准确 commit，且不得包含 deploy key、credential helper 或远端 Token。
+
+```powershell
+$context = "production-primary"
+$image = "ghcr.io/ratsnestteam/ratsnest-evolution-worker@sha256:<64-hex-digest>"
+kubectl --context $context apply -k deploy/k8s/overlays/evolution-worker
+kubectl --context $context -n ratsnest set image `
+  deployment/ratsnest-evolution-controller controller=$image
+kubectl --context $context -n ratsnest-evolution-sandbox set image `
+  deployment/ratsnest-evolution-sandbox-coordinator coordinator=$image
+```
+
+先确认两个 Deployment 仍为 0；再替换三类 suite digest、预置只读 mirror，并根据集群实现收紧协调器到 kube-apiserver 的精确 egress（托管集群不能直接照搬示例 selector）。随后先启动协调器，再启动控制器：
+
+```powershell
+kubectl --context $context -n ratsnest-evolution-sandbox scale `
+  deployment/ratsnest-evolution-sandbox-coordinator --replicas=1
+kubectl --context $context -n ratsnest scale `
+  deployment/ratsnest-evolution-controller --replicas=1
+```
+
+Java 只允许平台管理员创建 Trial。Python 必须回传与部署要求相同的 `executorMode=kubernetes_job`，并绑定 candidate/base/input/suite/patch/report digest；通过后状态只能到 `awaiting_approval`。独立的批准 API 还会复核同一个 PASSED Trial、report digest 和 CAS row version。批准不会触发 merge、push、promote 或 deploy，这些仍属于外部发布流程。
+
+V11 会在发现遗留 `PENDING` Trial 或重复 Temporal workflow 绑定时 fail-fast。升级前先停入口并查询：
+
+```sql
+SELECT trial_id, candidate_id, temporal_workflow_id, created_at
+FROM control_plane.evolution_trials
+WHERE verdict = 'PENDING'
+ORDER BY created_at;
+```
+
+只能依据已有审计证据把确认废弃的旧 Trial 显式标记 `CANCELLED`；不得伪造 report digest 或 PASSED proof。若无法判断，应停止 V11 发布并保留旧应用读取能力。
+
+停用时先停止创建 Trial，等待两个 queue 无 running/pending Activity，然后依次把控制器、协调器缩回 0。生产验收至少保存：镜像 digest、mirror commit、Manifest 与 suite digests、RBAC/NetworkPolicy 实测、Temporal workflow/trial ID、Job 终态、清理结果、权威 report digest、人工批准审计。仓库提供实现和静态门禁，但真实集群隔离、CNI egress、Pod Security、PVC 供应和故障演练仍必须在目标集群验收。

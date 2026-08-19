@@ -265,9 +265,9 @@ def test_patch_plan_uses_the_single_governance_registry(tmp_path: Path) -> None:
             ),
             PatchChange(
                 operation="create",
-                path="tests/evolution/test_router_recovery.py",
-                rationale="Prove fail-before/pass-after behavior.",
-                estimated_added_lines=30,
+                path="docs/evolution-candidate.md",
+                rationale="Record the candidate's bounded behavior change for review.",
+                estimated_added_lines=20,
             ),
         ],
         preserved_invariants=preserved,

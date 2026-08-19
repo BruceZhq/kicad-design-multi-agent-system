@@ -85,7 +85,7 @@ public class EvolutionController {
 
     record TransitionRequest(
             @Positive long expectedVersion,
-            @NotBlank @Pattern(regexp = "eligible|evaluating|canary|promoted|rejected|rolled_back|stale")
+            @NotBlank @Pattern(regexp = "eligible|canary|promoted|rejected|rolled_back|stale")
                     String targetStatus,
             @NotBlank @Size(max = 2000) String reason) {
     }

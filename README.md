@@ -183,7 +183,7 @@ AHE（Agentic Harness Engineer）处理框架自身的可恢复缺陷，例如�
 
 ### EHE
 
-EHE（Evolutionary Harness Engineer）把匿名化的跨项目失败签名聚合为受治理候选。每个 Run 固化 Harness 版本；候选只能修改低风险白名单文件，不能读取 sealed holdout，也不能改身份、迁移、部署或发布真值。候选必须在隔离 worktree 通过历史、恢复、holdout、对抗和成本 Eval，经人工批准后才能进入 Kubernetes Canary；系统不会自动合并或自动提升到生产。
+EHE（Evolutionary Harness Engineer）把匿名化的跨项目失败签名聚合为受治理候选。每个 Run 固化 Harness 版本；候选只能修改低风险白名单文件，不能读取或修改 sealed holdout/固定 grader，也不能改身份、迁移、部署或发布真值。候选需要经过固定评测、内容摘要绑定和独立人工批准，之后才有资格进入 Kubernetes Canary；系统不会自动合并或自动提升到生产。
 
 ## 状态、并发和恢复
 
@@ -238,7 +238,7 @@ Copy-Item .env.example .env
 docker compose --profile control-plane --profile identity --profile artifact-store up -d --build
 ```
 
-Compose 会先幂等预置 `ratsnest_app` 与 `ratsnest_migrator`，再用独立的 Flyway 进程执行 V1–V10，成功后才启动 Java 控制面。生产环境仍应由平台预置数据库角色，并通过独立 Kubernetes Flyway Job 执行迁移。
+Compose 会先幂等预置 `ratsnest_app` 与 `ratsnest_migrator`，再用独立的 Flyway 进程执行 V1–V11，成功后才启动 Java 控制面。生产环境仍应由平台预置数据库角色，并通过独立 Kubernetes Flyway Job 执行迁移。
 
 访问地址：
 
@@ -252,13 +252,13 @@ Compose 会先幂等预置 `ratsnest_app` 与 `ratsnest_migrator`，再用独立
 
 修改 Python 依赖后需要重新构建 Agent Runtime；修改前端依赖后需要重新构建 Frontend。日常验证优先使用静态检查和轻量 smoke，不要默认启动真实 LLM、KiCad 或 Freerouting。
 
-受治理 Harness Evolution Worker 不随产品默认启动。只有发布工程师准备了候选、Eval 与人工审批流程时，才显式启动单并发 worker：
+受治理 Harness Evolution 不随产品默认启动。本地开发 profile 同时启动持密钥但不挂源码的控制器，以及不含业务密钥、负责候选执行的 evaluator：
 
 ```powershell
-docker compose --profile evolution up -d --build evolution_worker
+docker compose --profile evolution up -d --build evolution_worker evolution_evaluator
 ```
 
-该本地入口把当前仓库挂载为候选基线，并只在独立 volume 中建立 detached worktree；它不会 merge、push 或 deploy。该隔离属于受治理的进程/文件边界，不是面向恶意代码的 VM 沙箱。生产环境仍须使用低权限、网络受限的专用 Worker/Pod，并由控制面记录 Trial 与审批证据。
+本地 evaluator 以只读方式挂载仓库，在独立 volume 建立 detached worktree；这是便于开发的进程隔离，不是恶意代码安全边界。生产 overlay 进一步拆为无 Token 的受信控制器、最小 RBAC 的协调器，以及无 Secret、无网络、无 ServiceAccount Token 的一次性候选 Job。三条路径都不会 merge、push 或 deploy。
 
 ## 配置与安全
 

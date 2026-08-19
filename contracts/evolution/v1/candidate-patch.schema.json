@@ -148,6 +148,7 @@
         "baseCommit": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
         "patchDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "verdict": { "enum": ["passed", "failed", "policy_rejected", "error"] },
+        "executorMode": { "enum": ["local_process", "kubernetes_job"] },
         "worktreeCreated": { "type": "boolean" },
         "materializedFiles": {
           "type": "array",
@@ -176,6 +177,7 @@
         "baseCommit",
         "patchDigest",
         "verdict",
+        "executorMode",
         "worktreeCreated",
         "cleanupSucceeded"
       ]

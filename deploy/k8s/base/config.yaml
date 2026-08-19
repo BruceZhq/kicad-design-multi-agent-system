@@ -55,6 +55,13 @@ data:
   RATSNEST_RUN_OUTBOX_ENABLED: "false"
   RATSNEST_RUN_OUTBOX_TOPIC: ratsnest.runs.v1
   RATSNEST_RUN_RECONCILIATION_ENABLED: "false"
+  # Release automation must replace these with the content digests of the
+  # immutable evaluation suites. Empty values intentionally fail closed.
+  RATSNEST_EVOLUTION_OPTIMIZATION_SUITE_DIGEST: ""
+  RATSNEST_EVOLUTION_HOLDOUT_SUITE_DIGEST: ""
+  RATSNEST_EVOLUTION_ADVERSARIAL_SUITE_DIGEST: ""
+  RATSNEST_EVOLUTION_REQUIRED_EXECUTOR_MODE: kubernetes_job
+  RATSNEST_EVOLUTION_TEMPORAL_TASK_QUEUE: ratsnest-evolution-production
   RATSNEST_DB_URL: jdbc:postgresql://postgres-rw.ratsnest-data.svc.cluster.local:5432/agent_service
   RATSNEST_OIDC_ISSUER_URI: https://identity.example.com/realms/ratsnest
   RATSNEST_OIDC_JWK_SET_URI: https://identity.example.com/realms/ratsnest/protocol/openid-connect/certs

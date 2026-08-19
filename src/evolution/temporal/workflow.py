@@ -7,11 +7,15 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError
 
 from evolution.temporal.contracts import (
+    ATTEST_RESULT_ACTIVITY,
+    BUILD_FAILURE_REPORT_ACTIVITY,
+    DELIVER_RESULT_ACTIVITY,
     EVALUATE_CANDIDATE_ACTIVITY,
+    EVOLUTION_SANDBOX_TASK_QUEUE,
     EVOLUTION_WORKFLOW_NAME,
-    PROPOSE_PATCH_ACTIVITY,
 )
 
 
@@ -22,6 +26,7 @@ class HarnessEvolutionWorkflow:
     def __init__(self) -> None:
         self._decision: str | None = None
         self._decision_reason = ""
+        self._identity: dict[str, str] = {}
         self._progress: dict[str, Any] = {
             "status": "created",
             "phase": "not_started",
@@ -38,6 +43,10 @@ class HarnessEvolutionWorkflow:
     @workflow.query
     def progress(self) -> dict[str, Any]:
         return dict(self._progress)
+
+    @workflow.query
+    def identity(self) -> dict[str, str]:
+        return dict(self._identity)
 
     @workflow.signal
     def approve(self, reason: str = "") -> None:
@@ -73,23 +82,43 @@ class HarnessEvolutionWorkflow:
     @workflow.run
     async def run(self, input: dict[str, Any]) -> dict[str, Any]:
         command = dict(input)
-        if not command.get("patch_plan") or not command.get("patch_bundle"):
-            self._update(status="running", phase="patch_plan_generation")
-            proposal = await workflow.execute_activity(
-                PROPOSE_PATCH_ACTIVITY,
+        self._identity = dict(command["workflow_identity"])
+        self._update(status="running", phase="sandbox_evaluation")
+        try:
+            candidate_report = await workflow.execute_activity(
+                EVALUATE_CANDIDATE_ACTIVITY,
                 command,
                 result_type=dict,
-                start_to_close_timeout=timedelta(minutes=15),
+                task_queue=EVOLUTION_SANDBOX_TASK_QUEUE,
+                start_to_close_timeout=timedelta(minutes=10),
                 retry_policy=self._retry_policy(),
             )
-            command["patch_plan"] = proposal["plan"]
-            command["patch_bundle"] = proposal["bundle"]
-        self._update(status="running", phase="sandbox_evaluation")
-        candidate_report = await workflow.execute_activity(
-            EVALUATE_CANDIDATE_ACTIVITY,
-            command,
+        except ActivityError:
+            candidate_report = await workflow.execute_activity(
+                BUILD_FAILURE_REPORT_ACTIVITY,
+                command,
+                result_type=dict,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=self._retry_policy(),
+            )
+        self._update(status="running", phase="result_attestation")
+        authoritative_result = await workflow.execute_activity(
+            ATTEST_RESULT_ACTIVITY,
+            {**command, "candidate_report": candidate_report},
             result_type=dict,
-            start_to_close_timeout=timedelta(minutes=10),
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=self._retry_policy(),
+        )
+        self._update(
+            status="running",
+            phase="callback_delivery",
+            authoritative_result=authoritative_result,
+        )
+        callback_delivery = await workflow.execute_activity(
+            DELIVER_RESULT_ACTIVITY,
+            {**command, "authoritative_result": authoritative_result},
+            result_type=dict,
+            start_to_close_timeout=timedelta(seconds=30),
             retry_policy=self._retry_policy(),
         )
         if candidate_report.get("verdict") != "passed" or not candidate_report.get(
@@ -100,6 +129,8 @@ class HarnessEvolutionWorkflow:
                 "status": "rejected",
                 "reason": "candidate did not pass fixed sandbox evaluation",
                 "candidate_report": candidate_report,
+                "authoritative_result": authoritative_result,
+                "callback_delivery": callback_delivery,
                 "automatic_merge": False,
                 "automatic_push": False,
                 "automatic_deploy": False,
@@ -114,6 +145,8 @@ class HarnessEvolutionWorkflow:
                     "status": self._decision or "rejected",
                     "reason": self._decision_reason,
                     "candidate_report": candidate_report,
+                    "authoritative_result": authoritative_result,
+                    "callback_delivery": callback_delivery,
                     "automatic_merge": False,
                     "automatic_push": False,
                     "automatic_deploy": False,
@@ -124,6 +157,8 @@ class HarnessEvolutionWorkflow:
             "status": "approved_for_external_review",
             "reason": self._decision_reason,
             "candidate_report": candidate_report,
+            "authoritative_result": authoritative_result,
+            "callback_delivery": callback_delivery,
             "automatic_merge": False,
             "automatic_push": False,
             "automatic_deploy": False,

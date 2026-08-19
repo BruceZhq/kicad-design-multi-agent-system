@@ -1,0 +1,56 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: evolution-controller-egress, namespace: ratsnest }
+spec:
+  podSelector: { matchLabels: { app: ratsnest-evolution-controller } }
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ratsnest-data } }
+      ports: [{ protocol: TCP, port: 7233 }]
+    - to:
+        - podSelector: { matchLabels: { app: ratsnest-control-plane } }
+      ports: [{ protocol: TCP, port: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: sandbox-coordinator-egress, namespace: ratsnest-evolution-sandbox }
+spec:
+  podSelector: { matchLabels: { app: ratsnest-evolution-sandbox-coordinator } }
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ratsnest-data } }
+      ports: [{ protocol: TCP, port: 7233 }]
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+          podSelector: { matchLabels: { component: kube-apiserver } }
+      ports: [{ protocol: TCP, port: 443 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: candidate-deny-all, namespace: ratsnest-evolution-sandbox }
+spec:
+  podSelector: { matchLabels: { ratsnest.io/workload-class: evolution-candidate-sandbox } }
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-evolution-result-callback, namespace: ratsnest }
+spec:
+  podSelector: { matchLabels: { app: ratsnest-control-plane } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: ratsnest-evolution-controller } }
+      ports: [{ protocol: TCP, port: 8080 }]

@@ -406,12 +406,8 @@ services:
       - RATSNEST_HARNESS_CHANNEL=${RATSNEST_HARNESS_CHANNEL:-stable}
       - RATSNEST_HARNESS_MANIFEST_DIGEST=${RATSNEST_HARNESS_MANIFEST_DIGEST:-0000000000000000000000000000000000000000000000000000000000000000}
 
-  # Opt-in developer worker for governed Harness Evolution. It uses the
-  # already-built Runtime as a named build context, adds only Git plus the
-  # locked test toolchain, and never starts with the normal product profile.
-  # The repository mount is intentionally writable because `git worktree`
-  # stores registration metadata under .git; candidate files themselves are
-  # materialized only in the separate sandbox volume.
+  # Trusted Evolution controller. It signs proofs and callbacks but never
+  # mounts or executes candidate source.
   evolution_worker:
     profiles: [evolution]
     image: ratsnestpro-evolution-worker:local
@@ -429,13 +425,38 @@ services:
     init: true
     restart: unless-stopped
     stop_grace_period: 30s
-    volumes:
-      - ./:/repository
-      - evolution_sandbox:/evolution-sandbox
     environment:
       - TEMPORAL_ADDRESS=${TEMPORAL_ADDRESS:-temporal:7233}
       - TEMPORAL_NAMESPACE=${TEMPORAL_NAMESPACE:-default}
       - RATSNEST_EVOLUTION_TEMPORAL_TASK_QUEUE=${RATSNEST_EVOLUTION_TEMPORAL_TASK_QUEUE:-ratsnest-evolution}
+      - RATSNEST_EVOLUTION_WORKER_ROLE=controller
+      - RATSNEST_EVOLUTION_REQUIRED_EXECUTOR_MODE=local_process
+      - RATSNEST_EVOLUTION_CONTROL_PLANE_URL=${RATSNEST_EVOLUTION_CONTROL_PLANE_URL:-http://control-plane:8080}
+      - RATSNEST_EVOLUTION_OPTIMIZATION_SUITE_DIGEST=${RATSNEST_EVOLUTION_OPTIMIZATION_SUITE_DIGEST:-}
+      - RATSNEST_EVOLUTION_HOLDOUT_SUITE_DIGEST=${RATSNEST_EVOLUTION_HOLDOUT_SUITE_DIGEST:-}
+      - RATSNEST_EVOLUTION_ADVERSARIAL_SUITE_DIGEST=${RATSNEST_EVOLUTION_ADVERSARIAL_SUITE_DIGEST:-}
+
+  evolution_evaluator:
+    profiles: [evolution]
+    image: ratsnestpro-evolution-worker:local
+    command: ["python", "-m", "evolution.temporal.worker"]
+    depends_on:
+      temporal:
+        condition: service_healthy
+      evolution_worker:
+        condition: service_started
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    volumes:
+      - ./:/repository:ro
+      - evolution_sandbox:/evolution-sandbox
+    environment:
+      - TEMPORAL_ADDRESS=${TEMPORAL_ADDRESS:-temporal:7233}
+      - TEMPORAL_NAMESPACE=${TEMPORAL_NAMESPACE:-default}
+      - RATSNEST_EVOLUTION_WORKER_ROLE=sandbox-coordinator
+      - RATSNEST_EVOLUTION_SANDBOX_MODE=local_process
+      - RATSNEST_EVOLUTION_ALLOW_LOCAL_SANDBOX=true
       - RATSNEST_EVOLUTION_REPOSITORY_ROOT=/repository
       - RATSNEST_EVOLUTION_SANDBOX_ROOT=/evolution-sandbox
 
@@ -531,6 +552,7 @@ services:
       - RATSNEST_OIDC_ISSUER_URI=${RATSNEST_OIDC_ISSUER_URI:-http://auth.localhost:8180/realms/ratsnest-dev}
       - RATSNEST_OIDC_JWK_SET_URI=${RATSNEST_OIDC_JWK_SET_URI:-http://auth.localhost:8180/realms/ratsnest-dev/protocol/openid-connect/certs}
       - RATSNEST_OIDC_AUDIENCE=${RATSNEST_OIDC_AUDIENCE:-ratsnest-api}
+      - RATSNEST_EVOLUTION_REQUIRED_EXECUTOR_MODE=local_process
       # Compatibility aliases for control-plane images built before the
       # Increment 7 configuration names were unified.
       - RATSNEST_DEV_OIDC_ISSUER_URI=${RATSNEST_OIDC_ISSUER_URI:-http://auth.localhost:8180/realms/ratsnest-dev}
@@ -546,6 +568,9 @@ services:
       - RATSNEST_HARNESS_ROLLOUT_ID=${RATSNEST_HARNESS_ROLLOUT_ID:-production}
       - RATSNEST_HARNESS_ROUTING_SECRET=${RATSNEST_HARNESS_ROUTING_SECRET:-${RATSNEST_INTERNAL_SIGNING_SECRET:-}}
       - RATSNEST_EVOLUTION_FINGERPRINT_SECRET=${RATSNEST_EVOLUTION_FINGERPRINT_SECRET:-${RATSNEST_INTERNAL_SIGNING_SECRET:-}}
+      - RATSNEST_EVOLUTION_OPTIMIZATION_SUITE_DIGEST=${RATSNEST_EVOLUTION_OPTIMIZATION_SUITE_DIGEST:-}
+      - RATSNEST_EVOLUTION_HOLDOUT_SUITE_DIGEST=${RATSNEST_EVOLUTION_HOLDOUT_SUITE_DIGEST:-}
+      - RATSNEST_EVOLUTION_ADVERSARIAL_SUITE_DIGEST=${RATSNEST_EVOLUTION_ADVERSARIAL_SUITE_DIGEST:-}
       - RATSNEST_INTERNAL_SIGNING_SECRET=${RATSNEST_INTERNAL_SIGNING_SECRET:-}
       - RATSNEST_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
       - RATSNEST_KAFKA_SECURITY_PROTOCOL=${RATSNEST_KAFKA_SECURITY_PROTOCOL:-PLAINTEXT}

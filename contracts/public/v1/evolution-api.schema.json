@@ -11,7 +11,7 @@
     },
     "managementTransitionStatus": {
       "enum": [
-        "eligible", "evaluating", "canary", "promoted",
+        "eligible", "canary", "promoted",
         "rejected", "rolled_back", "stale"
       ]
     },
@@ -21,6 +21,31 @@
       "properties": {
         "expectedVersion": { "type": "integer", "minimum": 1 },
         "targetStatus": { "$ref": "#/$defs/managementTransitionStatus" },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S" }
+      },
+      "additionalProperties": false
+    },
+    "evaluateRequest": {
+      "type": "object",
+      "required": ["expectedVersion", "patchPlan", "patchBundle"],
+      "properties": {
+        "expectedVersion": { "type": "integer", "minimum": 1 },
+        "patchPlan": {
+          "$ref": "../../evolution/v1/candidate-patch.schema.json#/$defs/PatchPlan"
+        },
+        "patchBundle": {
+          "$ref": "../../evolution/v1/candidate-patch.schema.json#/$defs/PatchBundle"
+        }
+      },
+      "additionalProperties": false
+    },
+    "approveRequest": {
+      "type": "object",
+      "required": ["expectedVersion", "trialId", "reportDigest", "reason"],
+      "properties": {
+        "expectedVersion": { "type": "integer", "minimum": 1 },
+        "trialId": { "type": "string", "format": "uuid" },
+        "reportDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "reason": { "type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S" }
       },
       "additionalProperties": false

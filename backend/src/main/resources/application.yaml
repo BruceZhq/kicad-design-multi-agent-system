@@ -73,6 +73,10 @@ ratsnest:
     routing-secret: ${RATSNEST_HARNESS_ROUTING_SECRET:${RATSNEST_INTERNAL_SIGNING_SECRET:}}
   evolution:
     fingerprint-secret: ${RATSNEST_EVOLUTION_FINGERPRINT_SECRET:${RATSNEST_INTERNAL_SIGNING_SECRET:}}
+    optimization-suite-digest: ${RATSNEST_EVOLUTION_OPTIMIZATION_SUITE_DIGEST:}
+    holdout-suite-digest: ${RATSNEST_EVOLUTION_HOLDOUT_SUITE_DIGEST:}
+    adversarial-suite-digest: ${RATSNEST_EVOLUTION_ADVERSARIAL_SUITE_DIGEST:}
+    required-executor-mode: ${RATSNEST_EVOLUTION_REQUIRED_EXECUTOR_MODE:kubernetes_job}
   database:
     verify-isolation: true
   run-outbox:

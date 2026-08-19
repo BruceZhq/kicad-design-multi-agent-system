@@ -6,51 +6,37 @@ import os
 from pathlib import Path
 from typing import Any
 
+import httpx
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from core import settings
 from evolution.contracts import EvolutionCandidate, HarnessManifest
+from evolution.kubernetes_sandbox import (
+    KubernetesSandboxConfigurationError,
+    KubernetesSandboxExecutor,
+)
 from evolution.optimizer import (
-    OptimizerRequest,
     PatchBundle,
     PatchPlan,
     default_policy_path,
     load_governance_policy,
-    propose_patch_proposal,
 )
-from evolution.sandbox import materialize_and_evaluate_candidate
+from evolution.sandbox import (
+    CandidateEvalReport,
+    materialize_and_evaluate_candidate,
+    patch_digest,
+)
 from evolution.temporal.contracts import (
+    ATTEST_RESULT_ACTIVITY,
+    BUILD_FAILURE_REPORT_ACTIVITY,
+    DELIVER_RESULT_ACTIVITY,
     EVALUATE_CANDIDATE_ACTIVITY,
-    PROPOSE_PATCH_ACTIVITY,
+    FIXED_EVAL_IDS,
 )
-
-_FIXED_EVAL_IDS = ("python-compile", "evolution-core")
-
-
-@activity.defn(name=PROPOSE_PATCH_ACTIVITY)
-async def propose_patch_plan_activity(command: dict[str, Any]) -> dict[str, Any]:
-    """Ask the existing model factory for a strict whole-file proposal."""
-
-    try:
-        from pydantic import TypeAdapter
-
-        from schema.models import AllModelEnum
-
-        repository_root, _ = _configured_paths()
-        requested_root = command.get("repository_root")
-        if requested_root and Path(str(requested_root)).resolve() != repository_root:
-            raise ValueError("repositoryRoot does not match the configured evolution repository")
-        policy = load_governance_policy(_policy_path(repository_root, command.get("policy_path")))
-        request = OptimizerRequest.model_validate(command["optimizer_request"])
-        model_name = TypeAdapter(AllModelEnum).validate_python(command["model_name"])
-    except (KeyError, OSError, TypeError, ValueError) as exc:
-        raise ApplicationError(
-            f"{type(exc).__name__}: {exc}",
-            type="EvolutionPolicyError",
-            non_retryable=True,
-        ) from exc
-    proposal = await propose_patch_proposal(request, policy=policy, model_name=model_name)
-    return proposal.model_dump(mode="json", by_alias=True)
+from evolution.temporal.proof import build_authoritative_result
+from evolution.temporal.trial_contracts import canonical_json, trial_request_from_command
+from service.internal_auth import create_internal_token
 
 
 def _policy_path(repository_root: Path, value: Any) -> Path:
@@ -65,6 +51,25 @@ def _policy_path(repository_root: Path, value: Any) -> Path:
 async def evaluate_candidate_activity(command: dict[str, Any]) -> dict[str, Any]:
     """Materialize and evaluate a proposal; never accept a caller-authored report."""
 
+    mode = os.environ.get("RATSNEST_EVOLUTION_SANDBOX_MODE", "").strip()
+    if mode == "kubernetes_job":
+        try:
+            report = await KubernetesSandboxExecutor().evaluate(command)
+        except KubernetesSandboxConfigurationError as exc:
+            raise ApplicationError(
+                f"{type(exc).__name__}: {exc}",
+                type="EvolutionPolicyError",
+                non_retryable=True,
+            ) from exc
+        return report.model_dump(mode="json", by_alias=True)
+    if mode != "local_process" or os.environ.get(
+        "RATSNEST_EVOLUTION_ALLOW_LOCAL_SANDBOX", ""
+    ).strip().casefold() != "true":
+        raise ApplicationError(
+            "candidate execution requires kubernetes_job mode; local_process is dev-only",
+            type="EvolutionPolicyError",
+            non_retryable=True,
+        )
     try:
         repository_root, sandbox_root = _configured_paths()
         policy = load_governance_policy(_policy_path(repository_root, command.get("policy_path")))
@@ -80,7 +85,7 @@ async def evaluate_candidate_activity(command: dict[str, Any]) -> dict[str, Any]
             policy=policy,
             repository_root=repository_root,
             sandbox_root=sandbox_root,
-            eval_ids=_FIXED_EVAL_IDS,
+            eval_ids=FIXED_EVAL_IDS,
         )
     except (KeyError, OSError, TypeError, ValueError) as exc:
         raise ApplicationError(
@@ -89,6 +94,126 @@ async def evaluate_candidate_activity(command: dict[str, Any]) -> dict[str, Any]
             non_retryable=True,
         ) from exc
     return report.model_dump(mode="json", by_alias=True)
+
+
+@activity.defn(name=BUILD_FAILURE_REPORT_ACTIVITY)
+async def build_failure_report_activity(command: dict[str, Any]) -> dict[str, Any]:
+    """Turn an exhausted evaluator failure into a bounded, rejectable report."""
+
+    try:
+        request = trial_request_from_command(command)
+        trial_input = request.trial_input
+        report = CandidateEvalReport(
+            candidate_id=request.candidate_id,
+            base_commit=trial_input.patch_plan.base_commit,
+            patch_digest=patch_digest(trial_input.patch_bundle),
+            verdict="error",
+            worktree_created=False,
+            materialized_files=[],
+            command_results=[],
+            error="candidate evaluation activity failed after bounded retries",
+            cleanup_succeeded=False,
+            executor_mode=(
+                "kubernetes_job"
+                if os.environ.get("RATSNEST_EVOLUTION_REQUIRED_EXECUTOR_MODE", "")
+                == "kubernetes_job"
+                else "local_process"
+            ),
+        )
+        return report.model_dump(mode="json", by_alias=True)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ApplicationError(
+            f"{type(exc).__name__}: {exc}",
+            type="EvolutionPolicyError",
+            non_retryable=True,
+        ) from exc
+
+
+@activity.defn(name=ATTEST_RESULT_ACTIVITY)
+async def attest_result_activity(command: dict[str, Any]) -> dict[str, Any]:
+    """Create a durable proof from actual server-side evaluation output."""
+
+    try:
+        secret = _internal_secret()
+        report = command["candidate_report"]
+        return build_authoritative_result(command, report, secret=secret)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ApplicationError(
+            f"{type(exc).__name__}: {exc}",
+            type="EvolutionEvaluationError",
+            non_retryable=True,
+        ) from exc
+
+
+@activity.defn(name=DELIVER_RESULT_ACTIVITY)
+async def deliver_result_activity(command: dict[str, Any]) -> dict[str, Any]:
+    """Deliver the signed result only to the configured control plane."""
+
+    return await deliver_authoritative_result(command)
+
+
+async def deliver_authoritative_result(command: dict[str, Any]) -> dict[str, Any]:
+    """Idempotently deliver an already-created proof without regenerating it."""
+
+    try:
+        request = trial_request_from_command(command)
+        result = dict(command["authoritative_result"])
+        identity = dict(command["workflow_identity"])
+        tenant_id = str(identity["tenantId"])
+        project_id = str(identity["projectId"])
+        body = canonical_json(result)
+        path = request.callback_path
+        token = create_internal_token(
+            secret=_internal_secret(),
+            issuer="ratsnest-agent-runtime",
+            audience="ratsnest-control-plane",
+            subject="evolution-worker",
+            tenant_id=tenant_id,
+            project_id=project_id,
+            run_id=request.trial_id,
+            method="POST",
+            path=path,
+            body=body,
+        )
+        base_url = os.environ.get(
+            "RATSNEST_EVOLUTION_CONTROL_PLANE_URL",
+            "http://control-plane:8080",
+        ).rstrip("/")
+        async with httpx.AsyncClient(base_url=base_url, timeout=15.0) as client:
+            response = await client.post(
+                path,
+                content=body,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+            )
+        if 400 <= response.status_code < 500:
+            raise ApplicationError(
+                f"control plane rejected evolution result with HTTP {response.status_code}",
+                type="EvolutionCallbackRejected",
+                non_retryable=True,
+            )
+        response.raise_for_status()
+        return {"delivered": True, "statusCode": response.status_code}
+    except ApplicationError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ApplicationError(
+            f"{type(exc).__name__}: {exc}",
+            type="EvolutionPolicyError",
+            non_retryable=True,
+        ) from exc
+
+
+def _internal_secret() -> str:
+    secret = settings.RATSNEST_INTERNAL_SIGNING_SECRET
+    if secret is None:
+        raise ValueError("internal signing secret is not configured")
+    value = secret.get_secret_value()
+    if len(value.encode("utf-8")) < 32:
+        raise ValueError("internal signing secret must contain at least 32 bytes")
+    return value
 
 
 def _configured_paths() -> tuple[Path, Path]:

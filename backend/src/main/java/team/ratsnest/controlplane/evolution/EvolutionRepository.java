@@ -27,6 +27,16 @@ class EvolutionRepository {
             evidence_digest, observed_at, recorded_at
             """;
 
+    private static final String TRIAL_COLUMNS = """
+            trial_id, candidate_id, attempt, input_digest, base_manifest_digest, candidate_digest,
+            eval_suite_digest, temporal_workflow_id, patch_commit, patch_sha256,
+            candidate_image_digest, optimization_suite_digest, holdout_suite_digest,
+            adversarial_suite_digest, baseline_metrics, candidate_metrics,
+            guardrail_results, verdict, report_digest, authoritative_report,
+            report_object_key, llm_tokens, wall_clock_ms, row_version,
+            created_at, updated_at, completed_at
+            """;
+
     private final JdbcClient jdbcClient;
     private final ObjectMapper objectMapper;
 
@@ -247,13 +257,7 @@ class EvolutionRepository {
     }
 
     List<EvolutionTrial> findTrials(UUID tenantId, String candidateId) {
-        return jdbcClient.sql("""
-                        select trial_id, candidate_id, attempt, input_digest, temporal_workflow_id,
-                               patch_commit, patch_sha256, candidate_image_digest,
-                               optimization_suite_digest, holdout_suite_digest,
-                               adversarial_suite_digest, baseline_metrics, candidate_metrics,
-                               guardrail_results, verdict, report_object_key, llm_tokens,
-                               wall_clock_ms, row_version, created_at, updated_at
+        return jdbcClient.sql("select " + TRIAL_COLUMNS + """
                         from control_plane.evolution_trials
                         where tenant_id = :tenantId and candidate_id = :candidateId
                         order by attempt desc
@@ -262,6 +266,142 @@ class EvolutionRepository {
                 .param("candidateId", candidateId)
                 .query(this::mapTrial)
                 .list();
+    }
+
+    Optional<EvolutionTrial> findTrial(UUID tenantId, UUID trialId) {
+        return jdbcClient.sql("select " + TRIAL_COLUMNS + """
+                        from control_plane.evolution_trials
+                        where tenant_id = :tenantId and trial_id = :trialId
+                        """)
+                .param("tenantId", tenantId)
+                .param("trialId", trialId)
+                .query(this::mapTrial)
+                .optional();
+    }
+
+    Optional<EvolutionTrial> findPendingTrial(UUID tenantId, String candidateId) {
+        return jdbcClient.sql("select " + TRIAL_COLUMNS + """
+                        from control_plane.evolution_trials
+                        where tenant_id = :tenantId
+                          and candidate_id = :candidateId
+                          and verdict = 'PENDING'
+                        """)
+                .param("tenantId", tenantId)
+                .param("candidateId", candidateId)
+                .query(this::mapTrial)
+                .optional();
+    }
+
+    int nextAttempt(UUID tenantId, String candidateId) {
+        return jdbcClient.sql("""
+                        select coalesce(max(attempt), 0) + 1
+                        from control_plane.evolution_trials
+                        where tenant_id = :tenantId and candidate_id = :candidateId
+                        """)
+                .param("tenantId", tenantId)
+                .param("candidateId", candidateId)
+                .query(Integer.class)
+                .single();
+    }
+
+    boolean insertTrial(UUID tenantId, EvolutionTrial trial) {
+        return jdbcClient.sql("""
+                        insert into control_plane.evolution_trials (
+                            tenant_id, trial_id, candidate_id, attempt, input_digest,
+                            base_manifest_digest, candidate_digest, eval_suite_digest,
+                            optimization_suite_digest, holdout_suite_digest,
+                            adversarial_suite_digest, verdict
+                        ) values (
+                            :tenantId, :trialId, :candidateId, :attempt, :inputDigest,
+                            :baseManifestDigest, :candidateDigest, :evalSuiteDigest,
+                            :optimizationSuiteDigest, :holdoutSuiteDigest,
+                            :adversarialSuiteDigest, 'PENDING'
+                        )
+                        on conflict do nothing
+                        """)
+                .param("tenantId", tenantId)
+                .param("trialId", trial.trialId())
+                .param("candidateId", trial.candidateId())
+                .param("attempt", trial.attempt())
+                .param("inputDigest", trial.inputDigest())
+                .param("baseManifestDigest", trial.baseManifestDigest())
+                .param("candidateDigest", trial.candidateDigest())
+                .param("evalSuiteDigest", trial.evalSuiteDigest())
+                .param("optimizationSuiteDigest", trial.optimizationSuiteDigest())
+                .param("holdoutSuiteDigest", trial.holdoutSuiteDigest())
+                .param("adversarialSuiteDigest", trial.adversarialSuiteDigest())
+                .update() == 1;
+    }
+
+    boolean bindWorkflow(UUID tenantId, EvolutionTrial trial, String workflowId) {
+        return jdbcClient.sql("""
+                        update control_plane.evolution_trials
+                        set temporal_workflow_id = :workflowId,
+                            row_version = row_version + 1,
+                            updated_at = now()
+                        where tenant_id = :tenantId
+                          and trial_id = :trialId
+                          and verdict = 'PENDING'
+                          and row_version = :expectedVersion
+                          and temporal_workflow_id is null
+                        """)
+                .param("workflowId", workflowId)
+                .param("tenantId", tenantId)
+                .param("trialId", trial.trialId())
+                .param("expectedVersion", trial.rowVersion())
+                .update() == 1;
+    }
+
+    boolean completeTrial(UUID tenantId, EvolutionTrial trial, TrialResult result) {
+        return jdbcClient.sql("""
+                        update control_plane.evolution_trials
+                        set patch_commit = :patchCommit,
+                            patch_sha256 = :patchSha256,
+                            candidate_image_digest = :candidateImageDigest,
+                            baseline_metrics = cast(:baselineMetrics as jsonb),
+                            candidate_metrics = cast(:candidateMetrics as jsonb),
+                            guardrail_results = cast(:guardrailResults as jsonb),
+                            verdict = :verdict,
+                            report_digest = :reportDigest,
+                            authoritative_report = cast(:authoritativeReport as jsonb),
+                            report_object_key = :reportObjectKey,
+                            llm_tokens = :llmTokens,
+                            wall_clock_ms = :wallClockMs,
+                            completed_at = :completedAt,
+                            row_version = row_version + 1,
+                            updated_at = now()
+                        where tenant_id = :tenantId
+                          and trial_id = :trialId
+                          and candidate_id = :candidateId
+                          and verdict = 'PENDING'
+                          and row_version = :expectedVersion
+                          and input_digest = :inputDigest
+                          and base_manifest_digest = :baseManifestDigest
+                          and eval_suite_digest = :evalSuiteDigest
+                          and temporal_workflow_id = :workflowId
+                        """)
+                .param("patchCommit", result.patchCommit())
+                .param("patchSha256", result.patchSha256())
+                .param("candidateImageDigest", result.candidateImageDigest())
+                .param("baselineMetrics", json(result.baselineMetrics()))
+                .param("candidateMetrics", json(result.candidateMetrics()))
+                .param("guardrailResults", json(result.guardrailResults()))
+                .param("verdict", result.verdict())
+                .param("reportDigest", result.reportDigest())
+                .param("authoritativeReport", json(result.authoritativeReport()))
+                .param("reportObjectKey", result.reportObjectKey())
+                .param("llmTokens", result.llmTokens())
+                .param("wallClockMs", result.wallClockMs())
+                .param("completedAt", result.completedAt().atOffset(java.time.ZoneOffset.UTC))
+                .param("tenantId", tenantId)
+                .param("trialId", trial.trialId())
+                .param("candidateId", trial.candidateId())
+                .param("expectedVersion", trial.rowVersion())
+                .param("inputDigest", trial.inputDigest())
+                .param("baseManifestDigest", trial.baseManifestDigest())
+                .param("evalSuiteDigest", trial.evalSuiteDigest())
+                .param("workflowId", result.temporalWorkflowId())
+                .update() == 1;
     }
 
     boolean transition(
@@ -352,6 +492,9 @@ class EvolutionRepository {
                 resultSet.getString("candidate_id"),
                 resultSet.getInt("attempt"),
                 resultSet.getString("input_digest"),
+                resultSet.getString("base_manifest_digest"),
+                resultSet.getString("candidate_digest"),
+                resultSet.getString("eval_suite_digest"),
                 resultSet.getString("temporal_workflow_id"),
                 resultSet.getString("patch_commit"),
                 resultSet.getString("patch_sha256"),
@@ -363,12 +506,15 @@ class EvolutionRepository {
                 jsonObject(resultSet.getString("candidate_metrics")),
                 jsonObject(resultSet.getString("guardrail_results")),
                 resultSet.getString("verdict"),
+                resultSet.getString("report_digest"),
+                jsonObject(resultSet.getString("authoritative_report")),
                 resultSet.getString("report_object_key"),
                 resultSet.getLong("llm_tokens"),
                 resultSet.getLong("wall_clock_ms"),
                 resultSet.getLong("row_version"),
                 instant(resultSet, "created_at"),
-                instant(resultSet, "updated_at"));
+                instant(resultSet, "updated_at"),
+                nullableInstant(resultSet, "completed_at"));
     }
 
     @SuppressWarnings("unchecked")
@@ -388,6 +534,14 @@ class EvolutionRepository {
         }
     }
 
+    private String json(Map<String, Object> value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (Exception exception) {
+            throw new IllegalStateException("Unable to write evolution metadata", exception);
+        }
+    }
+
     @SuppressWarnings("unchecked")
     private List<String> jsonList(String value) {
         try {
@@ -399,5 +553,27 @@ class EvolutionRepository {
 
     private static Instant instant(ResultSet resultSet, String column) throws SQLException {
         return resultSet.getObject(column, OffsetDateTime.class).toInstant();
+    }
+
+    private static Instant nullableInstant(ResultSet resultSet, String column) throws SQLException {
+        OffsetDateTime value = resultSet.getObject(column, OffsetDateTime.class);
+        return value == null ? null : value.toInstant();
+    }
+
+    record TrialResult(
+            String temporalWorkflowId,
+            String patchCommit,
+            String patchSha256,
+            String candidateImageDigest,
+            Map<String, Object> baselineMetrics,
+            Map<String, Object> candidateMetrics,
+            Map<String, Object> guardrailResults,
+            String verdict,
+            String reportDigest,
+            Map<String, Object> authoritativeReport,
+            String reportObjectKey,
+            long llmTokens,
+            long wallClockMs,
+            Instant completedAt) {
     }
 }

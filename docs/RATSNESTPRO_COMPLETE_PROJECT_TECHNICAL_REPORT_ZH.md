@@ -17,7 +17,7 @@ CircuitFoundry 已经不是一个“把提示词直接交给单个 LLM”的演�
 当前项目已经具备以下主要能力：
 
 - OIDC 登录、JWT/JWKS 校验、组织/成员/项目模型和固定 RBAC；
-- PostgreSQL RLS 多租户隔离和 Flyway V1–V10 迁移；
+- PostgreSQL RLS 多租户隔离和 Flyway V1–V11 迁移；
 - OIDC 主体资料、头像上传、乐观锁更新和个人资料工作区；
 - 自然语言意图识别、上下文续跑/修订/诊断和离题对话边界；
 - 五类不可变、带摘要的 Capability Profile；
@@ -1970,8 +1970,8 @@ Java 稳定分桶 → HTTP/gRPC 独立 endpoint → K8s Canary Deployment/Task Q
 | 0：基线、契约、CI | 固定不可变规则和可复现入口 | `config/harness/invariants.v1.json`；`contracts/evolution/v1/*.json`；`scripts/build_harness_manifest.ps1`；`.github/workflows/ci.yml` | CI 已声明 Python、前端、Java、Kustomize/Compose 门禁，但本章编写过程没有执行远端 CI；完整 Maven 构建仍待 CI 实证 |
 | 1：Harness 身份 | 让一次 Run 绑定一个可追溯版本 | V9 `harness_versions/harness_rollouts`；`runs` 新增 version/manifest/channel；数据库触发器禁止修改；`RunService` 创建 Run 时固化并下发 `runtime_config.harness_version`；Python Runtime 在 checkpoint 前校验签名请求中的显式 pin 与 Pod 环境身份完全一致 | 当前已闭环 Agent Runtime 入口的 fail-closed binding；真实 Docker/K8s 中稳定版、Canary 和恢复流量的身份错配演练仍未执行 |
 | 2：Eval | 用相同案例和确定性判分比较 stable 与 candidate | 四个 content-addressed case；七类 grader；`evaluate_suite/compare_reports`；公开、holdout、adversarial 分组 | 当前 fixture 是录制证据，不是本轮真实 LLM/KiCad/Freerouting 执行；不能据此宣称五类板卡已经通过完整回归 |
-| 3：Observation/Candidate | 把重复 AHE 缺陷变成隐私安全候选 | Java `EvolutionCollector`、V9 三张演进表、RLS、去重键、候选状态机和受限 REST transition API | 聚合范围是**同一租户内跨项目**；通用管理 API 已禁止直接进入 awaiting_approval/approved，但 Java→Temporal Trial proof 入口尚未实现 |
-| 4：Optimizer/Sandbox | 让模型能提出低风险补丁，但不能获得发布权 | `optimizer.py` 严格结构化输出；`sandbox.py` detached worktree、路径/哈希/大小/命令门禁和 candidate `PYTHONPATH` 隔离；Temporal workflow 人审信号；Compose 提供默认关闭、单并发的本地 `evolution_worker` | Java 目前没有创建 Trial、启动该 Evolution Workflow 和回写报告的闭环；Compose 入口只用于本地开发，生产 K8s Evolution Worker 尚未设计和部署 |
+| 3：Observation/Candidate | 把重复 AHE 缺陷变成隐私安全候选 | Java `EvolutionCollector`、V9/V11 演进表、RLS、去重键、候选状态机、受限 REST transition API，以及平台管理员创建 Trial 的 evaluate 入口 | 聚合范围是**同一租户内跨项目**；浏览器不能选择演进 channel，普通 transition API 不能绕过 Eval proof 直接进入 `awaiting_approval`/`approved` |
+| 4：Optimizer/Sandbox | 让模型能提出低风险补丁，但不能获得发布权 | `optimizer.py` 严格结构化输出；`sandbox.py` detached worktree、路径/哈希/大小/命令门禁和 candidate `PYTHONPATH` 隔离；Java 签名启动 Python Temporal Trial，Python 回传带 HMAC attestation 的权威报告，Java 只推进到 `awaiting_approval` 或 `rejected`；Compose 与 K8s 均提供默认关闭、单并发的 `evolution_worker` | 代码闭环不会 merge/push/deploy；当前固定评测验证源码、沙箱和录制 Eval 逻辑，并不等同于在真实集群重放新的 LLM/KiCad/Freerouting 行为；生产 K8s Trial 尚未实跑 |
 | 5：Canary/Rollback | 用真实版本和隔离执行面做渐进发布 | Java HMAC 稳定分桶；stable/canary HTTP 与 gRPC 双 endpoint；K8s 独立 Service、Deployment、NetworkPolicy、Temporal task queue；base ConfigMap/Deployment 注入 Canary HTTP/gRPC target；digest-only 脚本和静态门禁 | 配置链已闭环，但尚未在真实 K8s 上验证 gRPC Canary 连接、身份错配拒绝、分流、drain、Promotion 或 Rollback |
 | 6：文档和验收 | 让发布/迁移/回滚有可执行手册 | `docs/HARNESS_CANARY_RUNBOOK.md`、三个发布脚本、静态基础设施检查 | 按需求不制作演示视频；本轮没有连接真实集群，也没有执行真实 promote、rollback、Flyway Job、LLM 或 EDA |
 
@@ -2030,23 +2030,23 @@ Candidate 的聚合键是同一租户下的 `base_harness_version + manifest_dig
 
 V9 对 observation、candidate、trial 都启用并 `FORCE ROW LEVEL SECURITY`。当前聚合是租户内跨项目学习，默认不会把 A 租户的失败细节合并给 B 租户；如果未来做全局产品演进，必须先做匿名化导出、k-anonymity/最小项目数、权限和数据处理协议，不能简单取消 RLS。
 
-租户成员可读 observation/candidate/trial；Candidate 状态 transition 仅 `owner/admin` 可执行并带 `expectedVersion` CAS。通用管理 transition 明确拒绝把 Candidate 直接改为 `awaiting_approval` 或 `approved`，返回 `EVOLUTION_EVALUATION_PROOF_REQUIRED`；只有未来接入的受治理 Trial 证明路径才可进入这两个状态，而该 Java→Temporal 入口当前仍未实现。平台级 Harness 注册和 rollout 则要求 OIDC token 包含 `ratsnest-platform-admin` role 或 `ratsnest.harness.admin` scope。租户管理员和平台发布管理员是不同的授权面，避免一个普通客户管理员直接发布全局 Runtime。
+租户成员可读 observation/candidate/trial；通用 Candidate transition 带 `expectedVersion` CAS，并明确拒绝直接进入 `evaluating/awaiting_approval/approved`。平台管理员通过专用 evaluate API 固化 Trial 输入和 digest、签名启动 Python Temporal Workflow；只有权威回调能推进到 `awaiting_approval`，专用 approve API 还会复核 PASSED Trial、report digest 与 CAS。平台级 Harness 注册和 rollout 同样要求 `ratsnest-platform-admin` role 或 `ratsnest.harness.admin` scope。租户管理员和平台发布管理员是不同授权面。
 
 ### 28.6 Optimizer 与隔离 Sandbox 的安全模型
 
-Optimizer 的输入只有：Candidate、固定 Harness Manifest、公开 Eval 汇总和至多 80,000 字符的 allowlist 源码上下文。模型必须通过 structured output 生成 `PatchProposal = PatchPlan + PatchBundle`。Bundle 不是可执行 shell 或上下文 diff，而是最多 8 个完整 UTF-8 文件的 `create/replace` 操作；单文件最多 64 KiB、总内容最多 256 KiB、治理策略最多新增 500 行。replace 必须带 `expectedOldSha256`，每个新内容必须匹配 `contentSha256`，从而拒绝基线漂移和传输篡改。
+Optimizer 库的输入只有 Candidate、固定 Harness Manifest、公开 Eval 汇总和至多 80,000 字符的 allowlist 源码上下文；它可通过 structured output 生成 `PatchProposal = PatchPlan + PatchBundle`。生产 evaluate API 当前只接受已经审阅的同一严格 Patch contract，不在持密钥 Worker 内临时调用模型。Bundle 不是可执行 shell 或上下文 diff，而是最多 8 个完整 UTF-8 文件的 `create/replace` 操作；单文件最多 64 KiB、总内容最多 256 KiB、治理策略最多新增 500 行。replace 必须带 `expectedOldSha256`，每个新内容必须匹配 `contentSha256`，从而拒绝基线漂移和传输篡改。
 
-当前低风险 allowlist 仅覆盖少量 intent/decision/retry/remediation/Profile、文档和 evolution 回归测试。数据库 migration、身份/安全代码、工作流、部署清单、secret/credential、`.env` 和 sealed eval 都在 denylist；七条不可变量必须全部出现在 `preservedInvariants`。路径规范化还拒绝绝对路径、盘符、`..`、NUL、Windows 保留名、尾随点/空格和大小写重复。
+当前低风险 allowlist 仅覆盖少量 intent/decision/retry/remediation/Profile 和文档；固定 evolution grader/test 被明确 deny，候选不能修改验收尺子。数据库 migration、身份/安全代码、工作流、部署清单、secret/credential、`.env` 和 sealed eval 同样在 denylist；七条不可变量必须全部出现在 `preservedInvariants`。路径规范化还拒绝绝对路径、盘符、`..`、NUL、Windows 保留名、尾随点/空格和大小写重复。
 
 Materializer 使用固定 argv 创建 detached Git worktree，不建分支。写入前再次检查 allowlist、sealed path、旧文件 hash、symlink/junction 和目标是否越出 worktree；所有文件先准备，再使用同目录临时文件、`fsync` 和 `os.replace` 原子落盘。模型不能提供评测命令；v1 只允许注册在代码中的 `python-compile` 和 `evolution-core`。命令使用 `shell=False`，stdin 关闭，设置 60/180 秒 timeout、32 KiB 输出上限、最小环境、禁用用户 site/pytest 自动插件，并把常规代理指向不可用本机地址。评测环境还把 `PYTHONPATH` 固定为 detached worktree 的 `src`，防止候选测试意外导入 Worker 镜像中的稳定版 `/app` 源码而产生“假通过”。任意失败即停止后续命令，finally 强制 `git worktree remove --force` 和目录清理；清理失败会把原本 passed 的结果改成 error。
 
-这仍不是完全的恶意代码沙箱。代理环境变量不能阻止直接 socket，进程也与宿主共享内核和当前用户权限。生产运行应进一步使用一次性容器/Pod、只读基线、独立 ServiceAccount、无 Secret、默认拒绝 egress、CPU/内存/PID/磁盘限额、seccomp/AppArmor 和整体 deadline。当前实现适合“受信模型提出低风险候选”的本地受控评估，不能宣传为任意不可信代码执行平台。
+Compose 的 local evaluator 仍不是恶意代码沙箱。生产 overlay 因此拆成三层：持签名密钥但无源码/Kubernetes Token 的控制器；无业务密钥、只有 Job/ConfigMap/Pod 最小权限的协调器；以及无 Secret、无 ServiceAccount Token、只读基线、临时工作区和 deny-all 网络的一次性候选 Job。协调器只信 Kubernetes 终态，不信候选自报 JSON。该边界仍依赖目标集群真实启用 Pod Security/CNI、准确限制 kube-apiserver egress，并不等同 gVisor/Kata 等强虚拟化隔离。
 
-### 28.7 Temporal 人审与尚未连接的控制面闭环
+### 28.7 Temporal Trial、证明回调与人工门禁
 
-`HarnessEvolutionWorkflow` 运行在独立 `ratsnest-evolution` task queue，worker 的 `max_concurrent_activities=1`。Patch 生成 Activity 最长 15 分钟，Sandbox Activity 最长 10 分钟；两者最多尝试 2 次，策略/评测错误被标记为 non-retryable。Workflow 提供 `progress` query 和 `approve/reject/cancel` signal。Sandbox verdict 不是 passed 或清理不成功时立即拒绝；通过后默认永久等待人工信号，最终最多返回 `approved_for_external_review`，结果中 `automatic_merge/push/deploy` 恒为 false。
+`HarnessEvolutionWorkflow` 运行在独立控制 queue，评测 Activity 固定投递到 `ratsnest-evolution-sandbox` queue；两个 Worker 均单并发。Java 先以幂等键创建 PENDING Trial 并固化 candidate/base/input/suite digest，再通过 request-bound JWT 启动同一个 Temporal workflow ID。评测输出由控制器生成 HMAC attestation 并回调 Java；回调重试耗尽时，Workflow query 中仍保留 authoritative result，重复 start 会幂等重投。评测 Activity 耗尽也会生成受信失败报告，使 Trial 可终止而非永久卡住。
 
-Temporal 在这里解决的是“等待人、worker 重启、有限 Activity retry 和可查询历史”，不替代 Eval，也不替代 Git 审查。Compose 现在提供 `profiles: [evolution]` 的默认关闭 `evolution_worker`：它基于已构建 Runtime 增加 Git 与锁定的 dev 依赖，将仓库挂载到 `/repository`、候选 worktree 放入独立 `/evolution-sandbox` volume，并继续由 Worker 限制 `max_concurrent_activities=1`。这是显式 opt-in 的本地开发入口，不是生产隔离证明。一个重要的当前缺口仍是：Java `evolution_trials` Repository 只有查询，没有创建/更新 Trial 的写路径；控制面也没有启动 `ratsnest.harness-evolution.v1`、转发 signal、绑定 `CandidateEvalReport` 和更新 Candidate 状态的完整 API；生产 K8s 尚未部署 Evolution Worker。因此当前实现是可本地启动的安全执行原语和状态模型，不是可从产品页面一键完成的闭环。另一个治理项是给 human gate 增加审批 SLA/过期策略，避免无限等待的 Workflow 长期占用历史与运维注意力。
+Temporal 解决 worker 重启、有限 Activity retry、可查询历史和幂等结果重投，不替代 Eval、代码审查或发布。Java 的专用 approve API 只把成功候选推进到 `approved`，不会 merge/push/register/deploy。Compose 提供显式 opt-in 的本地双进程入口；K8s overlay 提供默认零副本的三层隔离资源。当前仍需目标集群实测、自动化候选对 baseline 的真实业务回放比较、审批 SLA/过期策略与发布系统制品签名；因此应称为“受治理闭环已实现、生产演练待完成”，而不是线上自治改码。
 
 ### 28.8 Java Canary 分桶与 HTTP/gRPC 双 endpoint
 
@@ -2076,7 +2076,7 @@ K8s Overlay 创建独立的 `ratsnest-agent-service-canary` Service/Deployment �
 
 K8s revision 只覆盖 Workload template。它不会回滚 PostgreSQL schema、Temporal Event History、Kafka 事件、S3 Artifact 或已经固定版本的 Run。stable queue 上的长期 Workflow 还必须保持 replay compatibility；改变 Workflow command history 的版本要使用 Temporal Worker Versioning/Patching 或 drain，不能指望 Kubernetes rollback 修复 nondeterminism。
 
-### 28.10 Flyway V9–V10 与 expand/migrate/contract
+### 28.10 Flyway V9–V11 与 expand/migrate/contract
 
 V9 建立 Harness Evolution 的主体数据库契约：
 
@@ -2088,9 +2088,11 @@ V9 建立 Harness Evolution 的主体数据库契约：
 
 V10 以向后兼容的 nullable 列为 `harness_rollouts` 增加 `previous_stable_version_id`、外键和“不得等于当前 stable”的约束。Promotion 只记录经过 attestation 的直接前任；Rollback 只能恢复这个前任且使用后清空，因此支持真实但有界的一级 stable 回滚，同时拒绝任意历史版本选择。若前任是未 attested 的 `legacy-baseline`，不会生成可用回滚目标。
 
+V11 为 Trial 增加 base/candidate/eval/report digest、权威报告和完成时间，建立“每个 Candidate 只能有一个 PENDING Trial”及 tenant/workflow 唯一绑定。迁移在遗留 PENDING 或重复 workflow 数据存在时 fail-fast，要求先依据审计证据显式 drain，禁止用伪造 PASSED proof 强行回填。
+
 生产清单刻意关闭业务 Pod 内 Flyway，让独立 `ratsnest-flyway-migrate` Job 使用与候选 Java 相同的不可变镜像运行 `FlywayMigrationMain`。凭据来自专门的 `ratsnest-flyway-secrets`，而不是 Runtime `envFrom` Secret；Job 有一次重试上限、10 分钟 active deadline 和独立资源限制。发布证据必须保存 `flyway_schema_history` 的 version、description、checksum、installed_on 和 success。
 
-数据库发布遵循 expand/migrate/contract：先发布向后兼容的新增列/表/索引；再让新旧应用共存并迁移/核对数据；最后在另一个经过审查的版本删除旧结构。已进入共享环境的 V9/V10 文件不可修改，checksum 冲突禁止自动 `repair`，只能新增 V11+ forward-fix。Deployment rollback 不会执行 Flyway down migration；破坏性数据库问题需要兼容 forward-fix，必要时从已演练备份恢复。当前没有在真实 Kubernetes/PostgreSQL 集群运行 V9/V10 Job、失败恢复或旧新版本并行验证，因此不能宣称数据库升级/回滚已完成生产演练。
+数据库发布遵循 expand/migrate/contract：先发布向后兼容的新增列/表/索引；再让新旧应用共存并迁移/核对数据；最后在另一个经过审查的版本删除旧结构。已进入共享环境的 V9–V11 文件不可修改，checksum 冲突禁止自动 `repair`，只能新增 V12+ forward-fix。Deployment rollback 不会执行 Flyway down migration；破坏性数据库问题需要兼容 forward-fix，必要时从已演练备份恢复。当前没有在真实 Kubernetes/PostgreSQL 集群运行 V9–V11 Job、失败恢复或旧新版本并行验证，因此不能宣称数据库升级/回滚已完成生产演练。
 
 ### 28.11 状态所有权与一致性边界
 
@@ -2116,15 +2118,14 @@ V10 以向后兼容的 nullable 列为 `harness_rollouts` 增加 `previous_stabl
 - 没有启动完整 Docker Compose，也没有运行真实 Kubernetes Metrics API/HPA、Canary 分流、Promotion、Rollback 或 Flyway Job；
 - 没有调用真实 LLM、KiCad、Freerouting，也没有用本阶段 Eval 证明任一板卡 release-ready；
 - 没有验证真实 OIDC 平台管理员 token 对 Harness release API 的授权矩阵；
-- 没有把 Java Candidate/Trial API 与 Temporal Evolution Workflow、报告对象存储和状态 transition 连成闭环；
-- 没有部署**生产 K8s** Evolution Worker，也没有 human gate SLA/超时治理；Compose 只有默认关闭的本地开发 worker；
+- 没有在真实集群部署/演练生产 Evolution controller、sandbox coordinator 和候选 Job，也没有审批 SLA/超时治理；
 - 没有为 Canary 定义并自动采集错误率、blocked rate、P95/P99、token、成本、artifact truth regression 等 promotion SLO，也没有自动 rollback controller；
 - 没有在真实 K8s 验证已经注入的 gRPC Canary target、NetworkPolicy、HTTP/2 和 fail-closed 行为；
 - Python 执行入口的 Java Run pin/Pod Harness identity 强校验已有源码和窄测试，但没有在真实 stable/canary Pod 与恢复场景做集成演练；
-- 没有把 sealed Eval 放入独立凭据域，也没有用容器级 sandbox 阻断直接网络/宿主权限；
+- 已在清单中把候选 Job 与签名控制器分离并 deny-all 网络，但尚未在真实 CNI/Pod Security 下证明隔离生效；
 - 没有做 Manifest 密码学签名、SBOM/provenance 验证、跨区域灾备和 RPO/RTO 演练。
 
-这些不是对架构价值的否定，而是验收边界。当前最小闭环顺序应是：先让 CI 的 Java/Python/前端/基础设施门全部绿色；再补 Java→Temporal Trial 写入、signal、报告持久化和生产 K8s Evolution Worker；最后在测试集群用零 LLM/零 EDA 的确定性 Run 演练身份错配、Flyway、HTTP/gRPC Canary、重启、drain 和 rollback，之后才安排一次受预算约束的真实 EDA 里程碑。
+这些不是对架构价值的否定，而是验收边界。下一步应先让 CI 全绿，再在测试集群用零 LLM/零 EDA 的确定性 Trial 演练 V11、回调重投、Job 隔离、身份错配、Canary、drain 和 rollback；最后才安排受预算约束的真实 EDA 与候选业务回放。
 
 ### 28.13 Harness Evolution 面试深挖题（Q101–Q128）
 
@@ -2182,7 +2183,7 @@ V10 以向后兼容的 nullable 列为 `harness_rollouts` 增加 `previous_stabl
 
 #### Q114：Candidate 状态机和 HarnessVersion 状态机为什么分开？
 
-**简答：**Candidate 是问题/补丁审查，HarnessVersion 是可部署制品，两者生命周期和权限不同。**具体实现：**Candidate 为 observed→…→promoted；Harness 为 CANDIDATE→APPROVED→CANARY→STABLE。**继续追问：**当前两者已自动绑定吗？**答案：**没有；这正是待补的 Java Trial/Temporal/制品注册闭环，现阶段必须人工核对 candidate、patch、CI 和 manifest。
+**简答：**Candidate 是问题/补丁审查，HarnessVersion 是可部署制品，两者生命周期和权限不同。**具体实现：**Trial 已把 Candidate、base Manifest、patch 和 report digest 自动绑定；Candidate 批准后仍需外部 CI/制品构建，再显式注册 HarnessVersion。**继续追问：**为什么不在 approve 时自动注册？**答案：**评测通过不等于制品供应链已完成；OCI digest、SBOM、签名和 CI provenance 必须由发布系统产生，不能由 Agent 伪造。
 
 #### Q115：Sandbox 怎样防路径穿越和软链接逃逸？
 
@@ -2194,7 +2195,7 @@ V10 以向后兼容的 nullable 列为 `harness_rollouts` 增加 `previous_stabl
 
 #### Q117：为什么模型不能决定运行哪些测试命令？
 
-**简答：**“测试命令”本身就是任意代码执行面。**具体实现：**模型只给文件内容，Activity 固定选择代码注册的 `python-compile/evolution-core`，`subprocess` 使用 `shell=False`、超时和输出上限。**继续追问：**这已经是安全沙箱了吗？**答案：**不是；仍需容器级权限、网络、PID、CPU、内存和文件系统隔离，当前只是受控 worktree executor。
+**简答：**“测试命令”本身就是任意代码执行面。**具体实现：**模型只给有界文件内容，Activity 固定选择 `python-compile/evolution-core`；生产候选在无 Token/Secret/网络的一次性 Job 中执行，协调器从容器终态生成报告。**继续追问：**这已经是强沙箱了吗？**答案：**仍不是 gVisor/Kata 级隔离；必须在目标集群实测 CNI、Pod Security、资源限制与 API egress，Compose local_process 只用于开发。
 
 #### Q118：Temporal 在 Evolution 里解决什么，LangGraph 为什么不能替代？
 
@@ -2234,8 +2235,8 @@ V10 以向后兼容的 nullable 列为 `harness_rollouts` 增加 `previous_stabl
 
 #### Q127：当前 Evolution 最大的工程缺口是什么？
 
-**简答：**不是缺 Prompt，而是控制面连接和真实环境证据。**具体实现：**Python Runtime pin 与 gRPC Canary 配置已补齐；Java 仍未写 Trial/启动 Temporal/回写 report，生产 K8s Evolution Worker 和真实 K8s/Flyway/LLM/EDA 仍未跑。**继续追问：**下一步先补哪个？**答案：**先让 CI 绿色并补 Trial→Workflow→report 的幂等闭环，然后用确定性轻量 Run 演练身份错配、migration、HTTP/gRPC Canary 和 rollback，最后才消耗 LLM/EDA 预算。
+**简答：**最大缺口是真实环境证据和候选对 baseline 的业务回放，而不是再写 Prompt。**具体实现：**Trial→Temporal→隔离 Job→attested report→awaiting approval 已接通；尚未在真实 K8s/Flyway/Temporal 环境演练，也未自动运行完整 Agent/EDA case 来证明实际改善。**继续追问：**下一步先补哪个？**答案：**先让 CI 全绿并做零 LLM 的隔离/回调/V11 演练，再做 recorded replay，最后才消耗真实 LLM/EDA 预算。
 
 #### Q128：面试时能否说“系统实现了 Harness 自进化”？
 
-**简答：**应说“实现了受治理的 Harness Evolution 基础闭环和安全执行原语”，并主动说明尚未生产演练的连接项。**具体实现：**能展示 Observation 聚合、sealed Eval、Patch contract、detached sandbox、Temporal 人审、版本分桶和 K8s rollback 的源码证据。**继续追问：**这样会不会显得不够完成？**答案：**恰恰相反，明确区分已实现、已测试、已部署和已生产验证，是企业工程成熟度；把骨架夸成线上自改源码才会在深挖时失去可信度。
+**简答：**应说“实现了受治理的 Harness Evolution 代码闭环”，并主动说明生产演练与真实业务 replay 尚未完成。**具体实现：**能展示 Observation 聚合、sealed 隔离、Patch contract、Trial digest、Temporal 回调恢复、K8s Job 隔离、人工批准、版本分桶和回滚源码。**继续追问：**为什么不叫完全自治？**答案：**系统刻意不持有 merge/push/deploy 权限；明确区分已实现、CI 已验证、集群已部署和生产已演练，比把骨架夸成线上自改源码更符合企业工程。

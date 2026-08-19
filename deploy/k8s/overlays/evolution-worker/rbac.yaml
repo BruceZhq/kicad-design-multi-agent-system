@@ -1,0 +1,20 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: ratsnest-evolution-sandbox-coordinator, namespace: ratsnest-evolution-sandbox }
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list, watch, delete]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [create, get, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: ratsnest-evolution-sandbox-coordinator, namespace: ratsnest-evolution-sandbox }
+subjects:
+  - { kind: ServiceAccount, name: ratsnest-evolution-sandbox-coordinator, namespace: ratsnest-evolution-sandbox }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: ratsnest-evolution-sandbox-coordinator }

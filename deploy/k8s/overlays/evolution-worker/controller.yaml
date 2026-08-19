@@ -1,0 +1,92 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ratsnest-evolution-controller
+  namespace: ratsnest
+  labels:
+    app.kubernetes.io/name: ratsnest-evolution-controller
+    app.kubernetes.io/part-of: ratsnestpro
+    ratsnest.io/trust-domain: trusted-evolution-control
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratsnest-evolution-controller
+  namespace: ratsnest
+  labels:
+    app: ratsnest-evolution-controller
+    app.kubernetes.io/name: ratsnest-evolution-controller
+    app.kubernetes.io/part-of: ratsnestpro
+    ratsnest.io/trust-domain: trusted-evolution-control
+  annotations:
+    ratsnest.io/activation: explicit-platform-approval-required
+    ratsnest.io/automatic-merge: "false"
+    ratsnest.io/automatic-push: "false"
+    ratsnest.io/automatic-deploy: "false"
+spec:
+  replicas: 0
+  revisionHistoryLimit: 3
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: ratsnest-evolution-controller }
+  template:
+    metadata:
+      labels:
+        app: ratsnest-evolution-controller
+        app.kubernetes.io/name: ratsnest-evolution-controller
+        app.kubernetes.io/part-of: ratsnestpro
+        ratsnest.io/trust-domain: trusted-evolution-control
+        ratsnest.io/workload-class: governed-evolution-controller
+      annotations:
+        ratsnest.io/automatic-merge: "false"
+        ratsnest.io/automatic-push: "false"
+        ratsnest.io/automatic-deploy: "false"
+    spec:
+      serviceAccountName: ratsnest-evolution-controller
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: controller
+          # Fail-closed sentinel. Replace the complete digest before scaling.
+          image: ghcr.io/ratsnestteam/ratsnest-evolution-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command: [python, -m, evolution.temporal.worker]
+          env:
+            - { name: TEMPORAL_ADDRESS, value: temporal-frontend.ratsnest-data.svc.cluster.local:7233 }
+            - { name: TEMPORAL_NAMESPACE, value: ratsnest }
+            - { name: RATSNESTPRO_TEMPORAL_ENABLED, value: "true" }
+            - { name: RATSNEST_EVOLUTION_TEMPORAL_TASK_QUEUE, value: ratsnest-evolution-production }
+            - { name: RATSNEST_EVOLUTION_WORKER_ROLE, value: controller }
+            - { name: RATSNEST_EVOLUTION_REQUIRED_EXECUTOR_MODE, value: kubernetes_job }
+            - name: RATSNEST_EVOLUTION_CONTROL_PLANE_URL
+              value: http://ratsnest-control-plane.ratsnest.svc.cluster.local:8080
+            # This is the only Secret granted to the trusted controller.
+            - name: RATSNEST_INTERNAL_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ratsnest-runtime-secrets
+                  key: RATSNEST_INTERNAL_SIGNING_SECRET
+            - { name: PYTHONDONTWRITEBYTECODE, value: "1" }
+            - { name: PYTHONUNBUFFERED, value: "1" }
+            - { name: HOME, value: /tmp/evolution-home }
+            - { name: TEMP, value: /tmp }
+            - { name: TMP, value: /tmp }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi, ephemeral-storage: 128Mi }
+            limits: { cpu: 500m, memory: 1Gi, ephemeral-storage: 512Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 512Mi }

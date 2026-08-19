@@ -9,6 +9,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 
 from core import settings
+from evolution.temporal.client import (
+    EvolutionTrialIdentityConflict,
+    evolution_trial_status,
+    start_evolution_trial,
+)
+from evolution.temporal.trial_contracts import EvolutionTrialStartRequest
 from schema import (
     AllModelEnum,
     ChatHistory,
@@ -27,6 +33,8 @@ from service.internal_auth import (
 from service.runtime_identity import scope_identity
 
 _AGENT_ID = "ratsnestpro-multi-agent"
+_EVOLUTION_CONTROL_PLANE_SUBJECT = "evolution-control-plane"
+_SYSTEM_PROJECT_ID = "00000000-0000-0000-0000-000000000000"
 
 
 class InternalStreamRequest(BaseModel):
@@ -110,6 +118,13 @@ def _require_request_run(claims: InternalClaims, request_id: str) -> None:
         raise _unauthorized() from exc
 
 
+def _require_evolution_control_plane(claims: InternalClaims) -> None:
+    if not hmac.compare_digest(claims.subject, _EVOLUTION_CONTROL_PLANE_SUBJECT) or not hmac.compare_digest(
+        claims.project_id, _SYSTEM_PROJECT_ID
+    ):
+        raise _unauthorized()
+
+
 def _owner_id(claims: InternalClaims) -> str:
     return scope_identity(
         claims.subject,
@@ -142,6 +157,48 @@ async def internal_info(
         default_model=settings.DEFAULT_MODEL,
         profiles=get_profile_metadata(),
     )
+
+
+@router.post("/evolution/trials/{trial_id}:start")
+async def internal_start_evolution_trial(
+    trial_id: Annotated[str, Path(pattern=r"^[A-Za-z0-9._:-]{8,200}$")],
+    input: EvolutionTrialStartRequest,
+    claims: Annotated[InternalClaims, Depends(verified_internal_claims)],
+) -> dict[str, Any]:
+    _require_request_run(claims, trial_id)
+    _require_evolution_control_plane(claims)
+    if input.trial_id != trial_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="trial_id does not match the request path",
+        )
+    try:
+        return await start_evolution_trial(
+            input,
+            tenant_id=claims.tenant_id,
+            project_id=claims.project_id,
+        )
+    except EvolutionTrialIdentityConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.get("/evolution/trials/{trial_id}")
+async def internal_evolution_trial_status(
+    trial_id: Annotated[str, Path(pattern=r"^[A-Za-z0-9._:-]{8,200}$")],
+    claims: Annotated[InternalClaims, Depends(verified_internal_claims)],
+) -> dict[str, Any]:
+    _require_request_run(claims, trial_id)
+    _require_evolution_control_plane(claims)
+    try:
+        return await evolution_trial_status(
+            trial_id,
+            tenant_id=claims.tenant_id,
+            project_id=claims.project_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except EvolutionTrialIdentityConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @router.post("/runs/ratsnestpro-multi-agent/stream", response_class=StreamingResponse)

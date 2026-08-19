@@ -42,6 +42,50 @@ class InternalClaims:
     body_sha256: str
 
 
+def create_internal_token(
+    *,
+    secret: str,
+    issuer: str,
+    audience: str,
+    subject: str,
+    tenant_id: str,
+    project_id: str,
+    run_id: str,
+    method: str,
+    path: str,
+    body: bytes,
+    now: int | None = None,
+    ttl_seconds: int = 60,
+) -> str:
+    """Create the same request-bound HS256 credential accepted below."""
+
+    if len(secret.encode("utf-8")) < 32:
+        raise InternalTokenError("Internal signing secret must contain at least 32 bytes.")
+    if ttl_seconds < 1 or ttl_seconds > 120:
+        raise InternalTokenError("Internal token lifetime is invalid.")
+    issued_at = int(time.time()) if now is None else now
+    header = {"alg": "HS256", "typ": "JWT"}
+    payload = {
+        "v": 1,
+        "iss": issuer,
+        "aud": audience,
+        "sub": subject,
+        "tenantId": tenant_id,
+        "projectId": project_id,
+        "runId": run_id,
+        "iat": issued_at,
+        "exp": issued_at + ttl_seconds,
+        "method": method.upper(),
+        "path": path,
+        "bodySha256": hashlib.sha256(body).hexdigest(),
+    }
+    encoded_header = _encode_segment(_canonical_json(header))
+    encoded_payload = _encode_segment(_canonical_json(payload))
+    signing_input = f"{encoded_header}.{encoded_payload}".encode("ascii")
+    signature = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    return f"{encoded_header}.{encoded_payload}.{_encode_segment(signature)}"
+
+
 def verify_internal_token(
     token: str,
     *,
@@ -65,6 +109,8 @@ def verify_internal_token(
     payload = _json_object(_decode_segment(encoded_payload))
     if header.get("alg") != "HS256" or header.get("typ") != "JWT" or "crit" in header:
         raise InternalTokenError("Internal token header is invalid.")
+    if payload.get("v") != 1:
+        raise InternalTokenError("Internal token version is invalid.")
 
     signing_input = f"{encoded_header}.{encoded_payload}".encode("ascii")
     expected_signature = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
@@ -134,6 +180,19 @@ def _decode_segment(value: str) -> bytes:
         return base64.b64decode(value + padding, altchars=b"-_", validate=True)
     except (ValueError, TypeError) as exc:
         raise InternalTokenError("Internal token encoding is invalid.") from exc
+
+
+def _encode_segment(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _canonical_json(value: dict[str, Any]) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
 
 
 def _json_object(raw: bytes) -> dict[str, Any]:

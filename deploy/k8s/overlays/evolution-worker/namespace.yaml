@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ratsnest-evolution-sandbox
+  labels:
+    kubernetes.io/metadata.name: ratsnest-evolution-sandbox
+    app.kubernetes.io/part-of: ratsnestpro
+    ratsnest.io/trust-domain: untrusted-candidate-evaluation
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

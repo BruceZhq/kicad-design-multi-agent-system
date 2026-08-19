@@ -46,8 +46,7 @@
       "src/agents/ratsnestpro/retry_policy.py",
       "src/agents/ratsnestpro/remediation_search.py",
       "src/agents/ratsnestpro/profiles/*.json",
-      "docs/**/*.md",
-      "tests/evolution/**/*.py"
+      "docs/**/*.md"
     ],
     "deniedGlobs": [
       ".github/workflows/**",
@@ -56,6 +55,7 @@
       "backend/src/main/java/**/security/**",
       "contracts/evolution/**/sealed/**",
       "evals/sealed/**",
+      "tests/evolution/**",
       "deploy/**",
       "privatecredentials/**",
       "**/.env",
