@@ -1,4 +1,4 @@
-# RatsNest contracts
+# CircuitFoundry contracts
 
 Contracts are versioned independently from their transport adapters.
 

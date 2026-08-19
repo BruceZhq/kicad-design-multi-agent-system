@@ -1,4 +1,4 @@
-# RatsNest control plane
+# CircuitFoundry control plane
 
 The control plane is a Java 21 Spring Boot service. It owns SaaS identity and business data; it does not run LangGraph or KiCad.
 

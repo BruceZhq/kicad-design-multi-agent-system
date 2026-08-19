@@ -632,7 +632,7 @@ services:
       - "auth.localhost:host-gateway"
     environment:
       OAUTH2_PROXY_PROVIDER: oidc
-      OAUTH2_PROXY_PROVIDER_DISPLAY_NAME: RatsNest
+      OAUTH2_PROXY_PROVIDER_DISPLAY_NAME: CircuitFoundry
       OAUTH2_PROXY_OIDC_ISSUER_URL: ${RATSNEST_OIDC_ISSUER_URI:-http://auth.localhost:8180/realms/ratsnest-dev}
       OAUTH2_PROXY_CLIENT_ID: ${RATSNEST_OIDC_WEB_CLIENT_ID:-ratsnest-web}
       OAUTH2_PROXY_CLIENT_SECRET: ${RATSNEST_OIDC_WEB_CLIENT_SECRET:-ratsnest-web-dev-only-not-a-secret}

@@ -1967,13 +1967,13 @@ Java 稳定分桶 → HTTP/gRPC 独立 endpoint → K8s Canary Deployment/Task Q
 
 | Increment | 目标 | 当前源码证据 | 当前边界 |
 |---|---|---|---|
-| 0：基线、契约、CI | 固定不可变规则和可复现入口 | `config/harness/invariants.v1.json`；`contracts/evolution/v1/*.json`；`scripts/build_harness_manifest.ps1`；`.github/workflows/ci.yml` | CI 已声明 Python、前端、Java、Kustomize/Compose 门禁，但本章编写过程没有执行远端 CI；完整 Maven 构建仍待 CI 实证 |
+| 0：基线、契约、CI | 固定不可变规则和可复现入口 | `config/harness/invariants.v1.json`；`contracts/evolution/v1/*.json`；`scripts/build_harness_manifest.ps1`；`.github/workflows/ci.yml` | GitHub Actions `32209109847` 已在 clean checkout 中通过 Python、前端生产构建、Java 21 Maven 编译/测试和 Kustomize/Compose 门禁；本机 Docker Engine 当时不可用，因此没有把本机镜像构建冒充为已验证 |
 | 1：Harness 身份 | 让一次 Run 绑定一个可追溯版本 | V9 `harness_versions/harness_rollouts`；`runs` 新增 version/manifest/channel；数据库触发器禁止修改；`RunService` 创建 Run 时固化并下发 `runtime_config.harness_version`；Python Runtime 在 checkpoint 前校验签名请求中的显式 pin 与 Pod 环境身份完全一致 | 当前已闭环 Agent Runtime 入口的 fail-closed binding；真实 Docker/K8s 中稳定版、Canary 和恢复流量的身份错配演练仍未执行 |
 | 2：Eval | 用相同案例和确定性判分比较 stable 与 candidate | 四个 content-addressed case；七类 grader；`evaluate_suite/compare_reports`；公开、holdout、adversarial 分组 | 当前 fixture 是录制证据，不是本轮真实 LLM/KiCad/Freerouting 执行；不能据此宣称五类板卡已经通过完整回归 |
 | 3：Observation/Candidate | 把重复 AHE 缺陷变成隐私安全候选 | Java `EvolutionCollector`、V9/V11 演进表、RLS、去重键、候选状态机、受限 REST transition API，以及平台管理员创建 Trial 的 evaluate 入口 | 聚合范围是**同一租户内跨项目**；浏览器不能选择演进 channel，普通 transition API 不能绕过 Eval proof 直接进入 `awaiting_approval`/`approved` |
 | 4：Optimizer/Sandbox | 让模型能提出低风险补丁，但不能获得发布权 | `optimizer.py` 严格结构化输出；`sandbox.py` detached worktree、路径/哈希/大小/命令门禁和 candidate `PYTHONPATH` 隔离；Java 签名启动 Python Temporal Trial，Python 回传带 HMAC attestation 的权威报告，Java 只推进到 `awaiting_approval` 或 `rejected`；Compose 与 K8s 均提供默认关闭、单并发的 `evolution_worker` | 代码闭环不会 merge/push/deploy；当前固定评测验证源码、沙箱和录制 Eval 逻辑，并不等同于在真实集群重放新的 LLM/KiCad/Freerouting 行为；生产 K8s Trial 尚未实跑 |
 | 5：Canary/Rollback | 用真实版本和隔离执行面做渐进发布 | Java HMAC 稳定分桶；stable/canary HTTP 与 gRPC 双 endpoint；K8s 独立 Service、Deployment、NetworkPolicy、Temporal task queue；base ConfigMap/Deployment 注入 Canary HTTP/gRPC target；digest-only 脚本和静态门禁 | 配置链已闭环，但尚未在真实 K8s 上验证 gRPC Canary 连接、身份错配拒绝、分流、drain、Promotion 或 Rollback |
-| 6：文档和验收 | 让发布/迁移/回滚有可执行手册 | `docs/HARNESS_CANARY_RUNBOOK.md`、三个发布脚本、静态基础设施检查 | 按需求不制作演示视频；本轮没有连接真实集群，也没有执行真实 promote、rollback、Flyway Job、LLM 或 EDA |
+| 6：文档和验收 | 让发布/迁移/回滚有可执行手册 | `docs/HARNESS_CANARY_RUNBOOK.md`、三个发布脚本、静态基础设施检查，以及 clean-clone GitHub CI | 按需求不制作演示视频；本轮没有连接真实集群，也没有执行真实 promote、rollback、Flyway Job、LLM 或 EDA |
 
 这张表刻意把“存在代码”与“生产闭环已验证”分开。面试或交付时可以说“关键机制已实现并有窄测试/静态门”，不能把尚未连接的控制面和真实环境演练描述为已经上线。
 

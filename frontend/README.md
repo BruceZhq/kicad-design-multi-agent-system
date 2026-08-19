@@ -1,6 +1,6 @@
 # CircuitFoundry Web
 
-Next.js 16 / React 19 frontend for the Java RatsNest control plane. The browser talks only to same-origin Next.js route handlers; those handlers forward the authenticated OIDC access token to Java. They never create a `user_id` and never call the Python Agent Runtime directly.
+Next.js 16 / React 19 frontend for the Java CircuitFoundry control plane. The browser talks only to same-origin Next.js route handlers; those handlers forward the authenticated OIDC access token to Java. They never create a `user_id` and never call the Python Agent Runtime directly.
 
 ## Data path
 

@@ -1,6 +1,6 @@
 # CircuitFoundry
 
-CircuitFoundry 是面向版本化 KiCad 硬件设计场景的企业级多智能体系统。它把自然语言需求转换成可审查的 KiCad 工程、制造文件和风险报告，并通过 Java 控制面提供多租户、身份、任务、产物和审计能力。为保持数据库迁移、内部 API 和既有工程兼容，源码中的 `ratsnestpro`、`ratsnest-*` 仍作为稳定的内部标识存在。
+CircuitFoundry 是由 **CircuitFoundry Engineering** 团队维护、面向版本化 KiCad 硬件设计场景的企业级多智能体系统。它把自然语言需求转换成可审查的 KiCad 工程、制造文件和风险报告，并通过 Java 控制面提供多租户、身份、任务、产物和审计能力。为保持数据库迁移、内部 API 和既有工程兼容，源码中的 `ratsnestpro`、`ratsnest-*` 仍作为稳定的内部标识存在。
 
 当前生产产品只注册一个 Agent：`ratsnestpro-multi-agent`。旧的通用聊天、RAG、AG-UI、语音和多 Agent 示例代码已经从运行时移除，避免启动时加载无关图和错误地把普通聊天 Agent 当成硬件设计 Agent。
 
@@ -13,7 +13,7 @@ CircuitFoundry 是面向版本化 KiCad 硬件设计场景的企业级多智能�
 - Parts Specialist 负责器件、符号、封装、引脚—焊盘兼容性及可采购性证据。
 - Hardware Engineer 通过 Temporal 执行长时间 KiCad、Freerouting 和制造活动。
 - Reviewer 独立审查 ERC、DRC、连通性、布局、制造和交付风险。
-- AHE 只修复 Harness/流程缺陷；EHE 记录跨任务的匿名失败签名，不直接修改源码。
+- AHE 只修复 Harness/流程缺陷；EHE 聚合跨任务的匿名失败签名并生成隔离候选，不直接修改稳定源码。
 - 普通设计风险可以交付为 `delivered_with_issues`；工具执行故障才会进入 `execution_blocked`。
 - 产物使用内容寻址和 SHA-256 Manifest，支持人工反馈创建新 Revision，不覆盖旧工程。
 
