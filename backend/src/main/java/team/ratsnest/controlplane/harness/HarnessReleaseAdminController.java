@@ -28,7 +28,7 @@ import team.ratsnest.controlplane.identity.PlatformAccess;
 @RestController
 @Validated
 @RequestMapping("/api/v1/platform")
-public final class HarnessReleaseAdminController {
+public class HarnessReleaseAdminController {
 
     private static final String VERSION_ID = "[A-Za-z0-9._:-]{1,120}";
     private static final String DIGEST = "[0-9a-f]{64}";

@@ -46,6 +46,9 @@ public class DatabaseIsolationVerifier implements ApplicationRunner {
                              where nspname = 'control_plane'
                                and relkind = 'r'
                                and relname <> 'flyway_schema_history'
+                               -- Global release metadata has no tenant_id and is only
+                               -- mutated through the platform-admin control plane.
+                               and relname not in ('harness_versions', 'harness_rollouts')
                                and (
                                    not relrowsecurity
                                    or (

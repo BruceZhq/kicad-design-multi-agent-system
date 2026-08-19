@@ -29,7 +29,7 @@ import tools.jackson.databind.ObjectMapper;
  * Raw prompts, diagnostic messages and evidence never cross this boundary.
  */
 @Service
-public final class EvolutionCollector {
+public class EvolutionCollector {
 
     private static final Pattern EVENT_TYPE = Pattern.compile("[a-z][a-z0-9_]{1,63}");
     private static final Pattern DIGEST = Pattern.compile("[0-9a-f]{64}");

@@ -30,7 +30,7 @@ import team.ratsnest.controlplane.identity.PlatformAccess;
 @RestController
 @Validated
 @RequestMapping("/api/v1/platform/evolution")
-public final class EvolutionAdminController {
+public class EvolutionAdminController {
 
     private final PlatformAccess platformAccess;
     private final EvolutionService evolution;

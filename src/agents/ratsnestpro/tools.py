@@ -815,16 +815,25 @@ def _current_pipeline_files(
     candidates: list[Path] = list(metadata_paths)
     materialized = state.artifact(PipelineStep.SCH_MATERIALIZE)
     if isinstance(materialized, MaterializeResult):
-        candidates.append(Path(materialized.sch_path))
+        schematic_path = Path(materialized.sch_path)
+        candidates.extend(
+            [
+                schematic_path,
+                schematic_path.with_suffix(".kicad_pro"),
+            ]
+        )
     erc = state.artifact(PipelineStep.ERC)
     if isinstance(erc, ErcSummary) and erc.cli_report_path:
         candidates.append(Path(erc.cli_report_path))
     board = state.artifact(PipelineStep.LAYOUT_WRITE)
     if isinstance(board, PcbWriteResult):
+        pcb_path = Path(board.pcb_path)
         candidates.extend(
             [
-                Path(board.pcb_path),
-                Path(board.pcb_path).with_name(f"{Path(board.pcb_path).stem}.unrouted.kicad_pcb"),
+                pcb_path,
+                pcb_path.with_name(f"{pcb_path.stem}.unrouted.kicad_pcb"),
+                pcb_path.with_suffix(".drc.json"),
+                pcb_path.with_suffix(".kicad_pro"),
             ]
         )
         if board.placement_constraints_path:

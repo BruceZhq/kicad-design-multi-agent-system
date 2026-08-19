@@ -111,6 +111,7 @@ _MCU_TOKEN_RE = re.compile(
 )
 _SAFE_NAME = re.compile(r"[^a-zA-Z0-9_.-]+")
 _KICAD_LIB_ID = r"[A-Za-z0-9_][A-Za-z0-9_.+\-]*:[A-Za-z0-9_][A-Za-z0-9_.+\-/()]*"
+_KICAD_LIB_ID_RE = re.compile(_KICAD_LIB_ID)
 _EXPLICIT_SYMBOL_RE = re.compile(
     rf"(?im)^\s*(?:[-*+]\s*)?(?:\*\*)?(?:kicad\s+)?symbol"
     rf"(?:\s+lib[_ ]?id|_lib_id)?(?:\*\*)?\s*[:：=]\s*[`'\"]?({_KICAD_LIB_ID})"
@@ -782,17 +783,49 @@ def _explicit_kicad_bindings(requirement: str) -> list[dict[str, str]]:
     """Pair explicitly labelled KiCad symbol and footprint IDs in source order."""
 
     symbols = [match.group(1) for match in _EXPLICIT_SYMBOL_RE.finditer(requirement)]
-    footprints = [match.group(1) for match in _EXPLICIT_FOOTPRINT_RE.finditer(requirement)]
-    if not symbols and not footprints:
-        return []
-    bindings = [
-        {
-            "symbol_lib_id": symbols[index] if index < len(symbols) else "",
-            "footprint_lib_id": footprints[index] if index < len(footprints) else "",
-        }
-        for index in range(max(len(symbols), len(footprints)))
-    ]
-    return list({(item["symbol_lib_id"], item["footprint_lib_id"]): item for item in bindings}.values())
+    labelled_footprints = [match.group(1) for match in _EXPLICIT_FOOTPRINT_RE.finditer(requirement)]
+    if symbols or labelled_footprints:
+        bindings = [
+            {
+                "symbol_lib_id": symbols[index] if index < len(symbols) else "",
+                "footprint_lib_id": (
+                    labelled_footprints[index] if index < len(labelled_footprints) else ""
+                ),
+            }
+            for index in range(max(len(symbols), len(labelled_footprints)))
+        ]
+        return list(
+            {(item["symbol_lib_id"], item["footprint_lib_id"]): item for item in bindings}.values()
+        )
+
+    # Users commonly provide an exact pair inline (for example
+    # ``J1 uses Connector_Generic:Conn_01x02 + Connector_PinHeader...``)
+    # instead of spelling out ``symbol:`` and ``footprint:`` labels.  Only
+    # accept such pairs when the current installed libraries prove that one
+    # ID is a symbol and the other is a footprint.  Keeping each pair inside
+    # its source clause prevents unrelated IDs from being paired by position.
+    installed_symbols = {lib_id.casefold(): lib_id for lib_id in grounding.symbol_index()}
+    bindings: list[dict[str, str]] = []
+    for clause in re.split(r"[\r\n;；]+", requirement):
+        lib_ids = [match.group(0) for match in _KICAD_LIB_ID_RE.finditer(clause)]
+        clause_symbols = [
+            installed_symbols[lib_id.casefold()]
+            for lib_id in lib_ids
+            if lib_id.casefold() in installed_symbols
+        ]
+        clause_footprints = [
+            lib_id for lib_id in lib_ids if footprints.footprint_pad_numbers(lib_id) is not None
+        ]
+        if len(clause_symbols) == 1 and len(clause_footprints) == 1:
+            bindings.append(
+                {
+                    "symbol_lib_id": clause_symbols[0],
+                    "footprint_lib_id": clause_footprints[0],
+                }
+            )
+    return list(
+        {(item["symbol_lib_id"], item["footprint_lib_id"]): item for item in bindings}.values()
+    )
 
 
 def _datasheet_query(symbol_query: str) -> str:
