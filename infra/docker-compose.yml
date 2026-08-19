@@ -1,0 +1,137 @@
+# RatsNest deployment — run everything in containers, no host Python/Java needed.
+#
+#   cd <directory-containing-RatsNest-and-kicad-happy-main>
+#   docker compose -f RatsNest/infra/docker-compose.yml build
+#   docker compose -f RatsNest/infra/docker-compose.yml run --rm tests      # full pytest suite
+#   docker compose -f RatsNest/infra/docker-compose.yml run --rm fix-demo   # closed-loop demo
+#   docker compose -f RatsNest/infra/docker-compose.yml run --rm evolve     # AHE experiment
+#   docker compose -f RatsNest/infra/docker-compose.yml up backend          # control plane :8080
+#
+# Run artifacts (run records, ATDP trajectories) land in RatsNest/runs on the host.
+
+name: ratsnest
+
+services:
+  # -- one-shot commands ----------------------------------------------------
+  tests:
+    build:
+      context: ../..
+      dockerfile: RatsNest/infra/docker/runtime.Dockerfile
+    image: ratsnest-runtime
+    entrypoint: ["python", "-m", "pytest", "tests", "-q"]
+    volumes:
+      - ../runs:/repo/RatsNest/runs
+
+  fix-demo:
+    image: ratsnest-runtime
+    build:
+      context: ../..
+      dockerfile: RatsNest/infra/docker/runtime.Dockerfile
+    entrypoint: >
+      sh -c "python -m ratsnest seed-defects &&
+             python -m ratsnest fix /repo/RatsNest/benchmarks/seeded/demo_board_defective --no-erc"
+    volumes:
+      - ../runs:/repo/RatsNest/runs
+
+  evolve:
+    image: ratsnest-runtime
+    build:
+      context: ../..
+      dockerfile: RatsNest/infra/docker/runtime.Dockerfile
+    entrypoint: ["python", "-m", "ratsnest", "evolve"]
+    volumes:
+      - ../runs:/repo/RatsNest/runs
+
+  # -- services ---------------------------------------------------------------
+  backend:
+    build:
+      context: ../..
+      dockerfile: RatsNest/infra/docker/backend.Dockerfile
+    image: ratsnest-backend
+    ports:
+      - "8080:8080"
+    environment:
+      RATSNEST_PYTHON_EXE: python
+      RATSNEST_AGENT_RUNTIME_DIR: /repo/RatsNest/agent-runtime
+      RATSNEST_SELF_URL: http://backend:8080
+      RATSNEST_ARTIFACT_ROOT: /app/data/artifacts
+    volumes:
+      - backend-data:/app/data
+
+  # -- cluster mode: Postgres + Kafka + queue-consuming worker -----------------
+  #   docker compose -f RatsNest/infra/docker-compose.yml --profile cluster up
+  postgres:
+    image: postgres:16-alpine
+    profiles: [cluster]
+    environment:
+      POSTGRES_DB: ratsnest
+      POSTGRES_USER: ratsnest
+      POSTGRES_PASSWORD: ratsnest
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+
+  kafka:
+    image: apache/kafka:3.8.0
+    profiles: [cluster]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # >=2 partitions so scaled workers actually share the run queue
+      KAFKA_NUM_PARTITIONS: 4
+    ports:
+      - "9094:9094"
+
+  redis:
+    image: redis:7-alpine
+    profiles: [cluster]
+    ports:
+      - "6379:6379"
+
+  backend-cluster:
+    image: ratsnest-backend
+    profiles: [cluster]
+    depends_on: [postgres, kafka, redis]
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: cluster
+      RATSNEST_DB_URL: jdbc:postgresql://postgres:5432/ratsnest
+      RATSNEST_KAFKA: kafka:9092
+      RATSNEST_SELF_URL: http://backend-cluster:8080
+      RATSNEST_RATELIMIT_MODE: redis
+      RATSNEST_REDIS_HOST: redis
+      RATSNEST_RATE_PER_SECOND: ${RATSNEST_RATE_PER_SECOND:-25}
+      # override BOTH in production (docker compose --env-file or secrets)
+      RATSNEST_JWT_SECRET: ${RATSNEST_JWT_SECRET:-cluster-demo-secret-0123456789abcdef00}
+      RATSNEST_SERVICE_TOKEN: ${RATSNEST_SERVICE_TOKEN:-cluster-demo-service-token}
+      RATSNEST_ARTIFACT_ROOT: /app/data/artifacts
+    volumes:
+      - backend-cluster-data:/app/data
+
+  worker:
+    image: ratsnest-runtime
+    profiles: [cluster]
+    depends_on: [kafka, backend-cluster]
+    entrypoint: ["python", "-m", "ratsnest.worker"]
+    environment:
+      RATSNEST_KAFKA: kafka:9092
+      RATSNEST_SERVICE_TOKEN: ${RATSNEST_SERVICE_TOKEN:-cluster-demo-service-token}
+    volumes:
+      - ../runs:/repo/RatsNest/runs
+      - worker-projects:/tmp/ratsnest-designs
+
+volumes:
+  backend-data:
+  backend-cluster-data:
+  pg-data:
+  worker-projects:

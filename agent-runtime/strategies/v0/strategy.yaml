@@ -1,0 +1,99 @@
+name: baseline-v0
+scorecard_weights:
+  error: 30.0
+  warning: 3.0
+  info: 0.0
+  erc_fail: 15.0
+
+suppressions:
+  - rule_id: RS-001
+    reason: >-
+      +12V is an external supply input. A PWR_FLAG is present for KiCad's own
+      ERC; kicad-happy deliberately ignores PWR_FLAG connectivity, so RS-001
+      is expected on externally powered rails.
+  - rule_id: DS-002
+    reason: datasheet sync is not part of the offline benchmark environment
+  - rule_id: FS-001
+    ref: U1
+    reason: >-
+      The qualified TLV1117 and LM2596 families use their datasheet stability
+      networks; LM2596 is internally compensated. The generic analyzer's
+      external-compensation heuristic does not model these catalog bindings.
+  - rule_id: TV-001
+    ref: U1
+    reason: >-
+      The generic via-density heuristic ignores the solver-qualified power
+      loss and package copper area. Production release still requires the
+      independent thermal gate and its junction-temperature margin.
+
+repair_mappings:
+  - match_rule_id: RN-VOUT-001     # synthesized: feedback divider vs rail name
+    repair_type: feedback_divider
+    params: {keep: r_bottom, e_series: E24}
+  - match_rule_id: LR-001          # analyzer-native, ships fix_params
+    repair_type: led_resistor
+    params: {e_series: E24}
+  - match_rule_id: SS-001          # sourcing blocker -> fill MPNs
+    repair_type: fill_mpn
+    params: {}
+  - match_rule_id: DS-001          # no MPNs at all -> fill MPNs
+    repair_type: fill_mpn
+    params: {}
+
+solver_params:
+  # curated Vref table (evolvable; keys matched as substring of value/lib_id)
+  vref_table:
+    TLV1117: 1.25
+    LM2596: 1.23
+    AP1117: 1.25
+    AMS1117: 1.25
+    LM317: 1.25
+    TLV431: 1.24
+  vout_tolerance_pct: 2.0
+  # curated part library slice for MPN fill, keyed by component Value
+  mpn_map:
+    AP1117-ADJ: AP1117E-ADJ
+    LM317: LM317T
+    Conn_01x02: B2B-XH-A(LF)(SN)
+    3k: RC0805FR-073KL
+    1k: RC0805FR-071KL
+    "330": RC0805FR-07330RL
+    LED_RED: LTST-C170KRKT
+  # design generation assets (shared knowledge base with the repair loop)
+  resistor_mpn_pattern: RC0805FR-07{code}L
+  resistor_1206_mpn_pattern: RC1206FR-07{code}L
+  # footprint assignment for layout-ready generation (evolvable)
+  footprint_map:
+    "Device:R": Resistor_SMD:R_0805_2012Metric
+    "Device:LED": LED_SMD:LED_0805_2012Metric
+    "Regulator_Linear:AP1117-ADJ": "Package_TO_SOT_SMD:SOT-223-3_TabPin2"
+    "Connector_Generic:Conn_01x02": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+  # board outline defaults for the layout agent (mm)
+  board_outline: {width: 50, height: 35}
+  # Bounded autonomy budgets. AHE may tune counts, never grant new tools.
+  tool_policies:
+    schematic_designer: {max_steps: 8, max_actions_per_step: 12}
+    pcb_designer: {max_steps: 8, max_actions_per_step: 12}
+  led_vf_by_color: {red: 2.0, green: 2.2, blue: 3.1, yellow: 2.1, white: 3.2}
+  led_mpn_map: {red: LTST-C170KRKT, green: LTST-C170GKT, blue: LTST-C170TBKT}
+
+prompts:
+  # used when an LLM is available; auto mode has deterministic recovery
+  synthesizer: >-
+    You are the review synthesizer. Merge analyzer findings, remove duplicates,
+    and rank by user impact. Never invent findings without analyzer evidence.
+  repair_planner: >-
+    You are the repair planner. Only propose ops for findings with a mapping
+    entry. Unmapped findings must be escalated, never improvised.
+  circuit_architect: >-
+    Preserve the solver-authoritative component graph. Prefer a compact board
+    outline and record the electrical rationale in the BoardPlan.
+  schematic_designer: >-
+    Make the smallest observable progress per step. Never repeat a ToolCall
+    that already succeeded in the file-derived observation.
+  pcb_designer: >-
+    Place power-flow components left to right, then request exactly one
+    constrained autoroute after every physical component is placed.
+  repair_agent: >-
+    Assign each verified finding to exactly one owner. Unsupported topology
+    changes must go to human review rather than being improvised.

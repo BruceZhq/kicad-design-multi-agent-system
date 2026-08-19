@@ -1,0 +1,60 @@
+name: candidate-expanded-vref
+scorecard_weights:
+  error: 30.0
+  warning: 3.0
+  info: 0.0
+  erc_fail: 15.0
+repair_mappings:
+- match_rule_id: RN-VOUT-001
+  match_detector: null
+  repair_type: feedback_divider
+  params:
+    keep: r_bottom
+    e_series: E24
+  enabled: true
+- match_rule_id: LR-001
+  match_detector: null
+  repair_type: led_resistor
+  params:
+    e_series: E24
+  enabled: true
+- match_rule_id: SS-001
+  match_detector: null
+  repair_type: fill_mpn
+  params: {}
+  enabled: true
+- match_rule_id: DS-001
+  match_detector: null
+  repair_type: fill_mpn
+  params: {}
+  enabled: true
+suppressions:
+- rule_id: RS-001
+  detector: null
+  ref: null
+  reason: +12V is an external supply input. A PWR_FLAG is present for KiCad's own
+    ERC; kicad-happy deliberately ignores PWR_FLAG connectivity, so RS-001 is expected
+    on externally powered rails.
+- rule_id: DS-002
+  detector: null
+  ref: null
+  reason: datasheet sync is not part of the offline benchmark environment
+prompts:
+  synthesizer: You are the review synthesizer. Merge analyzer findings, remove duplicates,
+    and rank by user impact. Never invent findings without analyzer evidence.
+  repair_planner: You are the repair planner. Only propose ops for findings with a
+    mapping entry. Unmapped findings must be escalated, never improvised.
+solver_params:
+  vref_table:
+    AP1117: 1.25
+    AMS1117: 1.25
+    LM317: 1.25
+    TLV431: 1.24
+    LM1117: 1.25
+  vout_tolerance_pct: 2.0
+  mpn_map:
+    AP1117-ADJ: AP1117E-ADJ
+    3k: RC0805FR-073KL
+    1k: RC0805FR-071KL
+    '330': RC0805FR-07330RL
+    LED_RED: LTST-C170KRKT
