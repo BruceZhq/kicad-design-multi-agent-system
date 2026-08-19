@@ -45,6 +45,10 @@ spec:
         - namespaceSelector:
             matchLabels: { kubernetes.io/metadata.name: kube-system }
       ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    - to:
+        - namespaceSelector:
+            matchLabels: { ratsnest.io/knowledge-access: "true" }
+      ports: [{ protocol: TCP, port: 8090 }]
     - to: [{ ipBlock: { cidr: 0.0.0.0/0 } }]
       ports: [{ protocol: TCP, port: 443 }]
 ---

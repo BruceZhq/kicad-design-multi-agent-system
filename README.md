@@ -274,6 +274,7 @@ docker compose --profile evolution up -d --build evolution_worker evolution_eval
 - [意图识别、AHE 与 EHE](docs/RATSNESTPRO_INTENT_AHE_EHE_ARCHITECTURE.md)
 - [LangGraph + Temporal 架构](docs/RATSNESTPRO_LANGGRAPH_TEMPORAL_ARCHITECTURE.md)
 - [生产 Runtime 与恢复](docs/RATSNESTPRO_PRODUCTION_RUNTIME.md)
+- [外部 Agentic RAG 接入契约](docs/AGENTIC_RAG_GATEWAY.md)
 - [分布式 Runtime](docs/DISTRIBUTED_RUNTIME.md)
 - [Harness Canary、Flyway 与回滚手册](docs/HARNESS_CANARY_RUNBOOK.md)
 - [完整技术报告](docs/RATSNESTPRO_COMPLETE_PROJECT_TECHNICAL_REPORT_ZH.md)

@@ -52,6 +52,7 @@ from ratsnestpro.orchestration.review_project import ReviewProjectError
 from ratsnestpro.parts import PartSelector
 
 from agents.ratsnestpro.ehe_memory import EheMemory
+from agents.ratsnestpro.knowledge_gateway import search_external_knowledge
 from service.llm_output import (
     append_llm_output,
     llm_output_record,
@@ -978,18 +979,36 @@ def ratsnest_search_internal_knowledge(
     query: str,
     role: str = "general",
     limit: int = 3,
+    evidence_types: list[str] | None = None,
+    principal_scope: str = "",
+    tenant_scope: str = "",
+    project_scope: str = "",
 ) -> str:
-    """Search bundled design-pattern knowledge before external research."""
+    """Search the governed external gateway and bundled knowledge."""
 
     bounded_limit = max(1, min(limit, 8))
+    external = search_external_knowledge(
+        query=query,
+        role=role,
+        limit=bounded_limit,
+        evidence_types=evidence_types,
+        principal_scope=principal_scope,
+        tenant_scope=tenant_scope,
+        project_scope=project_scope,
+    )
+    local_role = {
+        "parts-specialist": "selection",
+        "reviewer": "reviewer",
+        "architect": "architect",
+    }.get(role, role)
     hits = build_default_kb().retrieve(
         query,
         top_k=bounded_limit,
-        role=role or None,
+        role=local_role or None,
     )
     relevant = [hit for hit in hits if hit.score > 0]
     experiences = EheMemory(_workspace_root() / "ehe").search_verified(query, limit=bounded_limit)
-    results = [
+    local_results = [
         {
             "id": hit.doc.id,
             "role": hit.doc.role,
@@ -999,7 +1018,7 @@ def ratsnest_search_internal_knowledge(
         }
         for hit in relevant
     ]
-    results.extend(
+    local_results.extend(
         {
             "id": f"verified:{item.get('experience_id', '')}",
             "role": "verified_experience",
@@ -1016,11 +1035,20 @@ def ratsnest_search_internal_knowledge(
         }
         for item in experiences
     )
+    external_results = external.get("results", [])
+    results = [*external_results, *local_results]
     return _json(
         {
             "status": "ok" if results else "no_results",
             "query": query,
             "role": role,
+            "evidence_sufficient": external.get("evidence_sufficient") is True,
+            "external_gateway": {
+                "status": external.get("status", "unavailable"),
+                "evidence_sufficient": external.get("evidence_sufficient") is True,
+                "result_count": len(external_results),
+                "error": external.get("error", ""),
+            },
             "results": results[:bounded_limit],
         }
     )

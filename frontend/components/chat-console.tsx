@@ -240,6 +240,13 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     setLive(null);
   }
 
+  function expireAuthentication() {
+    setAuthenticationRequired(true);
+    setWorkspaceReady(false);
+    setModelLoadState("waiting");
+    setStatus("登录已失效，请重新登录");
+  }
+
   function applyWorkspace(value: unknown): boolean {
     const selected = workspaceContext(value);
     if (!selected) return false;
@@ -645,6 +652,10 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
             }),
             signal: controller.signal,
           });
+          if (response.status === 401) {
+            expireAuthentication();
+            throw new NonRetryableRequestError("登录已失效，请重新登录");
+          }
           if (!response.ok || !response.body) {
             const detail: unknown = await response.json().catch(() => null);
             const reason = errorText(detail, `请求失败（HTTP ${response.status}）`);
@@ -762,6 +773,10 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
           signal: controller.signal,
         },
       );
+      if (response.status === 401) {
+        expireAuthentication();
+        throw new NonRetryableRequestError("登录已失效，请重新登录");
+      }
       if (!response.ok) {
         const detail: unknown = await response.json().catch(() => null);
         throw new NonRetryableRequestError(errorText(detail, `提交失败（HTTP ${response.status}）`));
@@ -788,6 +803,10 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
               signal: controller.signal,
             },
           );
+          if (events.status === 401) {
+            expireAuthentication();
+            throw new NonRetryableRequestError("登录已失效，请重新登录");
+          }
           if (!events.ok || !events.body) {
             const detail: unknown = await events.json().catch(() => null);
             const reason = errorText(detail, `事件订阅失败（HTTP ${events.status}）`);
@@ -931,6 +950,10 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
         `/api/conversations/${encodeURIComponent(conversation.threadId)}?${query}`,
         { method: "DELETE" },
       );
+      if (response.status === 401) {
+        expireAuthentication();
+        throw new Error("登录已失效，请重新登录");
+      }
       if (!response.ok) {
         const detail: unknown = await response.json().catch(() => null);
         throw new Error(errorText(detail, "无法删除历史会话"));

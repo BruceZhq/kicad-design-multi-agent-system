@@ -23,6 +23,10 @@ data:
   RATSNESTPRO_TEMPORAL_TASK_QUEUE: ratsnest-hardware-cell-01
   RATSNESTPRO_TEMPORAL_WORKER_CONCURRENCY: "1"
   RATSNESTPRO_WORKSPACE_ROOT: /data/ratsnestpro
+  # Set this to the in-cluster Agentic RAG Service URL to enable it. Keep the
+  # bearer token only in ratsnest-runtime-secrets.
+  RATSNEST_KNOWLEDGE_GATEWAY_URL: ""
+  RATSNEST_KNOWLEDGE_GATEWAY_TIMEOUT_SECONDS: "8"
   RATSNEST_ARTIFACT_BACKEND: s3
   RATSNEST_ARTIFACT_BUCKET: ratsnest-artifacts-cell-01
   RATSNEST_ARTIFACT_ENDPOINT: https://s3.example.com
