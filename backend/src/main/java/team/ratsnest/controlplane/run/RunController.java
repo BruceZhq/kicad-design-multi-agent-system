@@ -162,6 +162,20 @@ public class RunController {
         return new HistoryResponse(messages);
     }
 
+    @GetMapping("/projects/{projectId}/threads")
+    ConversationListResponse conversations(
+            @RequestHeader(ORGANIZATION_HEADER) UUID tenantId,
+            @PathVariable UUID projectId,
+            @AuthenticationPrincipal Jwt jwt) {
+        return new ConversationListResponse(runs.conversations(
+                        tenantId,
+                        projectId,
+                        AuthenticatedActor.from(jwt))
+                .stream()
+                .map(ConversationResponse::from)
+                .toList());
+    }
+
     @GetMapping("/projects/{projectId}/runtime-info")
     RuntimeInfoResponse info(
             @RequestHeader(ORGANIZATION_HEADER) UUID tenantId,
@@ -321,6 +335,40 @@ public class RunController {
     }
 
     record HistoryResponse(List<MessageResponse> messages) {
+    }
+
+    record ConversationResponse(
+            String threadId,
+            String title,
+            UUID latestRunId,
+            int latestRevisionNumber,
+            String state,
+            String deliveryStatus,
+            long lastEventId,
+            Map<String, Object> pendingInteraction,
+            Instant createdAt,
+            Instant updatedAt) {
+
+        static ConversationResponse from(ConversationSummary conversation) {
+            return new ConversationResponse(
+                    conversation.threadId(),
+                    conversation.title(),
+                    conversation.latestRunId(),
+                    conversation.latestRevisionNumber(),
+                    conversation.state().name(),
+                    conversation.deliveryStatus() == null
+                            ? null
+                            : conversation.deliveryStatus().apiValue(),
+                    conversation.lastEventId(),
+                    conversation.pendingInteraction().isEmpty()
+                            ? null
+                            : conversation.pendingInteraction(),
+                    conversation.createdAt(),
+                    conversation.updatedAt());
+        }
+    }
+
+    record ConversationListResponse(List<ConversationResponse> conversations) {
     }
 
     record RuntimeInfoResponse(

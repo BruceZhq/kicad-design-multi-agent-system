@@ -197,6 +197,18 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .channel-list button:hover { background: #f4f4f5; transform: translateX(2px); }
 .channel-list button.active { background: linear-gradient(90deg,#f1f1f2,#f4f4f5); color: var(--brand); font-weight: 720; box-shadow: inset 3px 0 0 var(--brand); }
 .channel-list button.active span { background: #fff; color: var(--brand); box-shadow: 0 5px 12px rgba(0,0,0,0.12); }
+.conversation-history { display: grid; min-height: 0; gap: 8px; margin-top: 24px; }
+.conversation-history > div:first-child { display: flex; align-items: center; justify-content: space-between; margin: 0 6px; }
+.conversation-history small { color: #9a9ca8; font-size: 11px; }
+.conversation-history > div:first-child span { display: grid; min-width: 20px; height: 20px; padding: 0 5px; place-items: center; border-radius: 7px; background: #ededf0; color: #777986; font-size: 9px; font-weight: 750; }
+.conversation-history > p { margin: 2px 6px; color: #a1a3ad; font-size: 10px; line-height: 1.55; }
+.conversation-history-list { display: grid; max-height: 220px; gap: 4px; overflow-y: auto; padding-right: 2px; scrollbar-color: #d7d6e1 transparent; }
+.conversation-history-list button { display: grid; min-width: 0; gap: 5px; padding: 10px 11px; border: 0; border-radius: 10px; background: transparent; color: #71717a; text-align: left; }
+.conversation-history-list button:hover { background: #f1f1f2; }
+.conversation-history-list button.active { background: #ededf0; box-shadow: inset 3px 0 0 #18181b; }
+.conversation-history-list button:disabled { cursor: default; opacity: 0.65; }
+.conversation-history-list strong { overflow: hidden; color: #565762; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-history-list span { color: #a1a3ad; font-size: 9px; }
 .team-roster { display: grid; gap: 8px; margin-top: 27px; }
 .roster-row { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 10px; min-height: 47px; padding: 3px 5px; border-radius: 11px; transition: background 160ms ease, transform 160ms ease; }
 .roster-row:hover { background: rgba(255,255,255,0.72); transform: translateX(2px); }

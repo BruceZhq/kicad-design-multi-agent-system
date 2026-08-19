@@ -1,9 +1,9 @@
 """Ground LLM-proposed symbol/footprint names to real KiCad library IDs.
 
 An LLM proposes plausible-looking library IDs (``Device:Resistor``,
-``Resistor_SMD:R_0603``, ``MCU_ATmega:ATmega328P``) that frequently do not
+``Resistor_SMD:R_0603`` or an abbreviated MCU nickname) that frequently do not
 match the *exact* names KiCad ships (``Device:R``, ``R_0603_1608Metric``,
-``MCU_Microchip_ATmega:ATmega328P-A``). This module maps a proposal to a real,
+an installed canonical library identifier). This module maps a proposal to a real,
 existing library ID so the design can proceed — **without ever fabricating**:
 if no real match is found the original string is returned unchanged, so the
 bottom-line selection check still fails closed on a genuinely bad part.

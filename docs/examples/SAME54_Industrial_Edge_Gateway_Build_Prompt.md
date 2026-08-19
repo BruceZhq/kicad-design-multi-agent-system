@@ -47,7 +47,7 @@ required
 
 必须执行完整的新建 PCB 流程，不得把本任务识别为“审查已有工程”。
 
-禁止调用、复制、重命名或回退到 ATmega328P、STM32F405、RP2040 等已有案例或离线模板。
+禁止调用、复制、重命名或回退到任何已有案例或离线器件模板。
 
 本题只固定主 MCU。其他辅助器件必须由 Architect、Parts Specialist 和 Hardware Engineer 根据官方资料、真实 KiCad 库、接口要求、供电能力和可制造性自主选择。
 

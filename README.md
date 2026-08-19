@@ -280,7 +280,6 @@ docker compose --profile evolution up -d --build evolution_worker evolution_eval
 
 ## 当前已知边界
 
-1. ATmega328 兼容实现仍存在于旧独立生成/修复链中，正在迁移为 Profile 驱动实现；它不能成为其他 MCU 的回退答案。
 2. 本地 Compose 已具备组件连通配置，但真实 Kubernetes Metrics API、跨区域 failover/failback、TLS 重启恢复和 RPO/RTO 仍需要在目标集群演练。
 3. 交付工程是否满足全部硬件设计规则仍需 Reviewer 和人工硬件工程师确认；系统不会把 `delivered_with_issues` 冒充 `release_ready`。
 

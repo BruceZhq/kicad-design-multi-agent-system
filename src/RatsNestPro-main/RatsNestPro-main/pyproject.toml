@@ -1,7 +1,7 @@
 [project]
 name = "ratsnestpro"
 version = "0.1.0"
-description = "An independent, EricAI-driven PCB design & review agent (ATmega328 family, in-family parameterization, two-tier knowledge + retrieval)."
+description = "A grounded, profile-driven PCB design and review execution engine."
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
 license = { text = "MIT" }
@@ -19,9 +19,6 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.10",
 ]
-
-[project.scripts]
-ratsnestpro = "ratsnestpro.cli:main"
 
 [build-system]
 requires = ["hatchling"]

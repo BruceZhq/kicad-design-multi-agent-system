@@ -133,6 +133,70 @@ class RunRepository {
                 .optional();
     }
 
+    List<ConversationSummary> listConversations(UUID tenantId, UUID projectId, int limit) {
+        return jdbcClient.sql("""
+                        with ranked as (
+                            select r.*,
+                                   row_number() over (
+                                       partition by r.thread_id
+                                       order by r.created_at desc, r.revision_number desc, r.run_id desc
+                                   ) as latest_rank,
+                                   row_number() over (
+                                       partition by r.thread_id
+                                       order by r.created_at asc, r.revision_number asc, r.run_id asc
+                                   ) as first_rank
+                            from control_plane.runs r
+                            where r.tenant_id = :tenantId and r.project_id = :projectId
+                        ),
+                        first_messages as (
+                            select thread_id, message, created_at
+                            from ranked
+                            where first_rank = 1
+                        )
+                        select latest.thread_id,
+                               first_messages.message as first_message,
+                               latest.run_id as latest_run_id,
+                               latest.revision_number,
+                               latest.state,
+                               latest.delivery_status,
+                               coalesce(latest.newest_event_id, 0) as last_event_id,
+                               pending.request_payload as pending_interaction,
+                               first_messages.created_at,
+                               coalesce(latest.finished_at, latest.started_at, latest.created_at) as updated_at
+                        from ranked latest
+                        join first_messages using (thread_id)
+                        left join lateral (
+                            select interaction.request_payload
+                            from control_plane.run_interactions interaction
+                            where interaction.tenant_id = latest.tenant_id
+                              and interaction.run_id = latest.run_id
+                              and interaction.status = 'PENDING'
+                            order by interaction.created_at desc
+                            limit 1
+                        ) pending on true
+                        where latest.latest_rank = 1
+                        order by updated_at desc, latest.run_id desc
+                        limit :limit
+                        """)
+                .param("tenantId", tenantId)
+                .param("projectId", projectId)
+                .param("limit", limit)
+                .query((resultSet, rowNumber) -> ConversationSummary.fromStoredMessage(
+                        resultSet.getString("thread_id"),
+                        resultSet.getString("first_message"),
+                        resultSet.getObject("latest_run_id", UUID.class),
+                        resultSet.getInt("revision_number"),
+                        RunState.valueOf(resultSet.getString("state")),
+                        DeliveryStatus.fromApiValue(resultSet.getString("delivery_status")),
+                        resultSet.getLong("last_event_id"),
+                        resultSet.getString("pending_interaction") == null
+                                ? Map.of()
+                                : jsonObject(resultSet.getString("pending_interaction")),
+                        resultSet.getObject("created_at", OffsetDateTime.class).toInstant(),
+                        resultSet.getObject("updated_at", OffsetDateTime.class).toInstant()))
+                .list();
+    }
+
     void setDeliveryStatus(UUID tenantId, UUID runId, DeliveryStatus status) {
         int updated = jdbcClient.sql("""
                         update control_plane.runs

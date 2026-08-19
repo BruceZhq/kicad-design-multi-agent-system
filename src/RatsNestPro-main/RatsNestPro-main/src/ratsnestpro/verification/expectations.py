@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class Expectations(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    family: str = "atmega328-dev-board"
+    family: str = "generic-design"
     supply_net: str = "3V3"
     supply_voltage_v: float = 3.3
     gnd_net: str = "GND"

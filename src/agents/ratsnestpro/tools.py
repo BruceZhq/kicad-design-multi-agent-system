@@ -18,7 +18,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import ValidationError
-from ratsnestpro.agents import Architect, LlmError, LlmMode, Reviewer, parse_mode
+from ratsnestpro.agents import LlmError, LlmMode, Reviewer, parse_mode
 from ratsnestpro.eda import footprints, grounding, symbols
 from ratsnestpro.eda.adapter import kicad_cli_available, run_erc
 from ratsnestpro.eda.local_library import (
@@ -26,10 +26,8 @@ from ratsnestpro.eda.local_library import (
     generate_local_library,
     generate_local_symbol_library,
 )
-from ratsnestpro.families import Atmega328Params, expectations_for
 from ratsnestpro.knowledge import build_default_kb
-from ratsnestpro.orchestration import generate_design, review_project, run_repair
-from ratsnestpro.orchestration.generate import build_design_plan
+from ratsnestpro.orchestration import review_project
 from ratsnestpro.orchestration.pipeline import (
     Pipeline,
     PipelineContext,
@@ -649,46 +647,10 @@ class _ToolkitLlmClient:
         return response_text(response)
 
 
-_MCU_MODEL_TOKEN = re.compile(
-    r"(?<![a-z0-9])("
-    r"atmega\d+[a-z0-9-]*|attiny\d+[a-z0-9-]*|"
-    r"stm32[a-z0-9-]+|rp\d{4}[a-z0-9-]*|esp32[a-z0-9-]*|"
-    r"nrf\d+[a-z0-9-]*|same?\d+[a-z0-9-]*|"
-    r"pic\d+[a-z0-9-]*|ch32[a-z0-9-]+"
-    r")(?![a-z0-9])",
-    re.IGNORECASE,
-)
-_NEGATED_MODEL_PREFIX = re.compile(
-    r"(?:\bnot\b|\bnever\b|\bwithout\b|\bdo\s+not\b|"
-    r"\bdon't\b|\bforbid(?:den)?\b|\binstead\s+of\b|"
-    r"不要|不得|禁止|不能|不用|不允许|并非|不是|非)"
-    r"[^.;。；\n]{0,48}$",
-    re.IGNORECASE,
-)
-
-
-def _positive_mcu_models(requirement: str) -> set[str]:
-    """Extract asserted MCU models without loading the full KiCad library."""
-
-    models: set[str] = set()
-    for match in _MCU_MODEL_TOKEN.finditer(requirement):
-        prefix = requirement[max(0, match.start() - 64) : match.start()]
-        if _NEGATED_MODEL_PREFIX.search(prefix):
-            continue
-        models.add(re.sub(r"[^a-z0-9]", "", match.group(1).lower()))
-    return models
-
-
-def _is_atmega328_only(requirement: str) -> bool:
-    models = _positive_mcu_models(requirement)
-    return bool(models) and all(model.startswith("atmega328") for model in models)
-
-
 def _pipeline_mode(requirement: str, requested: LlmMode) -> LlmMode:
-    """Use the deterministic template only for the family it actually models."""
-    if _is_atmega328_only(requirement):
-        return requested
-    return LlmMode.REQUIRED
+    """Honor the requested generic pipeline mode without a device-family shortcut."""
+    del requirement
+    return requested
 
 
 def _run_dir(run_name: str) -> Path:
@@ -736,60 +698,6 @@ def _workspace_path(value: str) -> Path:
     except ValueError as exc:
         raise ValueError(f"path must stay inside the RatsNestPro workspace: {root}") from exc
     return candidate
-
-
-def _overrides(
-    crystal_mhz: int | None,
-    ldo_output_v: float | None,
-    decoupling_count: int | None,
-    power_led: bool | None,
-    breakout_rows: int | None,
-    breakout_pins_per_row: int | None,
-    mounting_holes: int | None,
-) -> dict[str, object]:
-    values = {
-        "crystal_mhz": crystal_mhz,
-        "ldo_output_v": ldo_output_v,
-        "decoupling_count": decoupling_count,
-        "power_led": power_led,
-        "breakout_rows": breakout_rows,
-        "breakout_pins_per_row": breakout_pins_per_row,
-        "mounting_holes": mounting_holes,
-    }
-    return {key: value for key, value in values.items() if value is not None}
-
-
-def _resolve_params(
-    requirement: str,
-    llm_mode: LlmModeName,
-    overrides: dict[str, object],
-) -> tuple[Atmega328Params | None, dict[str, Any]]:
-    result = Architect().plan(requirement, mode=parse_mode(llm_mode))
-    if not result.decision.qualified:
-        return None, {
-            "status": "needs_clarification",
-            "reason": result.decision.rationale,
-            "questions": result.decision.clarifying_questions,
-        }
-    if result.params is None and not overrides:
-        return None, {
-            "status": "needs_clarification",
-            "reason": result.decision.rationale,
-            "questions": result.decision.clarifying_questions,
-        }
-    values = result.params.model_dump() if result.params else {}
-    try:
-        params = Atmega328Params(**{**values, **overrides})  # type: ignore[arg-type]
-    except ValidationError as exc:
-        return None, {
-            "status": "needs_clarification",
-            "reason": "The selected parameters violate the board-family contract.",
-            "questions": [error["msg"] for error in exc.errors()],
-        }
-    return params, {
-        "architect_source": result.source,
-        "architect_rationale": result.decision.rationale,
-    }
 
 
 def _files(path: Path) -> list[str]:
@@ -1116,178 +1024,6 @@ def ratsnest_search_internal_knowledge(
             "results": results[:bounded_limit],
         }
     )
-
-
-def ratsnest_create_design_plan(
-    requirement: str,
-    run_name: str = "design-plan",
-    project_name: str = "atmega328_dev_board",
-    llm_mode: LlmModeName = "offline",
-    crystal_mhz: int | None = None,
-    ldo_output_v: float | None = None,
-    decoupling_count: int | None = None,
-    power_led: bool | None = None,
-    breakout_rows: int | None = None,
-    breakout_pins_per_row: int | None = None,
-    mounting_holes: int | None = None,
-) -> str:
-    """Create the immutable ATmega328 DesignPlan without generating KiCad files.
-
-    Use this for design planning or parameter review. Explicit parameters
-    override values inferred by the Architect. llm_mode controls only the
-    embedded EricAI path; offline is deterministic and needs no EricAI install.
-    """
-    try:
-        if not _is_atmega328_only(requirement):
-            return _json(
-                {
-                    "status": "use_generic_pipeline",
-                    "reason": (
-                        "This tool is the ATmega328 offline template only; the requested "
-                        "family must use the adaptive 17-step pipeline."
-                    ),
-                    "next_tool": "ratsnest_run_pcb_pipeline",
-                    "required_llm_mode": "required",
-                }
-            )
-        params, context = _resolve_params(
-            requirement,
-            llm_mode,
-            _overrides(
-                crystal_mhz,
-                ldo_output_v,
-                decoupling_count,
-                power_led,
-                breakout_rows,
-                breakout_pins_per_row,
-                mounting_holes,
-            ),
-        )
-        if params is None:
-            return _json(context)
-        out = _run_dir(run_name)
-        out.mkdir(parents=True, exist_ok=True)
-        plan = build_design_plan(requirement, params, _name(project_name, "atmega328_dev_board"))
-        plan_path = out / "plan.json"
-        plan_path.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
-        return _json(
-            {
-                "status": "ok",
-                **context,
-                "workspace": str(_workspace_root()),
-                "run_directory": str(out),
-                "plan_path": str(plan_path),
-                "family": plan.circuit.family,
-                "components": len(plan.circuit.components),
-                "nets": len(plan.circuit.nets),
-                "params": params.model_dump(),
-            }
-        )
-    except LlmError as exc:
-        return _json({"status": "error", "error": str(exc), "llm_mode": llm_mode})
-
-
-def ratsnest_generate_schematic(
-    requirement: str,
-    run_name: str = "schematic",
-    project_name: str = "atmega328_dev_board",
-    llm_mode: LlmModeName = "offline",
-    run_erc: bool = True,
-    repair: bool = True,
-    max_repair_iterations: int = 5,
-    crystal_mhz: int | None = None,
-    ldo_output_v: float | None = None,
-    decoupling_count: int | None = None,
-    power_led: bool | None = None,
-    breakout_rows: int | None = None,
-    breakout_pins_per_row: int | None = None,
-    mounting_holes: int | None = None,
-) -> str:
-    """Generate and verify an ATmega328 schematic, optionally repairing failures.
-
-    This preserves RatsNestPro pipeline A: Architect planning, typed generation,
-    deterministic gates, optional KiCad ERC, and the whitelisted Coder repair
-    loop. Generated artifacts stay inside the configured workspace.
-    """
-    try:
-        if not _is_atmega328_only(requirement):
-            return _json(
-                {
-                    "status": "use_generic_pipeline",
-                    "reason": (
-                        "This tool is the ATmega328 schematic template only; the requested "
-                        "family must use the adaptive 17-step pipeline."
-                    ),
-                    "next_tool": "ratsnest_run_pcb_pipeline",
-                    "required_llm_mode": "required",
-                }
-            )
-        params, context = _resolve_params(
-            requirement,
-            llm_mode,
-            _overrides(
-                crystal_mhz,
-                ldo_output_v,
-                decoupling_count,
-                power_led,
-                breakout_rows,
-                breakout_pins_per_row,
-                mounting_holes,
-            ),
-        )
-        if params is None:
-            return _json(context)
-        out = _run_dir(run_name)
-        project = _name(project_name, "atmega328_dev_board")
-        result = generate_design(
-            requirement,
-            params=params,
-            out_dir=out,
-            project_name=project,
-            run_erc=run_erc,
-        )
-        repair_summary: dict[str, Any] | None = None
-        if result.blocked and repair:
-            repaired = run_repair(
-                params,
-                expectations_for(params),
-                max_iter=max(1, min(max_repair_iterations, 10)),
-                mode=parse_mode(llm_mode),
-            )
-            repair_summary = {
-                "success": repaired.success,
-                "iterations": repaired.iterations,
-                "reason": repaired.reason,
-            }
-            if repaired.success:
-                result = generate_design(
-                    requirement,
-                    params=repaired.params,
-                    out_dir=out,
-                    project_name=project,
-                    run_erc=run_erc,
-                )
-        return _json(
-            {
-                "status": "blocked" if result.blocked else "ok",
-                **context,
-                "summary": result.summary,
-                "workspace": str(_workspace_root()),
-                "run_directory": str(out),
-                "artifacts": _files(out),
-                "gates": [
-                    {
-                        "name": gate.gate,
-                        "status": gate.status.value,
-                        "required": gate.required,
-                    }
-                    for gate in result.report.gates
-                ],
-                "repair": repair_summary,
-            }
-        )
-    except (LlmError, ValidationError, ValueError) as exc:
-        return _json({"status": "error", "error": str(exc)})
 
 
 def _ehe_result_payload(

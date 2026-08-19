@@ -305,6 +305,40 @@
       },
       "additionalProperties": false
     },
+    "conversationSummary": {
+      "type": "object",
+      "required": ["threadId", "title", "latestRunId", "latestRevisionNumber", "state", "deliveryStatus", "lastEventId", "pendingInteraction", "createdAt", "updatedAt"],
+      "properties": {
+        "threadId": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,200}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 81 },
+        "latestRunId": { "type": "string", "format": "uuid" },
+        "latestRevisionNumber": { "type": "integer", "minimum": 1 },
+        "state": { "enum": ["QUEUED", "RUNNING", "WAITING_FOR_INPUT", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"] },
+        "deliveryStatus": {
+          "anyOf": [
+            { "$ref": "#/$defs/deliveryStatus" },
+            { "type": "null" }
+          ]
+        },
+        "lastEventId": { "type": "integer", "minimum": 0 },
+        "pendingInteraction": { "type": ["object", "null"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "conversationListResponse": {
+      "type": "object",
+      "required": ["conversations"],
+      "properties": {
+        "conversations": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/conversationSummary" }
+        }
+      },
+      "additionalProperties": false
+    },
     "agentInfo": {
       "type": "object",
       "required": ["key", "description"],

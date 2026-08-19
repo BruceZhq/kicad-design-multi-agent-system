@@ -82,7 +82,7 @@ def symbol_pins(lib_id: str) -> Optional[List[Dict[str, Any]]]:
     """Return the pins (local coords) for a lib_id, or None if unresolved.
 
     Follows KiCAD ``(extends "base")`` inheritance: derived parts (e.g.
-    ATmega328P-A) carry no pins of their own and inherit them from a base
+    derived device variants) carry no pins of their own and inherit them from a base
     symbol in the same library.
     """
     if ":" not in lib_id:

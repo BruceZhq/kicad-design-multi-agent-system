@@ -92,6 +92,23 @@ export interface RunSummary {
   deliveryStatus: DeliveryStatus | null;
 }
 
+export interface ConversationSummary {
+  threadId: string;
+  title: string;
+  latestRunId: string;
+  latestRevisionNumber: number;
+  state: RunState;
+  deliveryStatus: DeliveryStatus | null;
+  lastEventId: number;
+  pendingInteraction: HumanInputRequest | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ConversationListResponse {
+  conversations: ConversationSummary[];
+}
+
 export interface RunArtifact {
   artifactId: string;
   runId: string;
@@ -152,6 +169,62 @@ function runState(value: unknown): value is RunState {
 
 function deliveryStatus(value: unknown): value is DeliveryStatus {
   return value === "execution_blocked" || value === "delivered_with_issues" || value === "release_ready";
+}
+
+export function parseConversationList(value: unknown): ConversationListResponse | null {
+  const body = record(value);
+  if (!Array.isArray(body.conversations)) return null;
+  const conversations: ConversationSummary[] = [];
+  for (const value of body.conversations) {
+    const item = record(value);
+    const pendingInteraction = item.pendingInteraction === null
+      ? null
+      : parseHumanInputRequest({
+          eventId: 1,
+          runId: typeof item.latestRunId === "string" ? item.latestRunId : "",
+          type: "ag_ui",
+          createdAt: typeof item.updatedAt === "string" ? item.updatedAt : "",
+          data: {
+            agUi: {
+              type: "CUSTOM",
+              name: "ratsnest.human-input-required.v1",
+              value: item.pendingInteraction,
+            },
+          },
+        });
+    if (
+      typeof item.threadId !== "string" ||
+      !/^[A-Za-z0-9._:-]{1,200}$/.test(item.threadId) ||
+      typeof item.title !== "string" ||
+      item.title.length < 1 ||
+      item.title.length > 81 ||
+      !uuid(item.latestRunId) ||
+      !Number.isSafeInteger(item.latestRevisionNumber) ||
+      Number(item.latestRevisionNumber) < 1 ||
+      !runState(item.state) ||
+      (item.deliveryStatus !== null && !deliveryStatus(item.deliveryStatus)) ||
+      !Number.isSafeInteger(item.lastEventId) ||
+      Number(item.lastEventId) < 0 ||
+      (item.pendingInteraction !== null && pendingInteraction === null) ||
+      typeof item.createdAt !== "string" ||
+      !Number.isFinite(Date.parse(item.createdAt)) ||
+      typeof item.updatedAt !== "string" ||
+      !Number.isFinite(Date.parse(item.updatedAt))
+    ) return null;
+    conversations.push({
+      threadId: item.threadId,
+      title: item.title,
+      latestRunId: item.latestRunId,
+      latestRevisionNumber: Number(item.latestRevisionNumber),
+      state: item.state,
+      deliveryStatus: item.deliveryStatus,
+      lastEventId: Number(item.lastEventId),
+      pendingInteraction,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+    });
+  }
+  return { conversations };
 }
 
 export function parseRunSummary(value: unknown): RunSummary | null {

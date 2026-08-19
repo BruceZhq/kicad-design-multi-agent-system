@@ -9,6 +9,7 @@ import { readSseStream } from "@/lib/sse";
 import {
   CapabilityProfileMetadata,
   ChatMessage,
+  ConversationSummary,
   DisplayMessage,
   HumanInputRequest,
   RunArtifact,
@@ -21,6 +22,7 @@ import {
   makeMessage,
   parseArtifactList,
   parseChatMessage,
+  parseConversationList,
   parseHumanInputRequest,
   parseRunEvent,
   parseRunSummary,
@@ -198,6 +200,9 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const [modelLoadState, setModelLoadState] = useState<ModelLoadState>("waiting");
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [conversationsLoading, setConversationsLoading] = useState(false);
+  const [conversationRefresh, setConversationRefresh] = useState(0);
   const [liveMessage, setLiveMessage] = useState<DisplayMessage | null>(null);
   const liveRef = useRef<DisplayMessage | null>(null);
   const [draft, setDraft] = useState("");
@@ -390,6 +395,47 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
   }, [workspaceReady, workspace, threadId]);
 
   useEffect(() => {
+    if (!workspaceReady || !workspace) return;
+    const controller = new AbortController();
+    setConversationsLoading(true);
+    void (async () => {
+      try {
+        const query = new URLSearchParams({
+          organization_id: workspace.organization.tenantId,
+          project_id: workspace.project.projectId,
+        });
+        const response = await fetch(`/api/conversations?${query}`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error("conversation list unavailable");
+        const parsed = parseConversationList(await response.json());
+        if (!parsed) throw new Error("invalid conversation list");
+        setConversations(parsed.conversations);
+        const selected = parsed.conversations.find((item) => item.threadId === threadId);
+        if (selected && latestRun?.runId !== selected.latestRunId) {
+          void loadDelivery(selected.latestRunId);
+        }
+        if (selected?.pendingInteraction) {
+          setInteraction({
+            request: selected.pendingInteraction,
+            runId: selected.latestRunId,
+            lastEventId: selected.lastEventId,
+            idempotencyKey: newId(),
+            status: "waiting",
+          });
+          setRunState("waiting_for_input");
+        }
+      } catch {
+        if (!controller.signal.aborted) setConversations([]);
+      } finally {
+        if (!controller.signal.aborted) setConversationsLoading(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [workspaceReady, workspace, threadId, conversationRefresh]);
+
+  useEffect(() => {
     messageEnd.current?.scrollIntoView({ behavior: busy ? "smooth" : "auto" });
   }, [busy, liveMessage, messages]);
 
@@ -502,6 +548,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
         setStatus(label);
       }
       void loadDelivery(event.runId);
+      setConversationRefresh((value) => value + 1);
     }
     return null;
   }
@@ -839,6 +886,9 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     if (busy) return;
     const nextThread = newId();
     localStorage.setItem(THREAD_KEY, nextThread);
+    const url = new URL(window.location.href);
+    url.searchParams.set("thread_id", nextThread);
+    window.history.replaceState(null, "", url);
     setThreadId(nextThread);
     setMessages([]);
     setLive(null);
@@ -848,6 +898,36 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     setArtifacts([]);
     setArtifactError("");
     setInteraction(null);
+  }
+
+  function selectConversation(conversation: ConversationSummary) {
+    if (busy || conversation.threadId === threadId) return;
+    localStorage.setItem(THREAD_KEY, conversation.threadId);
+    const url = new URL(window.location.href);
+    url.searchParams.set("thread_id", conversation.threadId);
+    window.history.replaceState(null, "", url);
+    setMessages([]);
+    setLive(null);
+    setInteraction(null);
+    setLatestRun(null);
+    setArtifacts([]);
+    setArtifactError("");
+    setRunState(conversation.state === "WAITING_FOR_INPUT"
+      ? "waiting_for_input"
+      : conversation.state === "RUNNING" || conversation.state === "QUEUED"
+        ? "disconnected"
+        : conversation.state.toLowerCase() as TerminalRunEvent);
+    if (conversation.pendingInteraction) {
+      setInteraction({
+        request: conversation.pendingInteraction,
+        runId: conversation.latestRunId,
+        lastEventId: conversation.lastEventId,
+        idempotencyKey: newId(),
+        status: "waiting",
+      });
+    }
+    setStatus("正在加载历史会话…");
+    setThreadId(conversation.threadId);
   }
 
   function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -909,6 +989,36 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
             <button className={channel === "evidence" ? "active" : ""} onClick={() => setChannel("evidence")} type="button"><span>#</span> 资料与证据</button>
             <button className={channel === "review" ? "active" : ""} onClick={() => setChannel("review")} type="button"><span>#</span> 审查问题</button>
           </nav>
+
+          <section className="conversation-history" aria-label="历史工程会话">
+            <div>
+              <small>历史会话</small>
+              <span>{conversations.length}</span>
+            </div>
+            {conversationsLoading ? (
+              <p>正在加载…</p>
+            ) : conversations.length === 0 ? (
+              <p>完成首个任务后，会话会保存在这里。</p>
+            ) : (
+              <div className="conversation-history-list">
+                {conversations.map((conversation) => (
+                  <button
+                    key={conversation.threadId}
+                    type="button"
+                    className={conversation.threadId === threadId ? "active" : ""}
+                    onClick={() => selectConversation(conversation)}
+                    disabled={busy}
+                    title={conversation.title}
+                  >
+                    <strong>{conversation.title}</strong>
+                    <span>
+                      Revision {conversation.latestRevisionNumber} · {new Date(conversation.updatedAt).toLocaleDateString("zh-CN")}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </section>
 
           <section className="team-roster">
             <small>智能体团队</small>

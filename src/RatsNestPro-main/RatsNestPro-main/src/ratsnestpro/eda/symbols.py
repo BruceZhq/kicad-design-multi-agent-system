@@ -10,7 +10,7 @@ Two on-disk library layouts are supported transparently:
   within that same file.
 * **New directory format** (KiCad 10, symbol-lib ``version 20251024``) —
   ``<nick>.kicad_symdir/`` is a directory with **one ``<symbol>.kicad_sym``
-  file per symbol**. Here a derived part such as ``ATmega328P-A`` carries no
+  file per symbol**. A derived part may carry no
   pins of its own and inherits them from a base symbol
   (``ATmega48PV-10A``) that lives in a **sibling file** in the same directory.
   Cross-file ``extends`` resolution is handled here.

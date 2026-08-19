@@ -1,6 +1,6 @@
 """Assemble deterministic rules and kicad-cli ERC into gated results.
 
-The required gate list for the ATmega328 family mirrors the RatsNest
+The required gate list for a qualified design mirrors the RatsNest
 qualification profile (schematic slice): plan_contract, catalog,
 reference_connectivity, voltage, six_decoupling, crystal_load, ldo_caps,
 gpio_mapping, headers, kicad_erc. A required gate that is FAILED or ERROR

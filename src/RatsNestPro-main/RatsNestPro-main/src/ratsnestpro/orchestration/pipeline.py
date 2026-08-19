@@ -39,7 +39,6 @@ from typing import Any, ClassVar
 from pydantic import BaseModel
 
 from ratsnestpro import config
-from ratsnestpro.agents.heuristics import params_from_requirement
 from ratsnestpro.agents.llm import LlmError, LlmMode
 from ratsnestpro.domain.contracts import (
     ComponentIdentityConstraint,
@@ -50,7 +49,6 @@ from ratsnestpro.domain.contracts import (
 from ratsnestpro.eda import footprints, grounding, symbols
 from ratsnestpro.eda.adapter import kicad_cli_available, run_erc
 from ratsnestpro.eda.materialize import materialize_pinmapped
-from ratsnestpro.families import Atmega328Params, build_ir, build_plan
 from ratsnestpro.knowledge import KnowledgeBase, build_default_kb
 from ratsnestpro.orchestration.ahe import (
     CapabilityGap,
@@ -107,7 +105,6 @@ from ratsnestpro.orchestration.pipeline_contracts import (
     SelectionPatch,
     SelectionPlan,
     SheetPlacement,
-    TopologyBlock,
     TopologyPlan,
 )
 from ratsnestpro.orchestration.placement_constraints import (
@@ -1166,23 +1163,14 @@ class TopologyStep(PipelineStepBase):
         self, state: PipelineState, ctx: PipelineContext, knowledge: str
     ) -> tuple[BaseModel, bool]:
         def fallback() -> TopologyPlan:
-            params = params_from_requirement(state.requirement_text)
-            rail = str(params.get("ldo_output_v", 3.3))
-            rails = ["5V", f"{rail}V"]
-            blocks = [
-                TopologyBlock(name="power_input", kind="power_input",
-                              description="external supply input + protection"),
-                TopologyBlock(name="regulator", kind="regulator",
-                              description=f"LDO to {rail} V rail"),
-                TopologyBlock(name="mcu", kind="mcu", description="microcontroller"),
-                TopologyBlock(name="oscillator", kind="oscillator",
-                              description="crystal + load caps"),
-                TopologyBlock(name="reset", kind="reset", description="reset pull-up + button"),
-                TopologyBlock(name="headers", kind="header", description="breakout headers"),
-            ]
             return TopologyPlan(
-                blocks=blocks, rails=rails, ground_net="GND",
-                rationale="deterministic baseline topology",
+                blocks=[],
+                rails=[],
+                ground_net="GND",
+                rationale=(
+                    "No device-family topology template is available. "
+                    "Topology requires validated model output."
+                ),
             )
 
         system = (
@@ -3640,20 +3628,13 @@ class SelectionStep(PipelineStepBase):
         self, state: PipelineState, ctx: PipelineContext, knowledge: str
     ) -> tuple[BaseModel, bool]:
         def fallback() -> SelectionPlan:
-            extracted = params_from_requirement(state.requirement_text)
-            try:
-                params = Atmega328Params.model_validate(extracted)
-            except Exception:
-                params = Atmega328Params()
-            ir = build_ir(params)
-            parts = [
-                SelectedPart(
-                    ref=c.ref, symbol=c.symbol, value=c.value,
-                    footprint=c.footprint, role=c.role,
-                )
-                for c in ir.components
-            ]
-            return SelectionPlan(parts=parts, rationale="deterministic family selection")
+            return SelectionPlan(
+                parts=[],
+                rationale=(
+                    "No device-family template is available. Component selection "
+                    "requires grounded model output and installed KiCad libraries."
+                ),
+            )
 
         requested_mcus = sorted(_mcu_models(state.requirement_text))
         needs_llm_library_hints = (
@@ -6384,27 +6365,14 @@ class SchConnectionsStep(PipelineStepBase):
             self._persist_connection_progress(state, ctx)
 
         def fallback() -> NetlistIntent:
-            extracted = params_from_requirement(state.requirement_text)
-            try:
-                params = Atmega328Params.model_validate(extracted)
-            except Exception:
-                params = Atmega328Params()
-            ir = build_ir(params)
-            nets: list[NetIntent] = []
-            for n in ir.nets:
-                kind = _classify_net(n.name)
-                nets.append(
-                    NetIntent(
-                        name=n.name,
-                        kind=kind,
-                        pins=[LogicalPin(ref=p.component_ref, pin=p.pin) for p in n.pins],
-                        purpose=str(n.properties.get("purpose", "")),
-                    )
-                )
-            supply = [n.name for n in nets if n.kind == "power"]
             return NetlistIntent(
-                nets=nets, supply_nets=supply, ground_net="GND",
-                rationale="deterministic family connectivity",
+                nets=[],
+                supply_nets=[],
+                ground_net="GND",
+                rationale=(
+                    "No device-family connectivity template is available. "
+                    "Connectivity requires validated model output."
+                ),
             )
 
         sel = state.artifact(PipelineStep.SELECTION)
@@ -9850,23 +9818,14 @@ class LayoutPartitionStep(PipelineStepBase):
         self, state: PipelineState, ctx: PipelineContext, knowledge: str
     ) -> tuple[BaseModel, bool]:
         def fallback() -> BoardPartition:
-            extracted = params_from_requirement(state.requirement_text)
-            try:
-                params = Atmega328Params.model_validate(extracted)
-            except Exception:
-                params = Atmega328Params()
-            outline = build_plan(params).outline
-            w, h = outline.width_mm, outline.height_mm
-            zones = [
-                BoardZone(name="power", kind="power", x1=0.5, y1=0.5, x2=w * 0.33, y2=h - 0.5),
-                BoardZone(name="mcu_digital", kind="digital",
-                          x1=w * 0.33, y1=0.5, x2=w * 0.75, y2=h - 0.5),
-                BoardZone(name="connectors", kind="connector",
-                          x1=w * 0.75, y1=0.5, x2=w - 0.5, y2=h - 0.5),
-            ]
             return BoardPartition(
-                board_width=w, board_height=h, zones=zones,
-                rationale="deterministic power|digital|connector partition",
+                board_width=1,
+                board_height=1,
+                zones=[],
+                rationale=(
+                    "No device-family layout template is available. "
+                    "Board dimensions and zones require validated model output."
+                ),
             )
 
         system = (

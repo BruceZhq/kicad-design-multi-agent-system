@@ -365,6 +365,17 @@ public class RunService {
         }
     }
 
+    public List<ConversationSummary> conversations(
+            UUID tenantId,
+            UUID projectId,
+            AuthenticatedActor actor) {
+        List<ConversationSummary> result = transactions.execute(status -> {
+            requireProject(tenantId, projectId, actor, false);
+            return runs.listConversations(tenantId, projectId, 100);
+        });
+        return result == null ? List.of() : result;
+    }
+
     public RuntimeInfo info(
             UUID tenantId,
             UUID projectId,
