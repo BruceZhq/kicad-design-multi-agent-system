@@ -202,6 +202,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversationsLoading, setConversationsLoading] = useState(false);
+  const [deletingConversation, setDeletingConversation] = useState<string | null>(null);
   const [conversationRefresh, setConversationRefresh] = useState(0);
   const [liveMessage, setLiveMessage] = useState<DisplayMessage | null>(null);
   const liveRef = useRef<DisplayMessage | null>(null);
@@ -217,6 +218,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
   const [artifactError, setArtifactError] = useState("");
   const [channel, setChannel] = useState<Channel>("design");
   const activeRun = useRef<ActiveRun | null>(null);
+  const selectedThread = useRef("");
   const skipHistoryThread = useRef<string | null>(null);
   const messageEnd = useRef<HTMLDivElement | null>(null);
 
@@ -260,6 +262,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
       safeIdentity(localStorage.getItem(THREAD_KEY)) ??
       newId();
     localStorage.setItem(THREAD_KEY, requestedThread);
+    selectedThread.current = requestedThread;
     setThreadId(requestedThread);
     void (async () => {
       try {
@@ -382,6 +385,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
           .map(parseChatMessage)
           .filter((item): item is ChatMessage => item !== null);
         setMessages(parsed.map((item) => displayMessage(item)));
+        setStatus("历史会话已加载");
       } catch (error) {
         if (!controller.signal.aborted) {
           setMessages([]);
@@ -583,6 +587,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     if (newProject) {
       skipHistoryThread.current = submissionThreadId;
       localStorage.setItem(THREAD_KEY, submissionThreadId);
+      selectedThread.current = submissionThreadId;
       setThreadId(submissionThreadId);
       setLatestRun(null);
     }
@@ -671,10 +676,11 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
               if (activeRun.current?.idempotencyKey === idempotencyKey) {
                 activeRun.current.lastEventId = lastEventId;
               }
-               if (handleRunEvent(runEvent)) {
-                 awaitingInput = true;
-                 throw new HumanInputRequestedError();
-               }
+              if (selectedThread.current !== submissionThreadId) return;
+              if (handleRunEvent(runEvent)) {
+                awaitingInput = true;
+                throw new HumanInputRequestedError();
+              }
               if (isTerminalReplayFailure(runEvent)) replayRejected = true;
               if (isTerminalRunEvent(runEvent.type)) terminal = runEvent.type;
             } catch (error) {
@@ -701,7 +707,10 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
       }
       if (!awaitingInput) commitLive();
     } catch (error) {
-      if (controller.signal.aborted) {
+      if (selectedThread.current !== submissionThreadId) {
+        // The user opened another conversation. The backend run continues;
+        // only this page's event subscription was detached.
+      } else if (controller.signal.aborted) {
         updateLive((item) => ({ ...item, content: item.content || "已停止接收运行事件，正在确认后端取消状态。", pending: false }));
         commitLive();
         setStatus("已停止接收，正在确认取消状态");
@@ -720,13 +729,14 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
       }
     } finally {
       if (activeRun.current?.idempotencyKey === idempotencyKey) activeRun.current = null;
-      setBusy(false);
+      if (selectedThread.current === submissionThreadId) setBusy(false);
     }
   }
 
   async function respondToInteraction(answer: string, displayAnswer: string = answer): Promise<void> {
     if (!interaction || !workspace || interaction.status === "submitting" || interaction.status === "submitted") return;
     const current = interaction;
+    const interactionThreadId = threadId;
     const controller = new AbortController();
     activeRun.current = {
       idempotencyKey: current.idempotencyKey,
@@ -793,6 +803,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
               if (activeRun.current?.idempotencyKey === current.idempotencyKey) {
                 activeRun.current.lastEventId = lastEventId;
               }
+              if (selectedThread.current !== interactionThreadId) return;
               if (handleRunEvent(runEvent)) {
                 awaitingInput = true;
                 throw new HumanInputRequestedError();
@@ -817,7 +828,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
       }
       if (!awaitingInput) commitLive();
     } catch (error) {
-      if (!controller.signal.aborted) {
+      if (!controller.signal.aborted && selectedThread.current === interactionThreadId) {
         const reason = error instanceof Error ? error.message : "提交澄清信息失败";
         setInteraction({ ...current, status: "error", answer, error: reason });
         setStatus(reason);
@@ -825,7 +836,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
       }
     } finally {
       if (activeRun.current?.idempotencyKey === current.idempotencyKey) activeRun.current = null;
-      setBusy(false);
+      if (selectedThread.current === interactionThreadId) setBusy(false);
     }
   }
 
@@ -883,9 +894,11 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
   }
 
   function createThread() {
-    if (busy) return;
+    activeRun.current?.controller.abort();
+    activeRun.current = null;
     const nextThread = newId();
     localStorage.setItem(THREAD_KEY, nextThread);
+    selectedThread.current = nextThread;
     const url = new URL(window.location.href);
     url.searchParams.set("thread_id", nextThread);
     window.history.replaceState(null, "", url);
@@ -898,36 +911,38 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     setArtifacts([]);
     setArtifactError("");
     setInteraction(null);
+    setBusy(false);
   }
 
-  function selectConversation(conversation: ConversationSummary) {
-    if (busy || conversation.threadId === threadId) return;
-    localStorage.setItem(THREAD_KEY, conversation.threadId);
-    const url = new URL(window.location.href);
-    url.searchParams.set("thread_id", conversation.threadId);
-    window.history.replaceState(null, "", url);
-    setMessages([]);
-    setLive(null);
-    setInteraction(null);
-    setLatestRun(null);
-    setArtifacts([]);
-    setArtifactError("");
-    setRunState(conversation.state === "WAITING_FOR_INPUT"
-      ? "waiting_for_input"
-      : conversation.state === "RUNNING" || conversation.state === "QUEUED"
-        ? "disconnected"
-        : conversation.state.toLowerCase() as TerminalRunEvent);
-    if (conversation.pendingInteraction) {
-      setInteraction({
-        request: conversation.pendingInteraction,
-        runId: conversation.latestRunId,
-        lastEventId: conversation.lastEventId,
-        idempotencyKey: newId(),
-        status: "waiting",
+  async function removeConversation(conversation: ConversationSummary): Promise<void> {
+    if (!workspace || deletingConversation || conversation.state === "QUEUED" ||
+        conversation.state === "RUNNING" || conversation.state === "WAITING_FOR_INPUT") return;
+    const confirmed = window.confirm(
+      `删除“${conversation.title}”？\n\n该会话会从你的历史列表移除；工程审计记录和产物仍按组织保留策略保存。`,
+    );
+    if (!confirmed) return;
+    setDeletingConversation(conversation.threadId);
+    try {
+      const query = new URLSearchParams({
+        organization_id: workspace.organization.tenantId,
+        project_id: workspace.project.projectId,
       });
+      const response = await fetch(
+        `/api/conversations/${encodeURIComponent(conversation.threadId)}?${query}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) {
+        const detail: unknown = await response.json().catch(() => null);
+        throw new Error(errorText(detail, "无法删除历史会话"));
+      }
+      setConversations((items) => items.filter((item) => item.threadId !== conversation.threadId));
+      if (conversation.threadId === threadId) createThread();
+      setStatus("历史会话已删除");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "无法删除历史会话");
+    } finally {
+      setDeletingConversation(null);
     }
-    setStatus("正在加载历史会话…");
-    setThreadId(conversation.threadId);
   }
 
   function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -1001,21 +1016,34 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
               <p>完成首个任务后，会话会保存在这里。</p>
             ) : (
               <div className="conversation-history-list">
-                {conversations.map((conversation) => (
-                  <button
-                    key={conversation.threadId}
-                    type="button"
-                    className={conversation.threadId === threadId ? "active" : ""}
-                    onClick={() => selectConversation(conversation)}
-                    disabled={busy}
-                    title={conversation.title}
-                  >
-                    <strong>{conversation.title}</strong>
-                    <span>
-                      Revision {conversation.latestRevisionNumber} · {new Date(conversation.updatedAt).toLocaleDateString("zh-CN")}
-                    </span>
-                  </button>
-                ))}
+                {conversations.map((conversation) => {
+                  const activeConversation = conversation.state === "QUEUED" ||
+                    conversation.state === "RUNNING" || conversation.state === "WAITING_FOR_INPUT";
+                  return (
+                    <div className="conversation-history-item" key={conversation.threadId}>
+                      <a
+                        className={conversation.threadId === threadId ? "active" : ""}
+                        href={`/?thread_id=${encodeURIComponent(conversation.threadId)}#workspace`}
+                        title={conversation.title}
+                      >
+                        <strong>{conversation.title}</strong>
+                        <span>
+                          Revision {conversation.latestRevisionNumber} · {new Date(conversation.updatedAt).toLocaleDateString("zh-CN")}
+                        </span>
+                      </a>
+                      <button
+                        type="button"
+                        className="conversation-delete"
+                        aria-label={`删除会话：${conversation.title}`}
+                        title={activeConversation ? "运行中的会话需先取消或等待结束" : "删除会话"}
+                        disabled={activeConversation || deletingConversation !== null}
+                        onClick={() => void removeConversation(conversation)}
+                      >
+                        删
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </section>
@@ -1035,7 +1063,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
           </section>
 
           <div className="sidebar-controls">
-            <button className="new-conversation" type="button" onClick={createThread} disabled={busy || !workspaceReady}><span>＋</span> 新建工程会话</button>
+            <button className="new-conversation" type="button" onClick={createThread} disabled={!workspaceReady}><span>＋</span> 新建工程会话</button>
             <div className="model-control">
               <div><label htmlFor="model-select">当前模型</label><span>LIVE</span></div>
               <div className="select-shell">

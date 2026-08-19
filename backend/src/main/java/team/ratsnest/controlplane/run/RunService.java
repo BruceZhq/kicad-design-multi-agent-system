@@ -353,8 +353,13 @@ public class RunService {
             UUID projectId,
             String threadId,
             AuthenticatedActor actor) {
-        RuntimeIdentity identity = transactions.execute(
-                status -> requireProject(tenantId, projectId, actor, false));
+        RuntimeIdentity identity = transactions.execute(status -> {
+            RuntimeIdentity value = requireProject(tenantId, projectId, actor, false);
+            if (runs.isConversationRemoved(tenantId, projectId, threadId, actor)) {
+                throw conversationNotFound();
+            }
+            return value;
+        });
         if (identity == null) {
             throw notFound();
         }
@@ -374,6 +379,27 @@ public class RunService {
             return runs.listConversations(tenantId, projectId, 100);
         });
         return result == null ? List.of() : result;
+    }
+
+    public void removeConversation(
+            UUID tenantId,
+            UUID projectId,
+            String threadId,
+            AuthenticatedActor actor) {
+        transactions.executeWithoutResult(status -> {
+            requireProject(tenantId, projectId, actor, false);
+            Run latest = runs.findLatestForThread(tenantId, projectId, threadId)
+                    .orElseThrow(this::conversationNotFound);
+            if (latest.state() == RunState.QUEUED
+                    || latest.state() == RunState.RUNNING
+                    || latest.state() == RunState.WAITING_FOR_INPUT) {
+                throw new ApiException(
+                        "CONVERSATION_ACTIVE",
+                        HttpStatus.CONFLICT,
+                        "An active conversation must finish or be cancelled before deletion.");
+            }
+            runs.removeConversation(tenantId, projectId, threadId, actor);
+        });
     }
 
     public RuntimeInfo info(
@@ -706,6 +732,13 @@ public class RunService {
         }
         projects.get(tenantId, projectId, actor);
         return identity(tenantId, projectId, actor);
+    }
+
+    private ApiException conversationNotFound() {
+        return new ApiException(
+                "CONVERSATION_NOT_FOUND",
+                HttpStatus.NOT_FOUND,
+                "The conversation was not found.");
     }
 
     private StartRunCommand command(Run run) {

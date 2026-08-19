@@ -133,6 +133,64 @@ class RunRepository {
                 .optional();
     }
 
+    Optional<Run> findLatestForThread(UUID tenantId, UUID projectId, String threadId) {
+        return jdbcClient.sql("select " + COLUMNS + " from control_plane.runs "
+                        + "where tenant_id = :tenantId and project_id = :projectId "
+                        + "and thread_id = :threadId "
+                        + "order by created_at desc, revision_number desc, run_id desc limit 1")
+                .param("tenantId", tenantId)
+                .param("projectId", projectId)
+                .param("threadId", threadId)
+                .query(this::map)
+                .optional();
+    }
+
+    boolean isConversationRemoved(
+            UUID tenantId,
+            UUID projectId,
+            String threadId,
+            AuthenticatedActor actor) {
+        Long count = jdbcClient.sql("""
+                        select count(*)
+                        from control_plane.conversation_deletions
+                        where tenant_id = :tenantId
+                          and project_id = :projectId
+                          and thread_id = :threadId
+                          and deleted_by_issuer = :issuer
+                          and deleted_by_subject = :subject
+                        """)
+                .param("tenantId", tenantId)
+                .param("projectId", projectId)
+                .param("threadId", threadId)
+                .param("issuer", actor.issuer())
+                .param("subject", actor.subject())
+                .query(Long.class)
+                .single();
+        return count != null && count > 0;
+    }
+
+    void removeConversation(
+            UUID tenantId,
+            UUID projectId,
+            String threadId,
+            AuthenticatedActor actor) {
+        jdbcClient.sql("""
+                        insert into control_plane.conversation_deletions (
+                            tenant_id, project_id, thread_id,
+                            deleted_by_issuer, deleted_by_subject
+                        ) values (
+                            :tenantId, :projectId, :threadId, :issuer, :subject
+                        )
+                        on conflict do nothing
+                        """)
+                .param("tenantId", tenantId)
+                .param("projectId", projectId)
+                .param("threadId", threadId)
+                .param("issuer", actor.issuer())
+                .param("subject", actor.subject())
+                .update();
+    }
+
     List<ConversationSummary> listConversations(UUID tenantId, UUID projectId, int limit) {
         return jdbcClient.sql("""
                         with ranked as (
@@ -147,6 +205,15 @@ class RunRepository {
                                    ) as first_rank
                             from control_plane.runs r
                             where r.tenant_id = :tenantId and r.project_id = :projectId
+                              and not exists (
+                                  select 1
+                                  from control_plane.conversation_deletions deletion
+                                  where deletion.tenant_id = r.tenant_id
+                                    and deletion.project_id = r.project_id
+                                    and deletion.thread_id = r.thread_id
+                                    and deletion.deleted_by_issuer = control_plane.current_principal_issuer()
+                                    and deletion.deleted_by_subject = control_plane.current_principal_subject()
+                              )
                         ),
                         first_messages as (
                             select thread_id, message, created_at
