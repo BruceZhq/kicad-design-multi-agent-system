@@ -955,9 +955,12 @@ async def _produce_stream_events(
             logger.warning("Ignoring AHE event without a valid durable record_id.")
             continue
         await run_registry.append_event(record, event, event_key=event_key)
-    runtime_scope = execution_scope(user_input)
     manifest = result.get("artifact_manifest")
-    if runtime_scope is not None and _long_term_memory is not None and isinstance(manifest, dict):
+    if _long_term_memory is not None and isinstance(manifest, dict):
+        runtime_scope = execution_scope(user_input)
+    else:
+        runtime_scope = None
+    if runtime_scope is not None and isinstance(manifest, dict):
         artifacts = manifest.get("artifacts", [])
         errors = manifest.get("errors", [])
         try:
