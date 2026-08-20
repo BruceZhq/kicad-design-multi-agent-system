@@ -90,7 +90,7 @@ _DIAGNOSE_ACTION_RE = re.compile(
 _CONTINUE_ACTION_RE = re.compile(
     r"\b(?:continue|resume|retry|rerun|run\s+again|try\s+again|"
     r"fix\s+(?:it|this|that)|repair\s+(?:it|this|that|the\s+previous))\b|"
-    r"(?:继续|恢复|重试|再试|再跑|重新运行|接着做|修复(?:它|这个|刚才|之前)|"
+    r"(?:继续|恢复|重试|再试|再跑|重做|重新做|重新运行|接着做|修复(?:它|这个|刚才|之前)|"
     r"解决(?:它|这个|刚才|之前))",
     re.IGNORECASE,
 )
@@ -98,7 +98,7 @@ _NEGATED_CONTINUE_RE = re.compile(
     r"(?:\b(?:do\s+not|don't|must\s+not|never)\b[^.\n]{0,40}"
     r"\b(?:continue|resume|retry|rerun|run\s+again|try\s+again)\b|"
     r"(?:不要|不得|禁止|不能|不可|不允许)[^。；;\n]{0,24}"
-    r"(?:继续|恢复|重试|再试|再跑|重新运行|接着做))",
+    r"(?:继续|恢复|重试|再试|再跑|重做|重新做|重新运行|接着做))",
     re.IGNORECASE,
 )
 _EXPLICIT_NEW_CONTEXT_RE = re.compile(

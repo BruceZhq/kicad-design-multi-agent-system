@@ -276,11 +276,16 @@ class RunStatus(BaseModel):
     event_count: int = 0
     oldest_event_id: int | None = None
     newest_event_id: int | None = None
+    execution_lease_active: bool = False
+    recoverable: bool = False
+    lease_expires_at: datetime | None = None
+    checked_at: datetime
     error_code: str | None = None
     error: str | None = None
     interaction_id: str | None = None
     interaction_state_version: int | None = None
     artifact_manifest: dict[str, Any] | None = None
+    ui_snapshot: dict[str, Any]
     delivery_status: Literal[
         "execution_blocked",
         "delivered_with_issues",

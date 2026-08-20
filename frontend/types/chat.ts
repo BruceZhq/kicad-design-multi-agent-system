@@ -47,6 +47,73 @@ export interface DisplayMessage extends ChatMessage {
 export type TerminalRunEvent = "completed" | "failed" | "cancelled" | "timed_out";
 export type DeliveryStatus = "execution_blocked" | "delivered_with_issues" | "release_ready";
 export type RunState = "QUEUED" | "RUNNING" | "WAITING_FOR_INPUT" | "COMPLETED" | "FAILED" | "CANCELLED" | "TIMED_OUT";
+export type RunRecoveryState = "ACTIVE" | "RECOVERABLE" | "RECOVERING" | "WAITING_FOR_INPUT" | "TERMINAL" | "UNKNOWN";
+export type RunEventConnectionState = "idle" | "connecting" | "connected" | "retrying" | "disconnected";
+
+export interface RunRuntimeStatus {
+  runId: string;
+  controlState: RunState;
+  runtimeState: string;
+  recoveryState: RunRecoveryState;
+  lastEventId: number;
+  eventCount: number;
+  currentPhase?: string;
+  completedSteps?: number;
+  totalSteps?: number;
+  detail?: string;
+  checkedAt: string;
+  activity: RunActivitySnapshot | null;
+}
+
+export interface RunActivityRoleStatus {
+  role: string;
+  label: string | null;
+  status: string;
+  phase: string | null;
+  lastEventId: number | null;
+}
+
+export interface RunActivityEvent {
+  eventId: number;
+  type: string | null;
+  role: string | null;
+  phase: string | null;
+  status: string | null;
+  detail: string | null;
+  occurredAt: string | null;
+  stepIndex: number | null;
+  totalSteps: number | null;
+}
+
+export interface RunDeliverySnapshot {
+  controlState: string;
+  status: string | null;
+  manifestId: string | null;
+  artifactCount: number | null;
+  artifacts: unknown[];
+  errors: unknown[];
+  terminal: boolean;
+  errorCode: string | null;
+  error: string | null;
+  finishedAt: string | null;
+}
+
+export interface RunActivitySnapshot {
+  snapshotCursor: number;
+  coverageStartEventId: number | null;
+  complete: boolean;
+  checkedAt: string;
+  currentRole: string | null;
+  currentPhase: string | null;
+  roleStatuses: RunActivityRoleStatus[];
+  pipelineStatus: string | null;
+  completedSteps: number | null;
+  totalSteps: number | null;
+  currentStep: string | null;
+  currentStepIndex: number | null;
+  recentEvents: RunActivityEvent[];
+  delivery: RunDeliverySnapshot;
+}
 
 export interface HumanDecisionOption {
   key: string;
@@ -255,6 +322,324 @@ export function parseRunSummary(value: unknown): RunSummary | null {
     capabilityProfile,
     state: item.state,
     deliveryStatus: item.deliveryStatus,
+  };
+}
+
+function nullableText(value: unknown, maximum = 500): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  return typeof value === "string" && value.length <= maximum ? value : undefined;
+}
+
+function nullableCount(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : undefined;
+}
+
+function parseRunActivitySnapshot(value: unknown): RunActivitySnapshot | null {
+  if (value === null || value === undefined) return null;
+  const item = record(value);
+  const coverageStart = nullableCount(item.coverageStartEventId);
+  const currentRole = nullableText(item.currentRole, 200);
+  const currentPhase = nullableText(item.currentPhase, 200);
+  const pipelineStatus = nullableText(item.pipelineStatus, 100);
+  const completedSteps = nullableCount(item.completedSteps);
+  const totalSteps = nullableCount(item.totalSteps);
+  const currentStep = nullableText(item.currentStep, 200);
+  const currentStepIndex = nullableCount(item.currentStepIndex);
+  if (
+    !Number.isSafeInteger(item.snapshotCursor) || Number(item.snapshotCursor) < 0 ||
+    coverageStart === undefined || typeof item.complete !== "boolean" ||
+    typeof item.checkedAt !== "string" || !Number.isFinite(Date.parse(item.checkedAt)) ||
+    currentRole === undefined || currentPhase === undefined || pipelineStatus === undefined ||
+    completedSteps === undefined || totalSteps === undefined || currentStep === undefined || currentStepIndex === undefined ||
+    !Array.isArray(item.roleStatuses) || item.roleStatuses.length > 64 ||
+    !Array.isArray(item.recentEvents) || item.recentEvents.length > 100
+  ) return null;
+
+  const roleStatuses: RunActivityRoleStatus[] = [];
+  for (const raw of item.roleStatuses) {
+    const role = record(raw);
+    const label = nullableText(role.label, 200);
+    const phase = nullableText(role.phase, 200);
+    const lastEventId = nullableCount(role.lastEventId);
+    if (
+      typeof role.role !== "string" || role.role.length < 1 || role.role.length > 200 ||
+      typeof role.status !== "string" || role.status.length < 1 || role.status.length > 100 ||
+      label === undefined || phase === undefined || lastEventId === undefined
+    ) return null;
+    roleStatuses.push({
+      role: role.role,
+      label: label ?? null,
+      status: role.status,
+      phase: phase ?? null,
+      lastEventId,
+    });
+  }
+
+  const recentEvents: RunActivityEvent[] = [];
+  for (const raw of item.recentEvents) {
+    const event = record(raw);
+    const type = nullableText(event.type, 100);
+    const role = nullableText(event.role, 200);
+    const phase = nullableText(event.phase, 200);
+    const status = nullableText(event.status, 100);
+    const detail = nullableText(event.detail, 2_000);
+    const occurredAt = nullableText(event.occurredAt, 100);
+    const stepIndex = nullableCount(event.stepIndex);
+    const totalSteps = nullableCount(event.totalSteps);
+    if (
+      !Number.isSafeInteger(event.eventId) || Number(event.eventId) < 1 ||
+      type === undefined || role === undefined || phase === undefined || status === undefined || detail === undefined ||
+      occurredAt === undefined || (occurredAt !== null && !Number.isFinite(Date.parse(occurredAt))) ||
+      stepIndex === undefined || totalSteps === undefined ||
+      Number(event.eventId) > Number(item.snapshotCursor)
+    ) return null;
+    recentEvents.push({
+      eventId: Number(event.eventId),
+      type: type ?? null,
+      role: role ?? null,
+      phase: phase ?? null,
+      status: status ?? null,
+      detail: detail ?? null,
+      occurredAt: occurredAt ?? null,
+      stepIndex,
+      totalSteps,
+    });
+  }
+
+  const deliveryItem = record(item.delivery);
+  const deliveryStatus = nullableText(deliveryItem.status, 100);
+  const manifestId = nullableText(deliveryItem.manifestId, 200);
+  const errorCode = nullableText(deliveryItem.errorCode, 200);
+  const error = nullableText(deliveryItem.error, 2_000);
+  const finishedAt = nullableText(deliveryItem.finishedAt, 100);
+  const artifactCount = nullableCount(deliveryItem.artifactCount);
+  if (
+    typeof deliveryItem.controlState !== "string" || deliveryItem.controlState.length > 100 ||
+    deliveryStatus === undefined || manifestId === undefined || errorCode === undefined || error === undefined ||
+    finishedAt === undefined || (finishedAt !== null && !Number.isFinite(Date.parse(finishedAt))) ||
+    artifactCount === undefined ||
+    !Array.isArray(deliveryItem.artifacts) || !Array.isArray(deliveryItem.errors) ||
+    typeof deliveryItem.terminal !== "boolean"
+  ) return null;
+  const delivery: RunDeliverySnapshot = {
+    controlState: deliveryItem.controlState,
+    status: deliveryStatus,
+    manifestId,
+    artifactCount,
+    artifacts: deliveryItem.artifacts,
+    errors: deliveryItem.errors,
+    terminal: deliveryItem.terminal,
+    errorCode,
+    error,
+    finishedAt,
+  };
+
+  return {
+    snapshotCursor: Number(item.snapshotCursor),
+    coverageStartEventId: coverageStart,
+    complete: item.complete,
+    checkedAt: item.checkedAt,
+    currentRole: currentRole ?? null,
+    currentPhase: currentPhase ?? null,
+    roleStatuses,
+    pipelineStatus: pipelineStatus ?? null,
+    completedSteps,
+    totalSteps,
+    currentStep: currentStep ?? null,
+    currentStepIndex,
+    recentEvents: recentEvents.sort((left, right) => left.eventId - right.eventId),
+    delivery,
+  };
+}
+
+export function parseRunRuntimeStatus(value: unknown): RunRuntimeStatus | null {
+  const item = record(value);
+  const recoveryState = item.recoveryState;
+  const currentPhase = item.currentPhase;
+  const completedSteps = item.completedSteps;
+  const totalSteps = item.totalSteps;
+  const detail = item.detail;
+  const rawActivity = item.activity ?? item.uiSnapshot;
+  const activity = parseRunActivitySnapshot(rawActivity);
+  if (
+    !uuid(item.runId) ||
+    !runState(item.controlState) ||
+    typeof item.runtimeState !== "string" ||
+    item.runtimeState.length < 1 ||
+    item.runtimeState.length > 100 ||
+    (recoveryState !== "ACTIVE" && recoveryState !== "RECOVERABLE" &&
+      recoveryState !== "RECOVERING" && recoveryState !== "WAITING_FOR_INPUT" &&
+      recoveryState !== "TERMINAL" && recoveryState !== "UNKNOWN") ||
+    !Number.isSafeInteger(item.lastEventId) || Number(item.lastEventId) < 0 ||
+    !Number.isSafeInteger(item.eventCount) || Number(item.eventCount) < 0 ||
+    (currentPhase !== undefined && currentPhase !== null &&
+      (typeof currentPhase !== "string" || currentPhase.length > 200)) ||
+    (completedSteps !== undefined && completedSteps !== null &&
+      (!Number.isSafeInteger(completedSteps) || Number(completedSteps) < 0)) ||
+    (totalSteps !== undefined && totalSteps !== null &&
+      (!Number.isSafeInteger(totalSteps) || Number(totalSteps) < 0)) ||
+    (detail !== undefined && detail !== null &&
+      (typeof detail !== "string" || detail.length > 2_000)) ||
+    typeof item.checkedAt !== "string" || !Number.isFinite(Date.parse(item.checkedAt)) ||
+    (rawActivity !== undefined && rawActivity !== null && activity === null)
+  ) return null;
+  if (completedSteps != null && totalSteps != null && Number(completedSteps) > Number(totalSteps)) return null;
+  return {
+    runId: item.runId,
+    controlState: item.controlState,
+    runtimeState: item.runtimeState,
+    recoveryState,
+    lastEventId: Number(item.lastEventId),
+    eventCount: Number(item.eventCount),
+    ...(typeof currentPhase === "string" ? { currentPhase } : {}),
+    ...(completedSteps != null ? { completedSteps: Number(completedSteps) } : {}),
+    ...(totalSteps != null ? { totalSteps: Number(totalSteps) } : {}),
+    ...(typeof detail === "string" ? { detail } : {}),
+    checkedAt: item.checkedAt,
+    activity,
+  };
+}
+
+export function runtimeStatusLabel(state: RunRecoveryState): string {
+  if (state === "ACTIVE") return "执行器租约在线";
+  if (state === "RECOVERABLE") return "执行已中断，可从检查点恢复";
+  if (state === "RECOVERING") return "正在恢复";
+  if (state === "WAITING_FOR_INPUT") return "等待你的确认";
+  if (state === "TERMINAL") return "任务已结束";
+  return "正在确认运行状态";
+}
+
+export function runtimeStatusFetchMode(state: RunState): "poll" | "once" {
+  return state === "QUEUED" || state === "RUNNING" || state === "WAITING_FOR_INPUT" ? "poll" : "once";
+}
+
+export type RunActivityStatusTone = "live" | "attention" | "issue" | "neutral";
+
+/** Translate the backend's governed public status vocabulary without guessing from chat text. */
+export function runActivityStatusPresentation(status: string | null | undefined): {
+  label: string;
+  tone: RunActivityStatusTone;
+} {
+  const value = status?.trim().toLowerCase() ?? "";
+  if (value === "running" || value === "started" || value === "retrying" || value === "in_progress") {
+    return { label: "执行中", tone: "live" };
+  }
+  if (value === "waiting" || value === "waiting_for_input" || value === "queued") {
+    return { label: "等待中", tone: "neutral" };
+  }
+  if (value === "completed" || value === "ok" || value === "release_ready") {
+    return { label: "已完成", tone: "neutral" };
+  }
+  if (value === "warning" || value === "partial" || value === "unavailable" || value === "delivered_with_issues") {
+    return { label: "需关注", tone: "attention" };
+  }
+  if (value === "blocked" || value === "failed" || value === "error" || value === "execution_blocked") {
+    return { label: "有问题", tone: "issue" };
+  }
+  return { label: "未知", tone: "neutral" };
+}
+
+/** A waiting placeholder without an event cursor is not evidence that the role was reached. */
+export function isRunActivityRoleReached(activity: RunActivitySnapshot, role: string): boolean {
+  const item = activity.roleStatuses.find((candidate) => candidate.role === role);
+  if (!item) return false;
+  const status = item.status.trim().toLowerCase();
+  return item.lastEventId !== null || (status !== "waiting" && status !== "queued");
+}
+
+export function canRecoverRuntime(state: RunRecoveryState, stale: boolean): boolean {
+  return !stale && state === "RECOVERABLE";
+}
+
+export function canReconnectRuntimeEvents(
+  state: RunRecoveryState,
+  stale: boolean,
+  connection: RunEventConnectionState,
+): boolean {
+  return !stale && state === "ACTIVE" && connection === "disconnected";
+}
+
+export function selectNewerActivitySnapshot(
+  current: RunActivitySnapshot | null,
+  incoming: RunActivitySnapshot | null,
+): RunActivitySnapshot | null {
+  if (incoming === null) return null;
+  if (current !== null && current.snapshotCursor > incoming.snapshotCursor) return current;
+  return incoming;
+}
+
+function activityRole(phase: string, supplied: unknown): string {
+  if (typeof supplied === "string" && supplied.length > 0 && supplied.length <= 200) return supplied;
+  if (phase === "intent-router" || phase === "supervisor") return "supervisor";
+  if (phase === "architect" || phase === "parts-specialist" || phase === "reviewer") return phase;
+  if (phase.startsWith("hardware-engineer") || phase.startsWith("pipeline:")) return "hardware-engineer";
+  if (phase.startsWith("specialist:")) return phase;
+  return "";
+}
+
+/** Apply one authoritative live event without inserting it into chat history. */
+export function reduceRunActivity(
+  snapshot: RunActivitySnapshot | null,
+  event: RunEvent,
+): RunActivitySnapshot | null {
+  if (snapshot === null || event.eventId <= snapshot.snapshotCursor) return snapshot;
+  const cursorOnly = { ...snapshot, snapshotCursor: event.eventId };
+  if (event.type !== "message") return cursorOnly;
+  const message = parseChatMessage(event.data.message);
+  if (!message || message.type !== "custom") return cursorOnly;
+  const custom = record(message.custom_data);
+  if (custom.kind !== "workflow_event") return cursorOnly;
+  const phase = typeof custom.phase === "string" ? custom.phase.slice(0, 200) : "";
+  const status = typeof custom.status === "string" ? custom.status.slice(0, 100) : "";
+  if (!phase || !status) return cursorOnly;
+  const role = activityRole(phase, custom.role);
+  const detail = typeof custom.detail === "string" ? custom.detail.slice(0, 2_000) : "";
+  const completed = nullableCount(custom.completedSteps ?? custom.completed_steps);
+  const total = nullableCount(custom.totalSteps ?? custom.total_steps);
+  const stepIndex = nullableCount(custom.stepIndex ?? custom.step_index);
+  const previousRole = snapshot.roleStatuses.find((item) => item.role === role);
+  const roleStatuses = role
+    ? [
+        ...snapshot.roleStatuses.filter((item) => item.role !== role),
+        {
+          role,
+          label: previousRole?.label ?? role,
+          status,
+          phase,
+          lastEventId: event.eventId,
+        },
+      ]
+    : snapshot.roleStatuses;
+  const milestone: RunActivityEvent = {
+    eventId: event.eventId,
+    type: "workflow_event",
+    role,
+    phase,
+    status,
+    detail,
+    occurredAt: event.createdAt,
+    stepIndex: stepIndex ?? null,
+    totalSteps: total ?? null,
+  };
+  const recentEvents = [...snapshot.recentEvents.filter((item) => item.eventId !== event.eventId), milestone]
+    .sort((left, right) => left.eventId - right.eventId)
+    .slice(-20);
+  const pipelineRelevant = phase.startsWith("pipeline:") || completed !== undefined || total !== undefined;
+  return {
+    ...snapshot,
+    snapshotCursor: event.eventId,
+    currentRole: role || snapshot.currentRole,
+    currentPhase: phase,
+    roleStatuses,
+    pipelineStatus: pipelineRelevant ? status : snapshot.pipelineStatus,
+    completedSteps: pipelineRelevant && completed !== undefined ? completed : snapshot.completedSteps,
+    totalSteps: pipelineRelevant && total !== undefined ? total : snapshot.totalSteps,
+    currentStep: phase.startsWith("pipeline:") ? phase.slice("pipeline:".length) : snapshot.currentStep,
+    currentStepIndex: pipelineRelevant && stepIndex !== undefined ? stepIndex : snapshot.currentStepIndex,
+    recentEvents,
   };
 }
 

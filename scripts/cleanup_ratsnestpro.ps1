@@ -41,9 +41,9 @@ foreach ($base in @("src", "tests", "scripts")) {
     }
 }
 
-$nested = Join-Path $root "src\RatsNestPro-main\RatsNestPro-main"
-if (Test-Path -LiteralPath $nested) {
-    Get-ChildItem -LiteralPath $nested -Directory -Force |
+$edaKernel = Join-Path $root "src\ratsnestpro"
+if (Test-Path -LiteralPath $edaKernel) {
+    Get-ChildItem -LiteralPath $edaKernel -Directory -Force |
         Where-Object {
             $_.Name -in @(".pytest_cache", ".ruff_cache", "Temp") -or
             $_.Name -like ".pytest-tmp-*" -or
@@ -119,8 +119,42 @@ foreach ($target in $targets | Sort-Object Length -Descending) {
     Remove-Item -LiteralPath $target -Recurse -Force
 }
 
+# Source-control does not preserve empty directories. Remove any that remain
+# after cache cleanup so a copied/unpacked workspace has the same structure as
+# a clean clone. Work bottom-up and retain the same project-root boundary used
+# for recursive targets above.
+$removedEmptyDirectories = 0
+foreach ($base in @("src", "tests", "scripts", "docs")) {
+    $path = Join-Path $root $base
+    if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+        continue
+    }
+    $directories = Get-ChildItem -LiteralPath $path -Directory -Recurse -Force |
+        Sort-Object { $_.FullName.Length } -Descending
+    foreach ($directory in $directories) {
+        if (-not (Test-Path -LiteralPath $directory.FullName -PathType Container)) {
+            continue
+        }
+        if (Get-ChildItem -LiteralPath $directory.FullName -Force | Select-Object -First 1) {
+            continue
+        }
+        $resolved = [IO.Path]::GetFullPath(
+            (Resolve-Path -LiteralPath $directory.FullName).Path
+        )
+        if (-not $resolved.StartsWith(
+            $root + "\",
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw "Empty-directory cleanup target escaped project root: $resolved"
+        }
+        Remove-Item -LiteralPath $resolved -Force
+        $removedEmptyDirectories++
+    }
+}
+
 [pscustomobject]@{
     RemovedTargets = $targets.Count
+    RemovedEmptyDirectories = $removedEmptyDirectories
     ReclaimedMB = [math]::Round($bytes / 1MB, 2)
     HistoricalRunsRemoved = [bool]$RemoveHistoricalRuns
     PreservedEhe = Test-Path -LiteralPath (Join-Path $root "data\ratsnestpro\ehe")

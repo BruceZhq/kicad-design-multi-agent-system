@@ -18,6 +18,9 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import ValidationError
+
+from agents.ratsnestpro.ehe_memory import EheMemory
+from agents.ratsnestpro.knowledge_gateway import search_external_knowledge
 from ratsnestpro.agents import LlmError, LlmMode, Reviewer, parse_mode
 from ratsnestpro.eda import footprints, grounding, symbols
 from ratsnestpro.eda.adapter import kicad_cli_available, run_erc
@@ -28,6 +31,10 @@ from ratsnestpro.eda.local_library import (
 )
 from ratsnestpro.knowledge import build_default_kb
 from ratsnestpro.orchestration import review_project
+from ratsnestpro.orchestration.ahe import (
+    GOVERNED_HARNESS_REASON_CODES,
+    CapabilityGap,
+)
 from ratsnestpro.orchestration.pipeline import (
     Pipeline,
     PipelineContext,
@@ -50,9 +57,18 @@ from ratsnestpro.orchestration.placement_constraints import (
 )
 from ratsnestpro.orchestration.review_project import ReviewProjectError
 from ratsnestpro.parts import PartSelector
-
-from agents.ratsnestpro.ehe_memory import EheMemory
-from agents.ratsnestpro.knowledge_gateway import search_external_knowledge
+from service.ahe_event import (
+    ahe_event_record,
+    append_ahe_event,
+    publish_ahe_event_best_effort,
+    sanitize_ahe_event,
+)
+from service.durable_event_stream import RedisEventStreamConfig
+from service.governance_scope import (
+    TrustedGovernanceScope,
+    governance_scope_from_environ,
+    verify_governance_scope_token,
+)
 from service.llm_output import (
     append_llm_output,
     llm_output_record,
@@ -432,20 +448,219 @@ def _record_ahe_event(
     run_name: str,
     project_name: str,
     requirement: str,
+    workflow_id: str,
+    audit_path: Path,
+    state: PipelineState | None = None,
+    state_path: Path | None = None,
 ) -> None:
-    memory.record(
-        event,
-        run_name=run_name,
-        project_name=project_name,
-        requirement=requirement,
+    if event.get("event") == "capability_gap_resolved":
+        event = {
+            **event,
+            "attribution": {
+                "action": "resolve_capability_gap",
+                "reason_code": "verified_harness_capability_gap_resolved",
+                "origin": "harness",
+                "independent_run_count": 1,
+                "independent_project_count": 1,
+            },
+        }
+    safe_event = sanitize_ahe_event(event)
+    governed_events = {
+        "harness_defect_observed",
+        "capability_gap",
+        "capability_gap_resolved",
+    }
+    failure_payload = safe_event.get("failure")
+    attribution_payload = safe_event.get("attribution")
+    affected_refs = (
+        failure_payload.get("affected_refs")
+        if isinstance(failure_payload, dict)
+        else None
+    )
+    strict_harness_observation = bool(
+        safe_event.get("event") == "harness_defect_observed"
+        and isinstance(failure_payload, dict)
+        and failure_payload.get("origin") == "harness"
+        and failure_payload.get("recoverability") == "harness_observation"
+        and failure_payload.get("reason_code") in GOVERNED_HARNESS_REASON_CODES
+        and isinstance(affected_refs, list)
+        and affected_refs
+        and all(isinstance(ref, str) and ref for ref in affected_refs)
+        and isinstance(attribution_payload, dict)
+        and attribution_payload.get("action") == "observe_harness"
+        and attribution_payload.get("origin") == "harness"
+        and attribution_payload.get("reason_code")
+        == "harness_defect_not_yet_cross_run_reproducible"
+    )
+    safe_events = (
+        [safe_event]
+        if safe_event.get("event") not in governed_events
+        or (
+            memory.governance_eligible
+            and strict_harness_observation
+        )
+        else []
+    )
+    try:
+        resolved_gap_closed = False
+        if safe_event.get("event") == "capability_gap_resolved":
+            gap_payload = safe_event.get("gap")
+            resolution_failure = safe_event.get("failure")
+            if isinstance(gap_payload, dict) and isinstance(
+                resolution_failure,
+                dict,
+            ):
+                signature = str(gap_payload.get("signature", ""))
+                gap_id = str(gap_payload.get("gap_id", ""))
+                gap_step = str(gap_payload.get("step", ""))
+                if (
+                    signature
+                    and gap_id == f"gap:{signature}"
+                    and gap_step == str(safe_event.get("step", ""))
+                    and resolution_failure.get("signature") == signature
+                    and resolution_failure.get("step") == gap_step
+                    and resolution_failure.get("origin") == "harness"
+                    and resolution_failure.get("recoverability")
+                    == "capability_gap"
+                    and resolution_failure.get("reason_code")
+                    == "verified_harness_capability_gap_resolved"
+                    and isinstance(resolution_failure.get("affected_refs"), list)
+                    and resolution_failure.get("affected_refs")
+                ):
+                    resolved_gap_closed = memory.close_gap(
+                        signature,
+                        affected_refs=resolution_failure["affected_refs"],
+                    )
+        if (
+            safe_event.get("event") not in {
+                "capability_gap",
+                "capability_gap_resolved",
+            }
+            and (
+                safe_event.get("event") != "harness_defect_observed"
+                or strict_harness_observation
+            )
+            or resolved_gap_closed
+        ):
+            memory.record(safe_event)
+        if (
+            memory.governance_eligible
+            and safe_event.get("event") == "capability_gap_resolved"
+            and resolved_gap_closed
+        ):
+            safe_events.append(safe_event)
+        if strict_harness_observation:
+            failure = failure_payload
+            signature = (
+                str(failure.get("signature", ""))
+                if isinstance(failure, dict)
+                else ""
+            )
+            run_count, project_count = memory.harness_recurrence(signature)
+            if signature and run_count >= 2 and project_count >= 2:
+                promoted = sanitize_ahe_event({
+                    "kind": "ahe_event",
+                    "event": "capability_gap",
+                    "step": safe_event["step"],
+                    "revision": safe_event["revision"],
+                    "failure": {
+                        **failure,
+                        "recoverability": "capability_gap",
+                    },
+                    "gap": {
+                        "gap_id": f"gap:{signature}",
+                        "signature": signature,
+                        "step": str(failure.get("step", safe_event["step"])),
+                        "check_name": str(failure.get("check_name", "")),
+                        "category": str(failure.get("category", "unknown")),
+                        "required_capability": str(
+                            failure.get(
+                                "required_capability",
+                                "unclassified_hardware_repair",
+                            )
+                        ),
+                        "status": "promoted",
+                    },
+                    "attribution": {
+                        "action": "capability_gap",
+                        "reason_code": "cross_run_reproducible_harness_defect",
+                        "origin": "harness",
+                        "independent_run_count": run_count,
+                        "independent_project_count": project_count,
+                    },
+                })
+                gap = CapabilityGap.model_validate({
+                    **promoted["gap"],
+                    "affected_refs": list(failure.get("affected_refs", [])),
+                })
+                memory.record(promoted)
+                candidate = next(
+                    (
+                        item
+                        for item in memory.candidate_summary()
+                        if item.get("signature") == signature
+                    ),
+                    {},
+                )
+                memory.open_gap(
+                    gap,
+                    project_scopes=[
+                        str(item) for item in candidate.get("projects", [])
+                    ],
+                    affected_refs_by_project={
+                        str(project): [str(ref) for ref in refs]
+                        for project, refs in candidate.get(
+                            "project_affected_refs",
+                            {},
+                        ).items()
+                    },
+                )
+                if state is not None and not any(
+                    existing.signature == gap.signature
+                    for existing in state.capability_gaps
+                ):
+                    state.capability_gaps.append(gap)
+                    if state_path is not None:
+                        _write_pipeline_state(state_path, requirement, state)
+                safe_events.append(promoted)
+    except (OSError, ValueError):
+        # The per-workflow audit below is the durable bridge. Cross-run memory
+        # is advisory and must not suppress the current event when its storage
+        # is temporarily unavailable.
+        pass
+    from core import settings
+
+    stream_config = RedisEventStreamConfig(
+        enabled=settings.REDIS_URL is not None,
+        url=(
+            settings.REDIS_URL.get_secret_value()
+            if settings.REDIS_URL is not None
+            else None
+        ),
+        key_prefix=settings.REDIS_KEY_PREFIX,
+        maxlen=settings.RATSNESTPRO_LLM_STREAM_MAXLEN,
+        ttl_seconds=settings.RATSNESTPRO_LLM_STREAM_TTL_SECONDS,
+        socket_timeout_seconds=(
+            settings.RATSNESTPRO_LLM_STREAM_SOCKET_TIMEOUT_SECONDS
+        ),
     )
     try:
         from langgraph.config import get_stream_writer
 
         writer = get_stream_writer()
     except RuntimeError:
-        return
-    writer(event)
+        writer = None
+    for safe_item in safe_events:
+        record = ahe_event_record(safe_item, workflow_id=workflow_id)
+        append_ahe_event(audit_path, record)
+        publish_ahe_event_best_effort(
+            stream_config,
+            workflow_id=workflow_id,
+            record=record,
+            audit_path=str(audit_path),
+        )
+        if writer is not None:
+            writer(record)
 
 
 def _load_pipeline_state(
@@ -983,6 +1198,10 @@ def ratsnest_search_internal_knowledge(
     principal_scope: str = "",
     tenant_scope: str = "",
     project_scope: str = "",
+    run_scope: str = "",
+    harness_version_id: str = "",
+    harness_manifest_digest: str = "",
+    governance_scope_token: str = "",
 ) -> str:
     """Search the governed external gateway and bundled knowledge."""
 
@@ -1007,7 +1226,36 @@ def ratsnest_search_internal_knowledge(
         role=local_role or None,
     )
     relevant = [hit for hit in hits if hit.score > 0]
-    experiences = EheMemory(_workspace_root() / "ehe").search_verified(query, limit=bounded_limit)
+    from core import settings
+
+    verified_scope: TrustedGovernanceScope | None = None
+    if (
+        governance_scope_token
+        and settings.RATSNEST_INTERNAL_SIGNING_SECRET is not None
+    ):
+        try:
+            candidate_scope = verify_governance_scope_token(
+                governance_scope_token,
+                secret=settings.RATSNEST_INTERNAL_SIGNING_SECRET.get_secret_value(),
+            )
+        except ValueError:
+            candidate_scope = None
+        expected_scope = {
+            "tenant_scope": tenant_scope,
+            "project_scope": project_scope,
+            "run_scope": run_scope,
+            "harness_version_id": harness_version_id,
+            "harness_manifest_digest": harness_manifest_digest,
+        }
+        if candidate_scope is not None and all(
+            str(getattr(candidate_scope, key)) == value
+            for key, value in expected_scope.items()
+        ):
+            verified_scope = candidate_scope
+    experiences = EheMemory(
+        _workspace_root() / "ehe",
+        governance_scope=verified_scope,
+    ).search_verified(query, limit=bounded_limit)
     local_results = [
         {
             "id": hit.doc.id,
@@ -1131,12 +1379,20 @@ def _run_pcb_pipeline_unlocked(
         out = _run_dir(run_name)
         out.mkdir(parents=True, exist_ok=True)
         workflow_id = os.getenv("RATSNESTPRO_LLM_TRANSCRIPT_WORKFLOW_ID", "").strip()
+        bridge_workflow_id = workflow_id or hashlib.sha256(
+            f"local-ahe\0{run_name}\0{project_name}".encode()
+        ).hexdigest()
         if workflow_id:
-            from agents.ratsnestpro.temporal.contracts import llm_transcript_filename
+            from agents.ratsnestpro.temporal.contracts import (
+                ahe_event_filename,
+                llm_transcript_filename,
+            )
 
             transcript_path = out / llm_transcript_filename(workflow_id)
+            ahe_audit_path = out / ahe_event_filename(workflow_id)
         else:
             transcript_path = out / "llm_outputs.jsonl"
+            ahe_audit_path = out / "ahe_events.jsonl"
         pipeline_step = os.getenv("RATSNESTPRO_PIPELINE_STEP", "").strip()
         budget = ahe_budget or {}
         max_llm_tokens = min(
@@ -1161,14 +1417,24 @@ def _run_pcb_pipeline_unlocked(
         )
         state_path = out / "pipeline_state.json"
         project = _name(project_name, "board")
-        ehe_memory = EheMemory(_workspace_root() / "ehe")
-        saved_gap_payloads: list[dict[str, Any]] = []
+        from core import settings
+
+        governance_secret = (
+            settings.RATSNEST_INTERNAL_SIGNING_SECRET.get_secret_value()
+            if settings.RATSNEST_INTERNAL_SIGNING_SECRET is not None
+            else None
+        )
+        governance_scope = governance_scope_from_environ(
+            os.environ,
+            secret=governance_secret,
+        )
+        ehe_memory = EheMemory(
+            _workspace_root() / "ehe",
+            governance_scope=governance_scope,
+        )
         saved_issue_payloads: list[dict[str, str]] = []
         if state_path.is_file():
             checkpoint_payload = json.loads(state_path.read_text(encoding="utf-8"))
-            raw_gaps = checkpoint_payload.get("capability_gaps", [])
-            if isinstance(raw_gaps, list):
-                saved_gap_payloads = [item for item in raw_gaps if isinstance(item, dict)]
             raw_steps = checkpoint_payload.get("steps", [])
             if isinstance(raw_steps, list):
                 saved_issue_payloads = [
@@ -1192,23 +1458,8 @@ def _run_pcb_pipeline_unlocked(
                 project_name=project,
             )
         )
-        active_gap_signatures = {gap.signature for gap in state.capability_gaps}
-        for gap in saved_gap_payloads:
-            signature = str(gap.get("signature", ""))
-            if signature and signature not in active_gap_signatures:
-                _record_ahe_event(
-                    ehe_memory,
-                    {
-                        "kind": "ahe_event",
-                        "event": "capability_gap_resolved",
-                        "step": str(gap.get("step", "pipeline")),
-                        "revision": state.revision,
-                        "gap": gap,
-                    },
-                    run_name=run_name,
-                    project_name=project,
-                    requirement=requirement,
-                )
+        if ehe_memory.governance_eligible:
+            state.capability_gaps = ehe_memory.active_gaps()
         resumed_steps = len(state.results)
         require_freerouting = _env_flag("RATSNESTPRO_REQUIRE_FREEROUTING")
         Pipeline().run(
@@ -1256,9 +1507,9 @@ def _run_pcb_pipeline_unlocked(
                 * min(
                     _env_int(
                         "RATSNESTPRO_AHE_MAX_WALL_CLOCK_MINUTES",
-                        default=60,
+                        default=600,
                         minimum=1,
-                        maximum=120,
+                        maximum=600,
                     ),
                     max(1, int(budget.get("max_wall_clock_minutes", 60))),
                 ),
@@ -1357,6 +1608,10 @@ def _run_pcb_pipeline_unlocked(
                     run_name=run_name,
                     project_name=project,
                     requirement=requirement,
+                    workflow_id=bridge_workflow_id,
+                    audit_path=ahe_audit_path,
+                    state=state,
+                    state_path=state_path,
                 ),
                 strategy_score=ehe_memory.strategy_score,
                 replan_score=ehe_memory.replan_score,
@@ -1575,7 +1830,9 @@ def _run_pcb_pipeline_unlocked(
                 resolved_issues=resolved_issues,
                 selected_roles=selected_roles,
                 human_amendment=human_amendment,
-                promotion_eligible=outcome == "release_ready",
+                promotion_eligible=(
+                    outcome == "release_ready" and ehe_memory.governance_eligible
+                ),
             ),
             "steps": steps,
             "pipeline_state_path": str(state_path),

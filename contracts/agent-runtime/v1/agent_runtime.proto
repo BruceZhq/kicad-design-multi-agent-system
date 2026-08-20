@@ -93,9 +93,15 @@ message Run {
   optional string error_code = 13;
   optional string error = 14;
   // Canonical JSON governed by runtimeResult in agent-runtime.schema.json.
-  // Keeping the final manifest on Run makes status polling sufficient even
-  // when no event subscriber was connected at completion time.
+  // Carries the final manifest plus the text-free ui_snapshot projection, so
+  // status polling is sufficient even when no event subscriber was connected.
   optional string result_json = 15;
+  // A point-in-time execution ownership view. StartRun remains the atomic
+  // recovery operation; these fields are advisory UI/control-plane metadata.
+  bool execution_lease_active = 16;
+  bool recoverable = 17;
+  optional string lease_expires_at = 18;
+  string checked_at = 19;
 }
 
 message RunEvent {

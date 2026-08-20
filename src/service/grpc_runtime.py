@@ -110,6 +110,7 @@ def _run_message(status: RunStatus) -> pb.Run:
         (status.finished_at, "finished_at"),
         (status.oldest_event_id, "oldest_event_seq"),
         (status.newest_event_id, "newest_event_seq"),
+        (status.lease_expires_at, "lease_expires_at"),
         (status.error_code, "error_code"),
         (status.error, "error"),
     ):
@@ -118,6 +119,7 @@ def _run_message(status: RunStatus) -> pb.Run:
     result = {
         "artifact_manifest": status.artifact_manifest,
         "delivery_status": status.delivery_status,
+        "ui_snapshot": status.ui_snapshot,
     }
     if any(value is not None for value in result.values()):
         optional["result_json"] = json.dumps(
@@ -134,6 +136,9 @@ def _run_message(status: RunStatus) -> pb.Run:
         thread_id=status.thread_id,
         created_at=status.created_at.isoformat(),
         event_count=status.event_count,
+        execution_lease_active=status.execution_lease_active,
+        recoverable=status.recoverable,
+        checked_at=status.checked_at.isoformat(),
         **optional,
     )
 

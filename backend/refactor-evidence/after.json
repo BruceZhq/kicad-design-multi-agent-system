@@ -1,0 +1,73 @@
+{
+  "scope": "team.ratsnest.controlplane.run",
+  "architecture": {
+    "api": ["run.api.RunController"],
+    "application": [
+      "run.application.RunSubmissionService",
+      "run.application.RunQueryService",
+      "run.application.RunInteractionService",
+      "run.application.RunLifecycleService"
+    ],
+    "domain_models": [
+      "Run",
+      "RunInteraction",
+      "ConversationSummary",
+      "DeliveryStatus"
+    ],
+    "domain_ports": ["RunStore", "RunInteractionStore", "RunOutbox"],
+    "infrastructure": {
+      "persistence": ["JdbcRunStore", "JdbcRunInteractionStore", "JdbcRunOutbox"],
+      "messaging": ["RunOutboxPublisher", "RunOutboxKafkaConfiguration"],
+      "scheduling": ["RunReconciliationWorker"]
+    }
+  },
+  "use_case_mapping": {
+    "start_root_revision_fork": "RunSubmissionService",
+    "get_authorize_runtime_status_history_conversations_info": "RunQueryService",
+    "hitl_response_and_recovery": "RunInteractionService",
+    "cancel_events_runtime_sync_outbox_reconciliation": "RunLifecycleService"
+  },
+  "controller": {
+    "business_orchestration": false,
+    "responsibilities": ["HTTP validation", "DTO mapping", "status/location headers", "SSE encoding"],
+    "api_mapping_digest_before": "f2b56f974028552eb50ea9de8ce5781924ca52601861f4aaccd0cce790a278b9",
+    "api_mapping_digest_after": "f2b56f974028552eb50ea9de8ce5781924ca52601861f4aaccd0cce790a278b9",
+    "mapping_equal": true
+  },
+  "persistence": {
+    "existing_flyway_v1_v13_changed": false,
+    "additive_flyway_migrations": [
+      "V14__harden_evolution_observation_attribution.sql",
+      "V15__create_run_event_ingestion_cursor.sql"
+    ],
+    "sql_digests": [
+      {"before":"RunRepository.java","after":"JdbcRunStore.java","digest":"9b9cea8ec88eeb321eff0ec3326e83a99aa3a9bd0702eb79156a9d1216e89d4a","equal":true},
+      {"before":"RunInteractionRepository.java","after":"JdbcRunInteractionStore.java","digest":"404d4f4a3fb8271333a3a4c0d5f8d70638deb8017b277bc6a34775dcd72ef1ca","equal":true},
+      {"before":"RunOutboxRepository.java","after":"JdbcRunOutbox.java","digest":"f73d132b6be1095ea8ad3f82ebc0a4cd9bd3df84d412282232465805f4df89be","equal":true}
+    ],
+    "bean_implementations": {
+      "RunStore": ["JdbcRunStore"],
+      "RunInteractionStore": ["JdbcRunInteractionStore"],
+      "RunOutbox": ["JdbcRunOutbox"],
+      "RunEventIngestionStore": ["JdbcRunEventIngestionStore"]
+    },
+    "duplicate_bean_implementation": false
+  },
+  "verification": {
+    "java_runtime": "Microsoft OpenJDK 21.0.10",
+    "main_sources_compiled": 136,
+    "protobuf_generated_sources_compiled": 20,
+    "test_sources_compiled": 8,
+    "main_compile_exit_code": 0,
+    "test_compile_exit_code": 0,
+    "tests_executed": true,
+    "targeted_behavior_tests_passed": 12,
+    "test_execution_note": "Twelve targeted run-ingestion, HITL-ordering, and Evolution governance tests were invoked directly against the compiled JUnit test methods because the offline dependency set has no JUnit Platform console launcher.",
+    "maven_note": "The local Maven wrapper initially selected JDK 8; Maven launched explicitly with JDK 21 reached compilation, but sandbox access to jars outside the writable workspace was denied. Dependencies were copied into staging and javac 21 completed successfully without network access."
+  },
+  "size_change": {
+    "removed_monolith": "RunService.java (1945 lines)",
+    "largest_application_use_case": "RunSubmissionService.java (619 lines)",
+    "application_services": 5
+  }
+}

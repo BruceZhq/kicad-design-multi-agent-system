@@ -2,6 +2,26 @@
 
 The control plane is a Java 21 Spring Boot service. It owns SaaS identity and business data; it does not run LangGraph or KiCad.
 
+## Source layout
+
+The control plane is organized by business capability first and by layer second. New code must use this layout instead of adding more classes to a flat feature package:
+
+```text
+team.ratsnest.controlplane.<capability>/
+  api/                    HTTP controllers and request/response DTOs
+  application/            use cases and transaction orchestration
+  domain/model/           framework-free business state and value types
+  domain/port/            repository and outbound-gateway interfaces
+  infrastructure/
+    persistence/          JDBC implementations
+    gateway/              HTTP, gRPC, Kafka, S3, and other adapters
+    config/               capability-specific Spring wiring when needed
+```
+
+Dependency direction is `api -> application -> domain`. Infrastructure implements domain ports and is injected by Spring; domain code must not import Spring MVC, JDBC, Kafka, HTTP clients, or storage SDKs. Controllers validate transport DTOs, resolve authentication, invoke one application use case, and map the response. They do not perform workflow orchestration or persistence.
+
+`evolution` and `harness` are the reference implementations. Their public URLs, JSON shapes, SQL schema/table names, and optimistic-locking behavior were retained while Java packages were separated. See [ADR-0001](../docs/adr/0001-control-plane-domain-layering.md) for migration rules and the remaining capability backlog.
+
 ## Required production configuration
 
 - `RATSNEST_OIDC_ISSUER_URI`, `RATSNEST_OIDC_JWK_SET_URI`, `RATSNEST_OIDC_AUDIENCE`

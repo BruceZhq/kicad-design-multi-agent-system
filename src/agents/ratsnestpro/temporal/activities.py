@@ -25,6 +25,11 @@ from agents.ratsnestpro.temporal.contracts import (
     compact_pipeline_result,
     safe_name,
 )
+from core import settings
+from service.governance_scope import (
+    TrustedGovernanceScope,
+    verify_governance_scope_token,
+)
 
 _TRANSIENT_TYPES = {
     "transient_io_error",
@@ -47,6 +52,35 @@ _TRANSIENT_TEXT = (
     " 504",
     "could not lock run directory",
 )
+
+_GOVERNANCE_FIELDS = (
+    "tenant_scope",
+    "project_scope",
+    "run_scope",
+    "harness_version_id",
+    "harness_manifest_digest",
+)
+
+
+def _verified_governance_scope(
+    value: dict[str, Any],
+) -> TrustedGovernanceScope | None:
+    token = str(value.get("governance_scope_token", "")).strip()
+    if not token:
+        return None
+    if settings.RATSNEST_INTERNAL_SIGNING_SECRET is None:
+        return None
+    try:
+        scope = verify_governance_scope_token(
+            token,
+            secret=settings.RATSNEST_INTERNAL_SIGNING_SECRET.get_secret_value(),
+        )
+    except ValueError:
+        return None
+    for field in _GOVERNANCE_FIELDS:
+        if str(value.get(field, "")) != str(getattr(scope, field)):
+            return None
+    return scope
 
 
 def _workspace_root() -> Path:
@@ -97,6 +131,20 @@ def _manifest(command: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
             raise ValueError("Temporal run manifest workflow identity mismatch")
         if value.get("requirement_hash") != command.get("requirement_hash"):
             raise ValueError("Temporal run manifest requirement digest mismatch")
+        command_scope = _verified_governance_scope(command)
+        scope_matches_manifest = bool(
+            command_scope is not None
+            and all(
+                str(value.get(field, "")) == str(getattr(command_scope, field))
+                for field in _GOVERNANCE_FIELDS
+            )
+        )
+        if not scope_matches_manifest:
+            value = {
+                key: item
+                for key, item in value.items()
+                if key not in {*_GOVERNANCE_FIELDS, "governance_scope_token"}
+            }
         return path, value
 
     requirement = str(command.get("requirement", "")).strip()
@@ -108,6 +156,7 @@ def _manifest(command: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
     actual_hash = hashlib.sha256(requirement.encode("utf-8")).hexdigest()
     if not workflow_id or expected_hash != actual_hash:
         raise ValueError("Temporal first-step identity or requirement digest is invalid")
+    governance_scope = _verified_governance_scope(command)
     manifest_id = hashlib.sha256(workflow_id.encode("utf-8")).hexdigest()[:20]
     path = (
         _workspace_root()
@@ -137,6 +186,15 @@ def _manifest(command: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
             else {}
         ),
     }
+    if governance_scope is not None:
+        value.update(
+            {
+                **{
+                    field: str(getattr(governance_scope, field))
+                    for field in _GOVERNANCE_FIELDS
+                },
+            }
+        )
     _atomic_json(path, value)
     return path, value
 
@@ -294,10 +352,24 @@ async def execute_pipeline_step(command: dict[str, Any]) -> dict[str, Any]:
             type="PermanentPipelineError",
             non_retryable=True,
         ) from exc
-    runner_command = {
+    runner_command: dict[str, Any] = {
         **manifest,
         "step": step,
     }
+    governance_scope = _verified_governance_scope(command)
+    if governance_scope is not None and all(
+        str(manifest.get(field, "")) == str(getattr(governance_scope, field))
+        for field in _GOVERNANCE_FIELDS
+    ):
+        runner_command.update(
+            {
+                **{
+                    field: str(getattr(governance_scope, field))
+                    for field in _GOVERNANCE_FIELDS
+                },
+                "governance_scope_token": str(command["governance_scope_token"]),
+            }
+        )
     payload = await _run_child(
         runner_command,
         timeout_seconds=max(1.0, float(command.get("local_timeout_seconds", 600))),

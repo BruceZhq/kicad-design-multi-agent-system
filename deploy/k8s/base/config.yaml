@@ -11,6 +11,7 @@ data:
   POSTGRES_HOST: postgres-rw.ratsnest-data.svc.cluster.local
   POSTGRES_PORT: "5432"
   POSTGRES_DB: agent_service
+  RUN_TIMEOUT_SECONDS: "36000"
   RUN_REGISTRY_BACKEND: redis
   REDIS_KEY_PREFIX: ratsnest:cell-01
   RATSNESTPRO_LLM_STREAM_ENABLED: "true"
@@ -22,6 +23,8 @@ data:
   TEMPORAL_NAMESPACE: ratsnest
   RATSNESTPRO_TEMPORAL_TASK_QUEUE: ratsnest-hardware-cell-01
   RATSNESTPRO_TEMPORAL_WORKER_CONCURRENCY: "1"
+  RATSNESTPRO_TEMPORAL_WORKFLOW_TIMEOUT_SECONDS: "36000"
+  RATSNESTPRO_AHE_MAX_WALL_CLOCK_MINUTES: "600"
   RATSNESTPRO_WORKSPACE_ROOT: /data/ratsnestpro
   # Set this to the in-cluster Agentic RAG Service URL to enable it. Keep the
   # bearer token only in ratsnest-runtime-secrets.

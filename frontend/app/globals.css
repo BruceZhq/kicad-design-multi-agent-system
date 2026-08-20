@@ -220,6 +220,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .roster-row em { color: #a1a3ad; font-size: 10px; font-style: normal; white-space: nowrap; }
 .roster-row em.live { color: var(--success); }
 .roster-row em.issue { color: var(--danger); }
+.roster-row em.attention { color: var(--warning); }
 .sidebar-controls { display: grid; gap: 8px; margin-top: auto; padding: 18px 5px 0; border-top: 1px solid var(--line); }
 .new-conversation { min-height: 41px; margin-bottom: 5px; border: 1px solid #d4d4d8; border-radius: 11px; background: linear-gradient(145deg,#fafafa,#f1f1f2); color: var(--brand); font-weight: 680; box-shadow: inset 1px 1px 0 #fff, 0 8px 18px rgba(0,0,0,0.08); }
 .new-conversation:hover { transform: translateY(-1px); box-shadow: inset 1px 1px 0 #fff,0 11px 22px rgba(0,0,0,0.13); }
@@ -325,6 +326,23 @@ pre { max-height: 360px; margin: 0; padding: 11px; overflow: auto; border-top: 1
 .human-input-card > footer span { color: #71717a; font-size: 10px; }
 .human-input-card > footer button { min-height: 38px; padding: 0 15px; border: 0; border-radius: 10px; background: #18181b; color: #fff; font-size: 11px; font-weight: 700; }
 .human-input-card button:disabled, .human-input-card textarea:disabled { cursor: not-allowed; opacity: 0.55; }
+.profile-migration-notice { display: grid; gap: 5px; width: min(100%,900px); margin: 0 auto 16px; padding: 13px 16px; border: 1px solid #d4d4d8; border-left: 3px solid var(--warning); border-radius: 12px; background: #fafafa; }
+.profile-migration-notice strong { color: #3f3f46; font-size: 12px; }
+.profile-migration-notice span { color: #71717a; font-size: 10px; }
+.profile-migration-notice small { color: #8b8d9a; font-size: 9px; line-height: 1.5; }
+.run-runtime-card { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 12px 18px; width: min(100%,900px); margin: 0 auto 20px; padding: 16px 18px; border: 1px solid #d4d4d8; border-radius: 14px; background: #fafafa; box-shadow: 0 10px 25px rgba(0,0,0,0.05); }
+.run-runtime-card > header { display: flex; grid-column: 1 / -1; align-items: center; justify-content: space-between; gap: 12px; }
+.run-runtime-card > header span { display: flex; align-items: center; gap: 8px; color: #27272a; font-size: 12px; font-weight: 750; }
+.run-runtime-card > header i { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 4px rgba(34,197,94,0.12); }
+.run-runtime-card.recoverable > header i { background: #f59e0b; box-shadow: 0 0 0 4px rgba(245,158,11,0.13); }
+.run-runtime-card.stale > header i { background: #a1a1aa; box-shadow: 0 0 0 4px rgba(161,161,170,0.12); }
+.run-runtime-card > header small, .run-runtime-card > div span { color: #71717a; font-size: 10px; }
+.run-runtime-card > div { display: grid; gap: 5px; min-width: 0; }
+.run-runtime-card > div strong { overflow: hidden; color: #3f3f46; font: 650 11px ui-monospace,monospace; text-overflow: ellipsis; white-space: nowrap; }
+.run-runtime-card > div p { margin: 2px 0 0; color: #71717a; font-size: 10px; line-height: 1.5; }
+.run-runtime-card > button { align-self: center; min-height: 38px; padding: 0 15px; border: 0; border-radius: 10px; background: #18181b; color: #fff; cursor: pointer; font-size: 11px; font-weight: 750; }
+.run-runtime-card > button:disabled { cursor: not-allowed; opacity: 0.55; }
+.run-runtime-card > em { align-self: center; color: #71717a; font-size: 10px; font-style: normal; }
 
 .json-details { margin-top: 9px; border: 0; background: transparent; }
 .json-details > summary {
@@ -422,6 +440,8 @@ pre { max-height: 360px; margin: 0; padding: 11px; overflow: auto; border-top: 1
 .activity-panel span { display: grid; min-width: 0; gap: 3px; }
 .activity-panel strong { overflow: hidden; color: #6b6d79; font: 10px ui-monospace,monospace; text-overflow: ellipsis; white-space: nowrap; }
 .activity-panel small { color: #a2a4ae; font-size: 9px; }
+.activity-panel .activity-detail { overflow: hidden; max-width: 220px; color: #747681; text-overflow: ellipsis; white-space: nowrap; }
+.activity-panel > p.activity-error { color: var(--danger); }
 .audit-note { margin: 24px 4px 0; color: #a2a4ae; font-size: 9px; line-height: 1.6; }
 
 /* Interaction motifs adapted from uiverse-io/galaxy (MIT): layered controls,

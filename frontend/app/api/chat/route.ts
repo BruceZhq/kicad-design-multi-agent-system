@@ -8,6 +8,7 @@ import {
   readObject,
   runSubmission,
 } from "@/lib/backend";
+import { profileForkRequestBody } from "@/lib/request-intent";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -20,6 +21,8 @@ interface TeamMember {
 
 interface StartedRun {
   runId: string;
+  threadId?: string;
+  forkedFromRunId?: string | null;
   state: string;
   createdAt?: string;
   errorCode?: string | null;
@@ -83,6 +86,7 @@ export async function POST(request: Request): Promise<Response> {
   const organizationId = input.organization_id;
   const projectId = input.project_id;
   const baseRunId = input.base_run_id;
+  const forkSourceRunId = input.fork_source_run_id;
   const threadId = input.thread_id;
   const idempotencyKey = input.request_id;
   const lastEventId = eventCursor(input.last_event_id ?? 0);
@@ -96,6 +100,12 @@ export async function POST(request: Request): Promise<Response> {
   }
   if (baseRunId !== undefined && baseRunId !== null && !isUuid(baseRunId)) {
     return jsonError(request, "base_run_id must be a UUID when provided.");
+  }
+  if (forkSourceRunId !== undefined && forkSourceRunId !== null && !isUuid(forkSourceRunId)) {
+    return jsonError(request, "fork_source_run_id must be a UUID when provided.");
+  }
+  if (baseRunId && forkSourceRunId) {
+    return jsonError(request, "base_run_id and fork_source_run_id are mutually exclusive.");
   }
   if (!isSafeId(threadId)) return jsonError(request, "thread_id is invalid.");
   if (typeof idempotencyKey !== "string" || !/^[A-Za-z0-9._:-]{8,200}$/.test(idempotencyKey)) {
@@ -121,13 +131,24 @@ export async function POST(request: Request): Promise<Response> {
 
   try {
     const revisionRunId = typeof baseRunId === "string" ? baseRunId : null;
-    const submission = runSubmission(revisionRunId, projectId, message, {
-      message,
-      model: typeof model === "string" ? model : null,
-      threadId,
-      teamMembers: members,
-      capabilityProfile: selectedProfile,
-    });
+    const forkRunId = typeof forkSourceRunId === "string" ? forkSourceRunId : null;
+    const submission = forkRunId
+      ? {
+          path: `/api/v1/runs/${encodeURIComponent(forkRunId)}/forks`,
+          body: profileForkRequestBody(
+            message,
+            selectedProfile,
+            typeof model === "string" ? model : null,
+            members,
+          ),
+        }
+      : runSubmission(revisionRunId, projectId, message, {
+          message,
+          model: typeof model === "string" ? model : null,
+          threadId,
+          teamMembers: members,
+          capabilityProfile: selectedProfile,
+        });
     const started = await controlPlaneFetch(
       request,
       submission.path,
@@ -150,6 +171,14 @@ export async function POST(request: Request): Promise<Response> {
         "CONTROL_PLANE_INVALID_RESPONSE",
         502,
         "The control plane returned an invalid run identifier.",
+      );
+    }
+    if (forkRunId && (run.forkedFromRunId !== forkRunId || !isSafeId(run.threadId))) {
+      return problemResponse(
+        request,
+        "CONTROL_PLANE_INVALID_RESPONSE",
+        502,
+        "The control plane returned an invalid fork lineage.",
       );
     }
     if (run.state === "FAILED" && run.errorCode === "RUNTIME_START_FAILED") {
@@ -184,6 +213,10 @@ export async function POST(request: Request): Promise<Response> {
       "X-Accel-Buffering": "no",
       "X-Run-ID": run.runId,
     });
+    if (typeof run.threadId === "string" && isSafeId(run.threadId)) headers.set("X-Thread-ID", run.threadId);
+    if (typeof run.forkedFromRunId === "string" && isUuid(run.forkedFromRunId)) {
+      headers.set("X-Forked-From-Run-ID", run.forkedFromRunId);
+    }
     const requestId = events.headers.get("x-request-id") ?? started.headers.get("x-request-id");
     if (requestId) headers.set("X-Request-ID", requestId);
     return new Response(events.body, { status: 200, headers });

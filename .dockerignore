@@ -17,7 +17,7 @@ venv
 .t*
 .npm-cache
 data/**
-!src/RatsNestPro-main/RatsNestPro-main/src/ratsnestpro/data/**
+!src/ratsnestpro/data/**
 deploy/evidence
 backend/bin
 backend/target

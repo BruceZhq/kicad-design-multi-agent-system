@@ -1,0 +1,793 @@
+{
+  "schema_version": "ratsnestpro.kernel-flatten-audit.v1",
+  "snapshot": "after",
+  "root_layout": [
+    "agents",
+    "core",
+    "evolution",
+    "memory",
+    "ratsnestpro",
+    "run_service.py",
+    "schema",
+    "service"
+  ],
+  "path_checks": {
+    "nested_source_exists": false,
+    "flat_package_exists": true,
+    "old_reference_count": 0,
+    "old_references": []
+  },
+  "source": {
+    "module_count": 52,
+    "modules": [
+      {
+        "name": "ratsnestpro",
+        "path": "src/ratsnestpro/__init__.py",
+        "sha256": "4f27d7a4552549ae4c339590da0cd32ea7f3feb30175808a513f368084e2f8d4"
+      },
+      {
+        "name": "ratsnestpro.agents",
+        "path": "src/ratsnestpro/agents/__init__.py",
+        "sha256": "f4c3345672e84c5f80c89167429eb1715b5e07cbf19ee1586be2c2e98f421af7"
+      },
+      {
+        "name": "ratsnestpro.agents.llm",
+        "path": "src/ratsnestpro/agents/llm.py",
+        "sha256": "f1b7bfd13750dff110d8b3e05a2acd362096cccac3a9f1b5aba01cc192b11847"
+      },
+      {
+        "name": "ratsnestpro.agents.reviewer",
+        "path": "src/ratsnestpro/agents/reviewer.py",
+        "sha256": "fadad3ca9f2347f0de0d916d577d1ac858c8ab641307584320dada52648a489e"
+      },
+      {
+        "name": "ratsnestpro.config",
+        "path": "src/ratsnestpro/config.py",
+        "sha256": "594711a5757152ff5a46deee18eae23dcde2c0320b4c8e321b08f0f1ef332449"
+      },
+      {
+        "name": "ratsnestpro.domain",
+        "path": "src/ratsnestpro/domain/__init__.py",
+        "sha256": "c56d105feaf4edc6031472993b76dd875f81ee70385db7f99838c627030a5c9e"
+      },
+      {
+        "name": "ratsnestpro.domain.contracts",
+        "path": "src/ratsnestpro/domain/contracts.py",
+        "sha256": "bbf3c68605528cf4dd871f50254bdcab701ed648811f2ad42abb96dda4f87a71"
+      },
+      {
+        "name": "ratsnestpro.eda",
+        "path": "src/ratsnestpro/eda/__init__.py",
+        "sha256": "e2406509f1a4241a81bbfc081b5edec662477e35c9d870ca8916d872a8e76701"
+      },
+      {
+        "name": "ratsnestpro.eda._footprint_repair_worker",
+        "path": "src/ratsnestpro/eda/_footprint_repair_worker.py",
+        "sha256": "23cbe24ac80702c2467a7fa2fe30736b1e768c98bfc73372fee98ed96f369e65"
+      },
+      {
+        "name": "ratsnestpro.eda._manufacture_repair_worker",
+        "path": "src/ratsnestpro/eda/_manufacture_repair_worker.py",
+        "sha256": "862ac2d78c5878bfa1a384e04f4f7bdb6f6a30e8d4bad535394b25a263b35aa0"
+      },
+      {
+        "name": "ratsnestpro.eda._plane_stitch_worker",
+        "path": "src/ratsnestpro/eda/_plane_stitch_worker.py",
+        "sha256": "9355aab10e4d91b28f74cdb85acf32da07293a5d3a58090541ef32778c382d26"
+      },
+      {
+        "name": "ratsnestpro.eda._route_worker",
+        "path": "src/ratsnestpro/eda/_route_worker.py",
+        "sha256": "81f1f328d9a2435ea22ea1078dc3425216e90828461088fefd905098ffc58211"
+      },
+      {
+        "name": "ratsnestpro.eda.adapter",
+        "path": "src/ratsnestpro/eda/adapter.py",
+        "sha256": "b27d572c046f5fc73a1b468b214fef50e6758472d392e0975ad64cc0e5f291db"
+      },
+      {
+        "name": "ratsnestpro.eda.footprints",
+        "path": "src/ratsnestpro/eda/footprints.py",
+        "sha256": "616d6cb55f142b671e24a1415b616b8169547c1cf1935b7fbebe42d2163256ff"
+      },
+      {
+        "name": "ratsnestpro.eda.grounding",
+        "path": "src/ratsnestpro/eda/grounding.py",
+        "sha256": "3fe9b5b351c50a1c5dd71e424120feefd1198e3e68355d0df649a67ef111ab54"
+      },
+      {
+        "name": "ratsnestpro.eda.library_roots",
+        "path": "src/ratsnestpro/eda/library_roots.py",
+        "sha256": "ca812f28a7ca1ed1e11603040b7383a2dcd108d5bdb280edd62b38eefab9bb39"
+      },
+      {
+        "name": "ratsnestpro.eda.local_library",
+        "path": "src/ratsnestpro/eda/local_library.py",
+        "sha256": "323ab561ff366007e160a6d27eb26e7fe730e043e70dbdf8955bd3092d071722"
+      },
+      {
+        "name": "ratsnestpro.eda.materialize",
+        "path": "src/ratsnestpro/eda/materialize.py",
+        "sha256": "9041601fb3259c4440f50c8921a870ff4c34f75da66545d1b541da725811a58d"
+      },
+      {
+        "name": "ratsnestpro.eda.routing",
+        "path": "src/ratsnestpro/eda/routing.py",
+        "sha256": "faba61851adc25ed3881f11a8dd8376aba87c377c6dbe4e6124cdd6c1f9877ec"
+      },
+      {
+        "name": "ratsnestpro.eda.symbols",
+        "path": "src/ratsnestpro/eda/symbols.py",
+        "sha256": "1da645879b81fe3817793cb6d88a9b9af53a80a29be52f30db0622409c6ee0f7"
+      },
+      {
+        "name": "ratsnestpro.eda.vendor",
+        "path": "src/ratsnestpro/eda/vendor/__init__.py",
+        "sha256": "9791fd6f033e3b7a7bd95479d26dcd071e894855ecc1b1f7d71a3fc07eb1a347"
+      },
+      {
+        "name": "ratsnestpro.eda.vendor.connectivity",
+        "path": "src/ratsnestpro/eda/vendor/connectivity.py",
+        "sha256": "b20a45f3f0f95d411cf9f8d6acf024810ef6733e4571fa8963ea5e2edef0c410"
+      },
+      {
+        "name": "ratsnestpro.eda.vendor.footprint",
+        "path": "src/ratsnestpro/eda/vendor/footprint.py",
+        "sha256": "b1d598f6540154e3924057df28e5f0dc08fed4ba9a52cacefe66b730ff2d0727"
+      },
+      {
+        "name": "ratsnestpro.eda.vendor.fsutil",
+        "path": "src/ratsnestpro/eda/vendor/fsutil.py",
+        "sha256": "8becc29e69ad0e673403f712ce71a76a816149d386445f4046f71d5f88b7ff57"
+      },
+      {
+        "name": "ratsnestpro.eda.vendor.jlcpcb",
+        "path": "src/ratsnestpro/eda/vendor/jlcpcb.py",
+        "sha256": "26647e9b1f7e7fdcdb963e9925d4a794ac01921a3281c41f002492d22eeea5ff"
+      },
+      {
+        "name": "ratsnestpro.eda.vendor.kicad_cli",
+        "path": "src/ratsnestpro/eda/vendor/kicad_cli.py",
+        "sha256": "dca5ef4e493a8c47bb46a4cd2692e6bdba3a03f7819c1b85dbb7437ac71027c4"
+      },
+      {
+        "name": "ratsnestpro.eda.vendor.kicad_paths",
+        "path": "src/ratsnestpro/eda/vendor/kicad_paths.py",
+        "sha256": "5e5a89fd33164368fef18066bb5b9676ca3cf1cc09a2cf3e5ef6ec67771ed637"
+      },
+      {
+        "name": "ratsnestpro.eda.vendor.library",
+        "path": "src/ratsnestpro/eda/vendor/library.py",
+        "sha256": "c5d80ec029fe0f70161f144c0f983dc03f20821dc68e5734e5884dea8c2443fb"
+      },
+      {
+        "name": "ratsnestpro.eda.vendor.pcb",
+        "path": "src/ratsnestpro/eda/vendor/pcb.py",
+        "sha256": "47c0048fafb499d7588e4f1e9881387af181f681fcfec56309d661dc796bb52e"
+      },
+      {
+        "name": "ratsnestpro.eda.vendor.review",
+        "path": "src/ratsnestpro/eda/vendor/review.py",
+        "sha256": "fdf92d7379cfcdd5105b86a78d9184761b8865fbfa60acb172ca8d873353882c"
+      },
+      {
+        "name": "ratsnestpro.eda.vendor.schematic",
+        "path": "src/ratsnestpro/eda/vendor/schematic.py",
+        "sha256": "cbc74dce4b90a87390bfe4bdf540b88a20f9f4280b522216fe34126835e61ebe"
+      },
+      {
+        "name": "ratsnestpro.eda.vendor.sexpr",
+        "path": "src/ratsnestpro/eda/vendor/sexpr.py",
+        "sha256": "51f8b722177ea069989ea5440d7b49db7fade280ca8e59a1efebd0c2d98ef9e5"
+      },
+      {
+        "name": "ratsnestpro.eda.vendor.symbol_lib",
+        "path": "src/ratsnestpro/eda/vendor/symbol_lib.py",
+        "sha256": "efa418b3362c836b79b849944e1635008fb2fe270b40fcd82fdfc8cf01e53e44"
+      },
+      {
+        "name": "ratsnestpro.knowledge",
+        "path": "src/ratsnestpro/knowledge/__init__.py",
+        "sha256": "52055b1545a1a9baee381e9f8658f90c230e17e2ccb6501e1bbb9241710793af"
+      },
+      {
+        "name": "ratsnestpro.knowledge.store",
+        "path": "src/ratsnestpro/knowledge/store.py",
+        "sha256": "ab9f3b5df33ec34805ecae4003d997643d0658ac881dc77c9a0fb5f9fc4dbf58"
+      },
+      {
+        "name": "ratsnestpro.orchestration",
+        "path": "src/ratsnestpro/orchestration/__init__.py",
+        "sha256": "6f69af00c7d6d80d9ffe6a11f287f5523dd666f5ab79aeeb8686bfd15dcd0652"
+      },
+      {
+        "name": "ratsnestpro.orchestration.ahe",
+        "path": "src/ratsnestpro/orchestration/ahe.py",
+        "sha256": "f75778d9c3468a5e6279b4b74562310b14bb763feb06a304509da4c0413088a8"
+      },
+      {
+        "name": "ratsnestpro.orchestration.component_resolution",
+        "path": "src/ratsnestpro/orchestration/component_resolution.py",
+        "sha256": "28d713b66c874c48e592ed086f3dde098e90037a85cf06ebbdc13124196f1eca"
+      },
+      {
+        "name": "ratsnestpro.orchestration.connection_synthesis",
+        "path": "src/ratsnestpro/orchestration/connection_synthesis.py",
+        "sha256": "b86960f18d6ddc6813e1d82eb3153e757fe3bb880a60b2fc7f35ae7179d75e71"
+      },
+      {
+        "name": "ratsnestpro.orchestration.footprint_search",
+        "path": "src/ratsnestpro/orchestration/footprint_search.py",
+        "sha256": "16c6b348c990ffc54dafcc7a76b62272f9107de67eb8a640b463232cbf9517c4"
+      },
+      {
+        "name": "ratsnestpro.orchestration.pipeline",
+        "path": "src/ratsnestpro/orchestration/pipeline.py",
+        "sha256": "9899ba5ce40da9242244bd1b9292dcab92be386df9f9e487063ff14db32ca5d3"
+      },
+      {
+        "name": "ratsnestpro.orchestration.pipeline_contracts",
+        "path": "src/ratsnestpro/orchestration/pipeline_contracts.py",
+        "sha256": "86a93725c76821579c6ab7f4683104830d7d242b814ce955fa5b4e4173c8527d"
+      },
+      {
+        "name": "ratsnestpro.orchestration.placement_constraints",
+        "path": "src/ratsnestpro/orchestration/placement_constraints.py",
+        "sha256": "b4136c0709885c05b617210ee8849dadf8f2d0bfe77ea8e6bd69f725f2e59efa"
+      },
+      {
+        "name": "ratsnestpro.orchestration.requirement_identity",
+        "path": "src/ratsnestpro/orchestration/requirement_identity.py",
+        "sha256": "a809c14ed5b9c1bd705c5d0901d41f5dbc421451d8402021dc717fc0b384b3bc"
+      },
+      {
+        "name": "ratsnestpro.orchestration.review_project",
+        "path": "src/ratsnestpro/orchestration/review_project.py",
+        "sha256": "c75f6a6138b2ec61072d86d75cc34138a174e3174088efb89369a391a4340a58"
+      },
+      {
+        "name": "ratsnestpro.orchestration.selection_grounding",
+        "path": "src/ratsnestpro/orchestration/selection_grounding.py",
+        "sha256": "6b7dc4b8105d62db2c462f85e8ad69410d8bb31fdc41dc2dd3bd4be8bea01353"
+      },
+      {
+        "name": "ratsnestpro.parts",
+        "path": "src/ratsnestpro/parts/__init__.py",
+        "sha256": "f30291f1a42ea2d0032a21548d63b3c28bb76d66fbe7084de41d9a479676048c"
+      },
+      {
+        "name": "ratsnestpro.parts.selector",
+        "path": "src/ratsnestpro/parts/selector.py",
+        "sha256": "41ece958d9579f0088ffe537e0a8bea7e31192e77228accf44dccb899bdb90e5"
+      },
+      {
+        "name": "ratsnestpro.verification",
+        "path": "src/ratsnestpro/verification/__init__.py",
+        "sha256": "850818980ebd9b196928f8a09821f8cd1bcbfdeb5a4fb61b624bc270eea6d4c2"
+      },
+      {
+        "name": "ratsnestpro.verification.expectations",
+        "path": "src/ratsnestpro/verification/expectations.py",
+        "sha256": "eca8851a6a6aa56275e820bec03bab5504547309145861cd859fe12beb012158"
+      },
+      {
+        "name": "ratsnestpro.verification.rules",
+        "path": "src/ratsnestpro/verification/rules.py",
+        "sha256": "ec7580b526ef77660bfc269401f6d72e499ea2cb27c7baf485171043a18cd805"
+      },
+      {
+        "name": "ratsnestpro.verification.verify",
+        "path": "src/ratsnestpro/verification/verify.py",
+        "sha256": "14dea285b7dd9bc92d923685f41384140460f52a266940888a4e2f48ce945ad7"
+      }
+    ],
+    "resource_count": 17,
+    "resources": [
+      {
+        "path": "src/ratsnestpro/data/process_capability.json",
+        "size": 549,
+        "sha256": "7f2c066d35b6f879d36aee227e34f31b784a6370b4e5be3ecd3ff170d09c33ae"
+      },
+      {
+        "path": "src/ratsnestpro/knowledge/corpus/component_selection.md",
+        "size": 967,
+        "sha256": "787c66de8d015e7c91c0b52338e07c3b612f00302cc9b41046cbc98582524bcd"
+      },
+      {
+        "path": "src/ratsnestpro/knowledge/corpus/crystal.md",
+        "size": 607,
+        "sha256": "b0e86ba0fba78918358de57398d2bb679b068ea6c9ea831e08c91c3d2a34b459"
+      },
+      {
+        "path": "src/ratsnestpro/knowledge/corpus/decoupling.md",
+        "size": 741,
+        "sha256": "dae7c5c3dce7da85d7c9488673725c52dee153ad4c497594ad2c2f1e455ea04b"
+      },
+      {
+        "path": "src/ratsnestpro/knowledge/corpus/dfm_manufacturing.md",
+        "size": 967,
+        "sha256": "c17afebda7f12035aea48f23a4fa69671e54646d26dc58cdce5361d2dfae435d"
+      },
+      {
+        "path": "src/ratsnestpro/knowledge/corpus/emc_grounding.md",
+        "size": 809,
+        "sha256": "3961846afdcb3aad99e80b09d116541af03364510c76b2e2b5ada1d86e7d2a63"
+      },
+      {
+        "path": "src/ratsnestpro/knowledge/corpus/error_taxonomy.md",
+        "size": 1030,
+        "sha256": "c429a2a7fdd130f0cc1cfba5a5a447b144a622f7409e13038d51c461165648e1"
+      },
+      {
+        "path": "src/ratsnestpro/knowledge/corpus/impedance_stackup.md",
+        "size": 1049,
+        "sha256": "ea59121a8b2ae39a4965452839fc7bf6aff21f70057ec82d77ee578c0e693a0d"
+      },
+      {
+        "path": "src/ratsnestpro/knowledge/corpus/ldo.md",
+        "size": 771,
+        "sha256": "22cbe794176780d18c0f5a87a789c0cff18f920525cd9df0ded6a8a4201e1d7c"
+      },
+      {
+        "path": "src/ratsnestpro/knowledge/corpus/net_design.md",
+        "size": 1139,
+        "sha256": "20123b077e48d3085565bc4a02cd0e937d1610a5b0e1580ffdc5ca917c17dc18"
+      },
+      {
+        "path": "src/ratsnestpro/knowledge/corpus/placement_constraints.md",
+        "size": 829,
+        "sha256": "1e37e9c296c757ad19352dc586c5a63fd2412258f692e3a956b5dbf0a8a8d647"
+      },
+      {
+        "path": "src/ratsnestpro/knowledge/corpus/placement_partitioning.md",
+        "size": 784,
+        "sha256": "ce4408c84551734a39a108e89da9baf384730868c6af4fbb004d5cf758547545"
+      },
+      {
+        "path": "src/ratsnestpro/knowledge/corpus/power_tree.md",
+        "size": 857,
+        "sha256": "66464feb35e5b7f60957eb9bbe98690cb84d0fd93e9079f04fbbb52edefd3037"
+      },
+      {
+        "path": "src/ratsnestpro/knowledge/corpus/reset.md",
+        "size": 501,
+        "sha256": "80271dd51e32ec622593829c155cbfd869c148b5df9162ce54c89424d6ed3905"
+      },
+      {
+        "path": "src/ratsnestpro/knowledge/corpus/schematic_readability.md",
+        "size": 869,
+        "sha256": "e038305b8a4878bca31184a3226c8508f8811529b8287cbfc864e628e80d3adc"
+      },
+      {
+        "path": "src/ratsnestpro/knowledge/corpus/trace_width_current.md",
+        "size": 908,
+        "sha256": "cd77b842318d37f3c15b3ba799f17750a49a740400806d4084fe426164838b48"
+      },
+      {
+        "path": "src/ratsnestpro/knowledge/corpus/vias_return_path.md",
+        "size": 820,
+        "sha256": "580d3025d8771719c172643d177a2db9b5bc3f697e65fe8209513143ef8e3e51"
+      }
+    ],
+    "package_data_tree_sha256": "e35df3689b6f03021ccfd42cd13f436bb8fc19177b5d986c1f18742b81a008f4"
+  },
+  "key_public_symbols": {
+    "ratsnestpro": [],
+    "ratsnestpro.agents": [
+      "DEFAULT_MODEL",
+      "EricAIClient",
+      "LLMClient",
+      "LlmError",
+      "LlmMode",
+      "ReviewResult",
+      "Reviewer",
+      "TriageItem",
+      "parse_mode"
+    ],
+    "ratsnestpro.domain": [
+      "AgentDecision",
+      "BoardOutline",
+      "BoardPlan",
+      "CircuitIR",
+      "ComponentSpec",
+      "DesignPlan",
+      "FamilyDecision",
+      "Finding",
+      "GateResult",
+      "GateStatus",
+      "NetSpec",
+      "PinRef",
+      "PlacementSpec",
+      "RepairAction",
+      "RequirementSpec",
+      "Severity",
+      "Stage",
+      "VerificationReport"
+    ],
+    "ratsnestpro.eda": [
+      "ErcResult",
+      "SchematicDoc",
+      "kicad_cli_available",
+      "run_erc"
+    ],
+    "ratsnestpro.knowledge": [
+      "Doc",
+      "EricAIEmbedder",
+      "EricAIReranker",
+      "KnowledgeBase",
+      "Retrieved",
+      "build_default_kb"
+    ],
+    "ratsnestpro.orchestration": [
+      "ProjectReview",
+      "review_project"
+    ],
+    "ratsnestpro.parts": [
+      "PartCandidate",
+      "PartSelector"
+    ],
+    "ratsnestpro.verification": [
+      "Expectations",
+      "verify_design"
+    ],
+    "agents.agents": [
+      "Agent",
+      "get_agent",
+      "get_all_agent_info",
+      "load_agent"
+    ],
+    "agents.ratsnestpro.tools": [
+      "ratsnest_generate_local_kicad_library",
+      "ratsnest_lookup_kicad_symbol",
+      "ratsnest_review_kicad_project",
+      "ratsnest_run_pcb_pipeline",
+      "ratsnest_run_pcb_pipeline_until",
+      "ratsnest_search_internal_knowledge",
+      "ratsnest_search_parts",
+      "ratsnest_validate_kicad_binding"
+    ],
+    "agents.ratsnestpro.temporal.contracts": [
+      "compact_pipeline_result",
+      "hardware_workflow_id",
+      "hardware_workflow_identity",
+      "llm_transcript_filename",
+      "requirement_digest",
+      "safe_name",
+      "verify_hardware_workflow_identity"
+    ]
+  },
+  "registries": {
+    "langgraph": {
+      "ratsnestpro-multi-agent": "./src/agents/ratsnestpro/ratsnestpro_agent.py:ratsnestpro_multi_agent"
+    },
+    "tool_functions": [
+      "ratsnest_generate_local_kicad_library",
+      "ratsnest_lookup_kicad_symbol",
+      "ratsnest_review_kicad_project",
+      "ratsnest_run_pcb_pipeline",
+      "ratsnest_run_pcb_pipeline_until",
+      "ratsnest_search_internal_knowledge",
+      "ratsnest_search_parts",
+      "ratsnest_validate_kicad_binding"
+    ],
+    "temporal_step_count": 17,
+    "temporal_steps": [
+      "requirements",
+      "topology",
+      "selection",
+      "schematic_connections",
+      "schematic_pinmap",
+      "schematic_layout",
+      "schematic_materialize",
+      "erc",
+      "layout_partition",
+      "layout_critical",
+      "layout_general",
+      "layout_write",
+      "route_plan",
+      "route_planes",
+      "route_signals",
+      "route_fab",
+      "manufacture"
+    ],
+    "role_ids": [
+      "sub-agent-ratsnest-architect",
+      "sub-agent-ratsnest-hardware-engineer",
+      "sub-agent-ratsnest-parts-specialist",
+      "sub-agent-ratsnest-reviewer"
+    ]
+  },
+  "env_keys": [
+    "ANTHROPIC_API_KEY",
+    "AUTH_SECRET",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_KB_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AZURE_OPENAI_API_KEY",
+    "COMPATIBLE_API_KEY",
+    "COMPATIBLE_BASE_URL",
+    "COMPATIBLE_MODEL",
+    "CONTROL_PLANE_ACCESS_TOKEN",
+    "CONTROL_PLANE_URL",
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_BASE_URL",
+    "DEFAULT_MODEL",
+    "GOOGLE_API_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GROQ_API_KEY",
+    "HOST",
+    "KAFKA_AUDIT_BATCH_SIZE",
+    "KAFKA_AUDIT_CONSUMER_GROUP",
+    "KAFKA_AUDIT_ENABLED",
+    "KAFKA_AUDIT_POLL_MS",
+    "KAFKA_AUDIT_TOPIC",
+    "KAFKA_BOOTSTRAP_SERVERS",
+    "KAFKA_CLIENT_ID",
+    "KAFKA_SASL_MECHANISM",
+    "KAFKA_SASL_PASSWORD",
+    "KAFKA_SASL_USERNAME",
+    "KAFKA_SECURITY_PROTOCOL",
+    "MAX_CONCURRENT_RUNS",
+    "MAX_QUEUED_RUNS",
+    "MAX_REQUEST_BODY_BYTES",
+    "MODE",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "PORT",
+    "POSTGRES_DB",
+    "POSTGRES_HOST",
+    "POSTGRES_PASSWORD",
+    "POSTGRES_PORT",
+    "POSTGRES_USER",
+    "RATSNESTPRO_AGENT_CALL_TIMEOUT_SECONDS",
+    "RATSNESTPRO_AHE_ENABLED",
+    "RATSNESTPRO_AHE_MAX_LLM_TOKENS",
+    "RATSNESTPRO_AHE_MAX_REPAIRS",
+    "RATSNESTPRO_AHE_MAX_REPLANS",
+    "RATSNESTPRO_AHE_MAX_SAME_FAILURE_RETRIES",
+    "RATSNESTPRO_AHE_MAX_WALL_CLOCK_MINUTES",
+    "RATSNESTPRO_AHE_STAGNATION_LIMIT",
+    "RATSNESTPRO_CONNECTION_MAX_LLM_CALLS",
+    "RATSNESTPRO_CONNECTION_MAX_TOTAL_LLM_CALLS",
+    "RATSNESTPRO_DESIGN_REPAIR_MAX_REPAIRS",
+    "RATSNESTPRO_DESIGN_REPAIR_MAX_TOTAL_REPAIRS",
+    "RATSNESTPRO_DESIGN_REPAIR_STAGNATION_LIMIT",
+    "RATSNESTPRO_LLM_STREAM_ENABLED",
+    "RATSNESTPRO_LLM_STREAM_MAXLEN",
+    "RATSNESTPRO_LLM_STREAM_SOCKET_TIMEOUT_SECONDS",
+    "RATSNESTPRO_LLM_STREAM_TTL_SECONDS",
+    "RATSNESTPRO_MAX_ROUTE_INVOCATIONS",
+    "RATSNESTPRO_REQUIRE_FREEROUTING",
+    "RATSNESTPRO_ROUTER_TIMEOUT_SECONDS",
+    "RATSNESTPRO_TEMPORAL_ENABLED",
+    "RATSNESTPRO_TEMPORAL_GRACEFUL_SHUTDOWN_SECONDS",
+    "RATSNESTPRO_TEMPORAL_HEARTBEAT_SECONDS",
+    "RATSNESTPRO_TEMPORAL_POLL_SECONDS",
+    "RATSNESTPRO_TEMPORAL_RETRY_ATTEMPTS",
+    "RATSNESTPRO_TEMPORAL_ROUTING_TIMEOUT_SECONDS",
+    "RATSNESTPRO_TEMPORAL_STEP_TIMEOUT_SECONDS",
+    "RATSNESTPRO_TEMPORAL_TASK_QUEUE",
+    "RATSNESTPRO_TEMPORAL_WORKER_CONCURRENCY",
+    "RATSNESTPRO_TEMPORAL_WORKFLOW_TIMEOUT_SECONDS",
+    "RATSNESTPRO_TOOL_CALL_TIMEOUT_SECONDS",
+    "RATSNEST_AGENT_RUNTIME_CANARY_GRPC_TARGET",
+    "RATSNEST_AGENT_RUNTIME_CANARY_URL",
+    "RATSNEST_AGENT_RUNTIME_GRPC_TARGET",
+    "RATSNEST_AGENT_RUNTIME_URL",
+    "RATSNEST_ARTIFACT_BACKEND",
+    "RATSNEST_ARTIFACT_BUCKET",
+    "RATSNEST_ARTIFACT_DOWNLOAD_TTL",
+    "RATSNEST_ARTIFACT_ENDPOINT",
+    "RATSNEST_ARTIFACT_INTERNAL_ENDPOINT",
+    "RATSNEST_ARTIFACT_LOCAL_ROOT",
+    "RATSNEST_ARTIFACT_PATH_STYLE",
+    "RATSNEST_ARTIFACT_PUBLIC_ENDPOINT",
+    "RATSNEST_ARTIFACT_REGION",
+    "RATSNEST_ARTIFACT_SSE",
+    "RATSNEST_DB_PASSWORD",
+    "RATSNEST_DB_URL",
+    "RATSNEST_DB_USER",
+    "RATSNEST_EVOLUTION_ADVERSARIAL_SUITE_DIGEST",
+    "RATSNEST_EVOLUTION_CONTROL_PLANE_URL",
+    "RATSNEST_EVOLUTION_FINGERPRINT_SECRET",
+    "RATSNEST_EVOLUTION_HOLDOUT_SUITE_DIGEST",
+    "RATSNEST_EVOLUTION_OPTIMIZATION_SUITE_DIGEST",
+    "RATSNEST_EVOLUTION_REQUIRED_EXECUTOR_MODE",
+    "RATSNEST_EVOLUTION_TEMPORAL_TASK_QUEUE",
+    "RATSNEST_FLYWAY_PASSWORD",
+    "RATSNEST_FLYWAY_URL",
+    "RATSNEST_FLYWAY_USER",
+    "RATSNEST_HARNESS_CHANNEL",
+    "RATSNEST_HARNESS_MANIFEST_DIGEST",
+    "RATSNEST_HARNESS_ROLLOUT_ID",
+    "RATSNEST_HARNESS_ROUTING_SECRET",
+    "RATSNEST_HARNESS_VERSION_ID",
+    "RATSNEST_INTERNAL_SIGNING_SECRET",
+    "RATSNEST_KAFKA_BOOTSTRAP_SERVERS",
+    "RATSNEST_KAFKA_SASL_JAAS_CONFIG",
+    "RATSNEST_KAFKA_SASL_MECHANISM",
+    "RATSNEST_KAFKA_SECURITY_PROTOCOL",
+    "RATSNEST_KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM",
+    "RATSNEST_KEYCLOAK_ADMIN",
+    "RATSNEST_KEYCLOAK_ADMIN_PASSWORD",
+    "RATSNEST_KEYCLOAK_IMAGE",
+    "RATSNEST_KEYCLOAK_PORT",
+    "RATSNEST_KNOWLEDGE_GATEWAY_TIMEOUT_SECONDS",
+    "RATSNEST_KNOWLEDGE_GATEWAY_TOKEN",
+    "RATSNEST_KNOWLEDGE_GATEWAY_URL",
+    "RATSNEST_MINIO_API_PORT",
+    "RATSNEST_MINIO_CONSOLE_PORT",
+    "RATSNEST_MINIO_IMAGE",
+    "RATSNEST_MINIO_ROOT_PASSWORD",
+    "RATSNEST_MINIO_ROOT_USER",
+    "RATSNEST_OAUTH2_PROXY_IMAGE",
+    "RATSNEST_OAUTH2_PROXY_PORT",
+    "RATSNEST_OIDC_ACCOUNT_URL",
+    "RATSNEST_OIDC_AUDIENCE",
+    "RATSNEST_OIDC_COOKIE_SECRET",
+    "RATSNEST_OIDC_ISSUER_URI",
+    "RATSNEST_OIDC_JWK_SET_URI",
+    "RATSNEST_OIDC_WEB_CLIENT_ID",
+    "RATSNEST_OIDC_WEB_CLIENT_SECRET",
+    "RATSNEST_RUN_OUTBOX_ENABLED",
+    "RATSNEST_RUN_OUTBOX_TOPIC",
+    "REDIS_AUDIT_OUTBOX_MAXLEN",
+    "REDIS_HOST_PORT",
+    "REDIS_KEY_PREFIX",
+    "REDIS_PASSWORD",
+    "REDIS_RUN_LEASE_SECONDS",
+    "REDIS_STREAM_BLOCK_MS",
+    "REDIS_URL",
+    "REQUIRE_AUTH_IN_PRODUCTION",
+    "RUN_REGISTRY_BACKEND",
+    "RUN_RETENTION_SECONDS",
+    "RUN_TIMEOUT_SECONDS",
+    "SSE_EVENT_BUFFER_SIZE",
+    "SSE_HEARTBEAT_SECONDS",
+    "SSE_MAX_EVENT_BYTES",
+    "TEMPORAL_ADDRESS",
+    "TEMPORAL_API_KEY",
+    "TEMPORAL_NAMESPACE",
+    "TEMPORAL_TLS",
+    "USE_AWS_BEDROCK",
+    "USE_FAKE_MODEL",
+    "WEB_TRUST_OIDC_PROXY_ACCESS_TOKEN"
+  ],
+  "runtime_references": [
+    {
+      "file": ".dockerignore",
+      "line": 20,
+      "text": "!src/ratsnestpro/data/**"
+    },
+    {
+      "file": ".env.example",
+      "line": 106,
+      "text": "# src/ratsnestpro/data/process_capability.json."
+    },
+    {
+      "file": ".gitignore",
+      "line": 203,
+      "text": "src/ratsnestpro/knowledge/.index/"
+    },
+    {
+      "file": "compose.yaml",
+      "line": 357,
+      "text": "- path: src/ratsnestpro/"
+    },
+    {
+      "file": "compose.yaml",
+      "line": 359,
+      "text": "target: /app/ratsnestpro/"
+    },
+    {
+      "file": "docker/Dockerfile.service",
+      "line": 37,
+      "text": "RUN pip install --no-cache-dir uv==0.11.29"
+    },
+    {
+      "file": "docker/Dockerfile.service",
+      "line": 46,
+      "text": "COPY src/ratsnestpro/ ./ratsnestpro/"
+    },
+    {
+      "file": "docs/PROJECT_CODE_GUIDE_ZH.md",
+      "line": 25,
+      "text": "- `src/ratsnestpro/`：确定性 EDA 内核。"
+    },
+    {
+      "file": "docs/PROJECT_CODE_GUIDE_ZH.md",
+      "line": 449,
+      "text": "`src/ratsnestpro/`"
+    },
+    {
+      "file": "docs/RATSNESTPRO_COMPLETE_PROJECT_TECHNICAL_REPORT_ZH.md",
+      "line": 1127,
+      "text": "| AHE contracts/loop | `src/ratsnestpro/orchestration/ahe.py`和`pipeline.py` |"
+    },
+    {
+      "file": "docs/RATSNESTPRO_COMPLETE_PROJECT_TECHNICAL_REPORT_ZH.md",
+      "line": 1974,
+      "text": "| 4：Optimizer/Sandbox | 让模型能提出低风险补丁，但不能获得发布权 | `optimizer.py` 严格结构化输出；`sandbox.py` detached worktree、路径/哈希/大小/命令门禁和 candidate `PYTHONPATH` 隔离；Java 签名启动 Python Temporal Trial，Python 回传带 HMAC attestation 的权威报告，Java 只推进到 `awaiting_approval` 或 `rejected`；Compose 与 K8s 均提供默认关闭、单并发的 `evolution_worker` | 代码闭环不会 merge/push/deploy；当前固定评测验证源码、沙箱和录制 Eval 逻辑，并不等同于在真实集群重放新的 LLM/KiCad/Freerouting 行为；生产 K8s Trial 尚未实跑 |"
+    },
+    {
+      "file": "docs/RATSNESTPRO_COMPLETE_PROJECT_TECHNICAL_REPORT_ZH.md",
+      "line": 2041,
+      "text": "Materializer 使用固定 argv 创建 detached Git worktree，不建分支。写入前再次检查 allowlist、sealed path、旧文件 hash、symlink/junction 和目标是否越出 worktree；所有文件先准备，再使用同目录临时文件、`fsync` 和 `os.replace` 原子落盘。模型不能提供评测命令；v1 只允许注册在代码中的 `python-compile` 和 `evolution-core`。命令使用 `shell=False`，stdin 关闭，设置 60/180 秒 timeout、32 KiB 输出上限、最小环境、禁用用户 site/pytest 自动插件，并把常规代理指向不可用本机地址。评测环境还把 `PYTHONPATH` 固定为 detached worktree 的 `src`，防止候选测试意外导入 Worker 镜像中的稳定版 `/app` 源码而产生“假通过”。任意失败即停止后续命令，finally 强制 `git worktree remove --force` 和目录清理；清理失败会把原本 passed 的结果改成 error。"
+    },
+    {
+      "file": "pyproject.toml",
+      "line": 79,
+      "text": "\"src/ratsnestpro/eda/vendor\","
+    },
+    {
+      "file": "pyproject.toml",
+      "line": 80,
+      "text": "\"src/ratsnestpro/eda/_route_worker.py\","
+    },
+    {
+      "file": "README.md",
+      "line": 221,
+      "text": "├── src/ratsnestpro/                  KiCad/EDA/17步确定性流水线"
+    },
+    {
+      "file": "scripts/build_harness_manifest.ps1",
+      "line": 77,
+      "text": "\"src/ratsnestpro/\","
+    },
+    {
+      "file": "scripts/check_infrastructure.ps1",
+      "line": 80,
+      "text": "\"src/ratsnestpro/parts/__init__.py\","
+    },
+    {
+      "file": "scripts/check_infrastructure.ps1",
+      "line": 81,
+      "text": "\"src/ratsnestpro/parts/selector.py\","
+    },
+    {
+      "file": "scripts/check_infrastructure.ps1",
+      "line": 82,
+      "text": "\"src/ratsnestpro/data/process_capability.json\","
+    },
+    {
+      "file": "scripts/check_live_models.py",
+      "line": 9,
+      "text": "Usage (run from the repo root; PYTHONPATH=src is required, same as src/run_service.py):"
+    },
+    {
+      "file": "scripts/check_live_models.py",
+      "line": 10,
+      "text": "PYTHONPATH=src uv run python scripts/check_live_models.py"
+    },
+    {
+      "file": "scripts/check_live_models.py",
+      "line": 11,
+      "text": "PYTHONPATH=src uv run python scripts/check_live_models.py --provider anthropic google"
+    },
+    {
+      "file": "scripts/check_live_models.py",
+      "line": 15,
+      "text": "PYTHONPATH=src uv run python scripts/check_live_models.py --anthropic-api-key-env MY_VAR"
+    },
+    {
+      "file": "scripts/cleanup_ratsnestpro.ps1",
+      "line": 44,
+      "text": "$edaKernel = Join-Path $root \"src\\ratsnestpro\""
+    }
+  ],
+  "cleanup_candidates": {
+    "cache_directories": [],
+    "cache_directory_count": 0,
+    "compiled_python_file_count": 0,
+    "empty_directories": []
+  },
+  "entrypoints": {
+    "service": "src/run_service.py -> service:app",
+    "langgraph": {
+      "ratsnestpro-multi-agent": "./src/agents/ratsnestpro/ratsnestpro_agent.py:ratsnestpro_multi_agent"
+    },
+    "temporal_worker": "agents.ratsnestpro.temporal.worker",
+    "evolution_worker": "evolution.temporal.worker"
+  }
+}

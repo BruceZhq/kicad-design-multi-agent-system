@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 from uuid import uuid4
@@ -24,11 +25,6 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import interrupt
 from pydantic import BaseModel, ConfigDict, Field
-from ratsnestpro.eda import footprints, grounding
-from ratsnestpro.eda.local_library import (
-    LocalDeviceLibrarySpec,
-    LocalSymbolLibrarySpec,
-)
 
 from agents.ratsnestpro.artifact_publisher import (
     artifact_workspace_root,
@@ -85,6 +81,16 @@ from agents.ratsnestpro.tools import (
 )
 from agents.ratsnestpro.web_tools import fetch_datasheet, web_search
 from core import get_model, get_model_for_plain_call, settings
+from ratsnestpro.eda import footprints, grounding
+from ratsnestpro.eda.local_library import (
+    LocalDeviceLibrarySpec,
+    LocalSymbolLibrarySpec,
+)
+from ratsnestpro.orchestration.pipeline_contracts import VerifiedPinAlias
+from service.governance_scope import (
+    TrustedGovernanceScope,
+    verify_governance_scope_token,
+)
 from service.llm_output import llm_output_record, stream_llm_output_record
 
 WorkflowMode = Literal[
@@ -152,6 +158,34 @@ _CORE_TEAM_ROLE_IDS = {
 }
 
 
+def _trusted_governance_scope(
+    state: RatsNestWorkflowState,
+    config: RunnableConfig,
+) -> TrustedGovernanceScope | None:
+    if settings.RATSNEST_INTERNAL_SIGNING_SECRET is None:
+        return None
+    token = str(config.get("configurable", {}).get("governance_scope_token", "")).strip()
+    if not token:
+        return None
+    try:
+        scope = verify_governance_scope_token(
+            token,
+            secret=settings.RATSNEST_INTERNAL_SIGNING_SECRET.get_secret_value(),
+        )
+    except ValueError:
+        return None
+    expected = {
+        "tenant_scope": scope.tenant_scope,
+        "project_scope": scope.project_scope,
+        "run_scope": scope.run_scope,
+        "harness_version_id": scope.harness_version_id,
+        "harness_manifest_digest": scope.harness_manifest_digest,
+    }
+    if any(str(state.get(key, "")) != value for key, value in expected.items()):
+        return None
+    return scope
+
+
 class RatsNestWorkflowState(MessagesState, total=False):
     request_id: str
     latest_request: str
@@ -162,6 +196,11 @@ class RatsNestWorkflowState(MessagesState, total=False):
     execution_scope: str
     workspace_run_name: str
     project_name: str
+    tenant_scope: str
+    project_scope: str
+    run_scope: str
+    harness_version_id: str
+    harness_manifest_digest: str
     architecture: dict[str, Any]
     parts: dict[str, Any]
     hardware: dict[str, Any]
@@ -200,6 +239,11 @@ class _RatsNestRoleState(TypedDict, total=False):
     execution_scope: str
     workspace_run_name: str
     project_name: str
+    tenant_scope: str
+    project_scope: str
+    run_scope: str
+    harness_version_id: str
+    harness_manifest_digest: str
     architecture: dict[str, Any]
     parts: dict[str, Any]
     hardware: dict[str, Any]
@@ -404,6 +448,7 @@ def _workflow_event(
     *,
     detail: str = "",
     attempt: int | None = None,
+    attributes: dict[str, Any] | None = None,
 ) -> None:
     """Emit a stable phase event without coupling the graph to one frontend."""
     try:
@@ -414,11 +459,14 @@ def _workflow_event(
         "kind": "workflow_event",
         "phase": phase,
         "status": status,
+        "occurred_at": datetime.now(UTC).isoformat(),
     }
     if detail:
         event["detail"] = detail
     if attempt is not None:
         event["attempt"] = attempt
+    if attributes:
+        event.update(attributes)
     writer(event)
 
 
@@ -847,6 +895,88 @@ def _symbol_definition_datasheet_query(symbol_query: str) -> str:
     )
 
 
+_CONTROL_PIN_ALIAS_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:BOOT\d*|NRST|NRESET|RESET|SWDIO|SWCLK|"
+    r"JTMS|JTCK|TMS|TCK|GPIO0|IO0|ENABLE|EN)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def _verified_pin_aliases_from_evidence(
+    candidates: list[dict[str, Any]],
+    datasheet: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Extract only aliases explicitly co-located with a real symbol pin.
+
+    This is deliberately deterministic. A pin name must exist in the grounded
+    KiCad candidate and occur on the same bounded datasheet line as the
+    alternate function. Every record carries the source URL and page; prose
+    from the Architect model is never parsed as electrical evidence.
+    """
+
+    pages = datasheet.get("matched_pages", [])
+    if not isinstance(pages, list):
+        return []
+    merged: dict[tuple[str, str, str], dict[str, set[str]]] = {}
+    for candidate in candidates[:8]:
+        lib_id = str(candidate.get("lib_id", "")).strip()
+        pins = candidate.get("pins", [])
+        if not lib_id or not isinstance(pins, list):
+            continue
+        for pin in pins:
+            if not isinstance(pin, dict):
+                continue
+            number = str(pin.get("number", "")).strip()
+            pin_name = str(pin.get("name", "")).strip()
+            # A composite symbol name already exposes its function to the
+            # library resolver and needs no secondary alias evidence.
+            if not number or not re.fullmatch(r"[A-Za-z]{1,8}\d{1,4}", pin_name):
+                continue
+            pin_pattern = re.compile(
+                rf"(?<![A-Za-z0-9]){re.escape(pin_name)}(?![A-Za-z0-9])",
+                re.IGNORECASE,
+            )
+            for page in pages[:32]:
+                if not isinstance(page, dict):
+                    continue
+                source_url = str(
+                    page.get("source_url") or datasheet.get("source_url") or ""
+                ).strip()
+                page_number = page.get("page")
+                text = str(page.get("text", ""))
+                if not source_url.startswith("https://") or page_number is None:
+                    continue
+                for line in text.splitlines():
+                    if not pin_pattern.search(line):
+                        continue
+                    aliases = {
+                        match.group(0).upper()
+                        for match in _CONTROL_PIN_ALIAS_RE.finditer(line[:1_000])
+                        if match.group(0).casefold() != pin_name.casefold()
+                    }
+                    if not aliases:
+                        continue
+                    key = (lib_id, number, pin_name)
+                    record = merged.setdefault(
+                        key,
+                        {"aliases": set(), "evidence_ids": set()},
+                    )
+                    record["aliases"].update(aliases)
+                    record["evidence_ids"].add(
+                        f"{source_url}#page={page_number}"
+                    )
+    return [
+        VerifiedPinAlias(
+            symbol_lib_id=lib_id,
+            pin_number=number,
+            symbol_pin_name=pin_name,
+            aliases=sorted(values["aliases"]),
+            evidence_ids=sorted(values["evidence_ids"]),
+        ).model_dump(mode="json")
+        for (lib_id, number, pin_name), values in sorted(merged.items())
+    ]
+
+
 def _local_library_gap(
     code: str,
     message: str,
@@ -1267,6 +1397,33 @@ def _knowledge_scope(config: RunnableConfig) -> dict[str, str]:
         "principal_scope": str(configurable.get("principal_scope", "")),
         "tenant_scope": str(configurable.get("tenant_scope", "")),
         "project_scope": str(configurable.get("project_scope", "")),
+        "run_scope": str(configurable.get("run_scope", "")),
+        "harness_version_id": str(configurable.get("harness_version_id", "")),
+        "harness_manifest_digest": str(
+            configurable.get("harness_manifest_digest", "")
+        ),
+        "governance_scope_token": str(
+            configurable.get("governance_scope_token", "")
+        ),
+    }
+
+
+_PRIVATE_KNOWLEDGE_ARGUMENTS = {
+    "principal_scope",
+    "tenant_scope",
+    "project_scope",
+    "run_scope",
+    "harness_version_id",
+    "harness_manifest_digest",
+    "governance_scope_token",
+}
+
+
+def _public_knowledge_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in arguments.items()
+        if key not in _PRIVATE_KNOWLEDGE_ARGUMENTS
     }
 
 
@@ -1528,6 +1685,13 @@ async def initialize(
             config,
             "project_name",
             default_project,
+        ),
+        "tenant_scope": str(configurable.get("tenant_scope", "")),
+        "project_scope": str(configurable.get("project_scope", "")),
+        "run_scope": str(configurable.get("run_scope", "")),
+        "harness_version_id": str(configurable.get("harness_version_id", "")),
+        "harness_manifest_digest": str(
+            configurable.get("harness_manifest_digest", "")
         ),
         "architecture": state.get("architecture", {}) if preserve_results else {},
         "parts": state.get("parts", {}) if preserve_results else {},
@@ -2221,7 +2385,19 @@ async def architect_phase(
             details={"bindings": symbol_result.get("bindings", [])},
         )
 
+    verified_pin_aliases = _verified_pin_aliases_from_evidence(
+        [
+            item
+            for item in symbol_result.get("candidates", [])
+            if isinstance(item, dict)
+        ],
+        datasheet_result,
+    )
     evidence = {
+        "evidence_contract": {
+            "schema_version": 1,
+            "producer": "architect_phase",
+        },
         "requirement": requirement,
         "capability_profile": state.get("capability_profile", {}),
         "requested_device_id": primary_device_query,
@@ -2232,6 +2408,7 @@ async def architect_phase(
         "kicad_official_docs": kicad_docs_result.get("results", [])[:4],
         "official_sources": search_result.get("results", [])[:6],
         "local_kicad_library": local_generation_result,
+        "verified_pin_aliases": verified_pin_aliases,
         "datasheet": {
             **{
                 key: value
@@ -2355,11 +2532,7 @@ async def architect_phase(
     inner_messages.extend(
         _tool_messages(
             "ratsnest_search_internal_knowledge",
-            {
-                key: value
-                for key, value in knowledge_args.items()
-                if not key.endswith("_scope")
-            },
+            _public_knowledge_arguments(knowledge_args),
             knowledge_raw,
         )
     )
@@ -2409,6 +2582,7 @@ async def architect_phase(
         "search": search_result,
         "datasheet": datasheet_result,
         "local_kicad_library": local_generation_result,
+        "verified_pin_aliases": verified_pin_aliases,
         "capability_gaps": (
             [local_generation_result["capability_gap"]]
             if (
@@ -2621,11 +2795,7 @@ async def parts_phase(
         inner_messages.extend(
             _tool_messages(
                 "ratsnest_search_internal_knowledge",
-                {
-                    key: value
-                    for key, value in knowledge_args.items()
-                    if not key.endswith("_scope")
-                },
+                _public_knowledge_arguments(knowledge_args),
                 knowledge_raw,
             )
         )
@@ -2830,6 +3000,7 @@ def _hardware_requirement(state: RatsNestWorkflowState) -> str:
         "lib_id": primary_candidate.get("lib_id", ""),
         "origin": primary_candidate.get("origin", "installed"),
         "pin_count": primary_candidate.get("pin_count"),
+        "pins": primary_candidate.get("pins", []),
         "properties": primary_candidate.get("properties", {}),
         "declared_footprint": primary_candidate.get("declared_footprint", ""),
         "grounded_footprint": primary_candidate.get("grounded_footprint"),
@@ -2875,6 +3046,10 @@ def _hardware_requirement(state: RatsNestWorkflowState) -> str:
         ],
     }
     grounded_evidence = {
+        "evidence_contract": {
+            "schema_version": 1,
+            "producer": "architect_phase",
+        },
         "requested_device_id": architecture.get("requested_device_id", ""),
         "grounding_mode": architecture.get("grounding_mode", "primary_device"),
         "grounded_components": architecture.get("grounded_components", []),
@@ -2885,6 +3060,7 @@ def _hardware_requirement(state: RatsNestWorkflowState) -> str:
         "official_sources": official_sources,
         "datasheet": datasheet_evidence,
         "local_kicad_library": architecture.get("local_kicad_library", {}),
+        "verified_pin_aliases": architecture.get("verified_pin_aliases", []),
     }
     requirement += (
         "\n\nGROUNDED ARCHITECT EVIDENCE — use this evidence in component selection, "
@@ -2971,6 +3147,27 @@ def _hardware_result_update(
         *_tool_messages(tool_name, args, raw),
         AIMessage(content=summary),
     ]
+    completed_steps = int(result.get("completed_steps", 0) or 0)
+    total_steps = int(result.get("total_steps", 17) or 17)
+    final_progress: dict[str, Any] = {
+        "event_type": "pipeline_finished",
+        "completed_steps": completed_steps,
+        "total_steps": total_steps,
+    }
+    error = " ".join(str(result.get("error", "")).split())[:500]
+    error_type = " ".join(str(result.get("error_type", "")).split())[:120]
+    if error:
+        final_progress["error"] = error
+    if error_type:
+        final_progress["error_type"] = error_type
+    temporal_result = result.get("temporal", {})
+    last_step = (
+        str(temporal_result.get("last_step", ""))
+        if isinstance(temporal_result, dict)
+        else ""
+    )
+    if last_step:
+        final_progress["step_id"] = last_step
     _workflow_event(
         "hardware-engineer",
         (
@@ -2981,6 +3178,7 @@ def _hardware_result_update(
             else "execution_blocked"
         ),
         detail=f"{result.get('completed_steps', 0)}/17 steps",
+        attributes=final_progress,
     )
     return {
         "hardware": result,
@@ -3013,17 +3211,41 @@ async def hardware_phase(state: RatsNestWorkflowState) -> dict[str, Any]:
 def _temporal_progress(event: dict[str, Any]) -> None:
     """Translate durable workflow progress onto the existing custom SSE channel."""
 
-    if event.get("kind") == "llm_output":
+    if event.get("kind") in {"llm_output", "ahe_event"}:
         try:
             get_stream_writer()(event)
         except RuntimeError:
             pass
         return
+    from agents.ratsnestpro.temporal.contracts import CANONICAL_STEPS
+
+    workflow_status = str(event.get("status", "in_progress"))
+    step_id = str(event.get("phase", ""))
+    attributes: dict[str, Any] = {}
+    if step_id in CANONICAL_STEPS:
+        attributes.update(
+            {
+                "event_type": (
+                    "pipeline_step_completed"
+                    if workflow_status == "checkpointed"
+                    else "pipeline_step_started"
+                    if workflow_status == "running"
+                    else "pipeline_progress"
+                ),
+                "step_id": step_id,
+                "step_index": CANONICAL_STEPS.index(step_id) + 1,
+            }
+        )
+    for key in ("completed_steps", "total_steps", "version", "activity_attempt"):
+        value = event.get(key)
+        if isinstance(value, int):
+            attributes["workflow_version" if key == "version" else key] = value
     _workflow_event(
         "hardware-engineer:temporal",
-        str(event.get("status", "in_progress")),
+        workflow_status,
         detail=str(event.get("detail", event.get("phase", ""))),
         attempt=(int(event["attempt"]) if isinstance(event.get("attempt"), int) else None),
+        attributes=attributes,
     )
 
 
@@ -3076,6 +3298,16 @@ async def hardware_dispatch_phase(
         "model_type": (type(selected_model).__name__ if selected_model is not None else None),
         "attempt": _next_hardware_attempt_number(state.get("hardware_attempts", [])),
         "ahe_budget": _profile_ahe_budget(state),
+        "tenant_scope": str(state.get("tenant_scope", "")),
+        "project_scope": str(state.get("project_scope", "")),
+        "run_scope": str(state.get("run_scope", "")),
+        "harness_version_id": str(state.get("harness_version_id", "")),
+        "harness_manifest_digest": str(
+            state.get("harness_manifest_digest", "")
+        ),
+        "governance_scope_token": str(
+            config.get("configurable", {}).get("governance_scope_token", "")
+        ),
     }
     enabled = temporal_enabled()
     _workflow_event("hardware-engineer:dispatch", "started", attempt=args["attempt"])
@@ -3272,11 +3504,7 @@ async def reviewer_phase(
             remediation_messages.extend(
                 _tool_messages(
                     "ratsnest_search_internal_knowledge",
-                    {
-                        key: value
-                        for key, value in knowledge_args.items()
-                        if not key.endswith("_scope")
-                    },
+                    _public_knowledge_arguments(knowledge_args),
                     knowledge_raw,
                 )
             )
@@ -3351,9 +3579,10 @@ async def reviewer_phase(
     hardware_release_ready = state.get("hardware", {}).get("release_ready") is True
     if status == "ok" and hardware_release_ready and candidate.get("eligible") is True:
         try:
-            promoted = EheMemory(_workspace_root() / "ehe").promote_verified_run(
-                run_name=_workspace_run_name(state),
-                project_name=state["project_name"],
+            promoted = EheMemory(
+                _workspace_root() / "ehe",
+                governance_scope=_trusted_governance_scope(state, config),
+            ).promote_verified_run(
                 requirement=state["requirement"],
                 resolved_issues=list(candidate.get("resolved_issues", [])),
                 selected_roles=[str(role) for role in candidate.get("selected_roles", [])],
@@ -3599,6 +3828,7 @@ def final_report(state: RatsNestWorkflowState) -> dict[str, Any]:
             _artifact_manifest_event(manifest)
         except (OSError, RuntimeError, ValueError) as exc:
             _workflow_event("artifact-publish", "warning", detail=str(exc))
+    _workflow_event("supervisor", "completed", detail=str(overall))
     return update
 
 

@@ -73,6 +73,12 @@ client = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# The vendored KiCad adapters are preserved verbatim, while the routing worker
+# runs under KiCad's own Python interpreter rather than the Runtime interpreter.
+extend-exclude = [
+    "src/ratsnestpro/eda/vendor",
+    "src/ratsnestpro/eda/_route_worker.py",
+]
 
 [tool.ruff.lint]
 extend-select = ["I", "U"]

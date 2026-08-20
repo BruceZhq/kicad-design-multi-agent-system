@@ -218,7 +218,7 @@ flowchart LR
 ├── src/service/                     Python internal REST/gRPC、Redis、Kafka、SSE
 ├── src/core/                        LLM provider 与运行配置
 ├── src/memory/postgres.py            LangGraph PostgreSQL checkpoint/store
-├── src/RatsNestPro-main/...          KiCad/EDA/17步流水线
+├── src/ratsnestpro/                  KiCad/EDA/17步确定性流水线
 ├── contracts/                       REST、SSE、gRPC、Runtime JSON Schema
 ├── docker/                          Runtime、Frontend、Keycloak、Freerouting 镜像
 ├── deploy/k8s/                      Cell、HPA、网络策略和可观测性模板

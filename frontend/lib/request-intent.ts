@@ -10,6 +10,45 @@ export function requestedCapabilityProfile(message: string): string | null {
   return CAPABILITY_PROFILE_RE.exec(message)?.[1]?.toLowerCase() ?? null;
 }
 
+export interface CapabilityProfileSnapshotRef {
+  id: string;
+  version: string;
+  digest: string;
+}
+
+export type RunSubmissionMode = "initial" | "revision" | "explicit-new-project" | "profile-migration";
+
+export function runSubmissionMode(
+  message: string,
+  selected: CapabilityProfileSnapshotRef,
+  active: CapabilityProfileSnapshotRef | null | undefined,
+): RunSubmissionMode {
+  if (startsNewProject(message)) return "explicit-new-project";
+  if (active === undefined) return "initial";
+  if (
+    active === null ||
+    active.id !== selected.id ||
+    active.version !== selected.version ||
+    active.digest !== selected.digest
+  ) return "profile-migration";
+  return "revision";
+}
+
+export function profileForkRequestBody(
+  changeRequest: string,
+  profile: Pick<CapabilityProfileSnapshotRef, "id" | "version">,
+  model: string | null,
+  teamMembers: Array<{ roleId: string; name: string; responsibility: string }>,
+): Record<string, unknown> {
+  return {
+    capabilityProfile: { id: profile.id, version: profile.version },
+    replayMode: "THROUGH_SOURCE_REVISION",
+    changeRequest,
+    model,
+    teamMembers,
+  };
+}
+
 export function requiresNewRun(
   message: string,
   selectedProfileReference: string,

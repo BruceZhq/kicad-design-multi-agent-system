@@ -4,6 +4,7 @@ import hmac
 import inspect
 import json
 import logging
+import re
 import warnings
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -48,6 +49,12 @@ from schema import (
     StreamInput,
     UserInput,
 )
+from service.ahe_event import AHE_EVENT_KIND, sanitize_ahe_event
+from service.governance_scope import (
+    TrustedGovernanceScope,
+    derive_run_scope,
+    issue_governance_scope_token,
+)
 from service.internal_api import router as internal_router
 from service.redis_run_registry import RedisRunRegistry, RunHandle
 from service.run_coordination import checkpoint_thread_candidates, serialize_thread_run
@@ -78,6 +85,8 @@ from service.utils import (
 
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
+
+_AHE_RECORD_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 
 RunRecordLike = RunRecord | RunHandle
 
@@ -409,6 +418,35 @@ async def _handle_input(
             "channel": harness_identity.channel.value,
             "manifest_digest": harness_identity.manifest_digest,
         }
+    if runtime_scope is not None and harness_identity is not None:
+        signing_secret = (
+            settings.RATSNEST_INTERNAL_SIGNING_SECRET.get_secret_value()
+            if settings.RATSNEST_INTERNAL_SIGNING_SECRET is not None
+            else None
+        )
+        if signing_secret:
+            governance_scope = TrustedGovernanceScope(
+                tenant_scope=runtime_scope.tenant,
+                project_scope=runtime_scope.project,
+                run_scope=derive_run_scope(
+                    secret=signing_secret,
+                    tenant_scope=runtime_scope.tenant,
+                    project_scope=runtime_scope.project,
+                    request_id=str(user_input.request_id),
+                ),
+                harness_version_id=harness_identity.version_id,
+                harness_manifest_digest=harness_identity.manifest_digest,
+            )
+            configurable.update(
+                {
+                    **governance_scope.payload(),
+                    "governance_scope_token": issue_governance_scope_token(
+                        governance_scope,
+                        secret=signing_secret,
+                    ),
+                }
+            )
+            configurable.pop("v", None)
     if user_input.model is not None:
         if user_input.model not in settings.AVAILABLE_MODELS:
             raise HTTPException(
@@ -438,6 +476,10 @@ async def _handle_input(
             "principal_scope",
             "tenant_scope",
             "project_scope",
+            "run_scope",
+            "harness_version_id",
+            "harness_manifest_digest",
+            "governance_scope_token",
             "model",
         }
         if overlap := reserved_keys & runtime_agent_config.keys():
@@ -884,7 +926,11 @@ async def _produce_stream_events(
                 payload=event,
             )
             break
-        await run_registry.append_event(record, event)
+        is_ahe_event, event_key = _event_ahe_event_key(event)
+        if is_ahe_event and event_key is None:
+            logger.warning("Ignoring AHE event without a valid durable record_id.")
+            continue
+        await run_registry.append_event(record, event, event_key=event_key)
     return result
 
 
@@ -972,6 +1018,51 @@ def _event_human_interaction(event: str) -> dict[str, Any] | None:
             return None
         return value
     return None
+
+
+def _event_ahe_event_key(event: str) -> tuple[bool, str | None]:
+    """Return the stable durable key for one trusted AHE custom event.
+
+    The boolean distinguishes an invalid AHE event from an unrelated event. An
+    invalid AHE event must not fall back to an unkeyed append because a resumed
+    producer could otherwise assign it a fresh sequence number.
+    """
+
+    for line in event.splitlines():
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        try:
+            payload = json.loads(line[6:])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or payload.get("type") != "message":
+            continue
+        content = payload.get("content")
+        if not isinstance(content, dict) or content.get("type") != "custom":
+            continue
+        custom = content.get("custom_data")
+        if not isinstance(custom, dict) or custom.get("kind") != AHE_EVENT_KIND:
+            continue
+
+        record_id = custom.get("record_id")
+        if (
+            type(custom.get("schema_version")) is not int
+            or custom["schema_version"] != 1
+            or not isinstance(record_id, str)
+            or _AHE_RECORD_ID_RE.fullmatch(record_id) is None
+        ):
+            return True, None
+        try:
+            safe_event = sanitize_ahe_event(custom)
+        except (TypeError, ValueError):
+            return True, None
+        allowed_keys = {*safe_event, "schema_version", "record_id", "created_at", "audit_ref"}
+        if set(custom) - allowed_keys or any(
+            custom.get(key) != value for key, value in safe_event.items()
+        ):
+            return True, None
+        return True, f"ahe:{record_id}"
+    return False, None
 
 
 def _event_run_id(event: str) -> str | None:

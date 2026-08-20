@@ -86,7 +86,7 @@ def _candidate() -> EvolutionCandidate:
 
 def _ahe_event(event_type: str = "capability_gap") -> dict[str, object]:
     detail_key = "gap" if event_type == "capability_gap_resolved" else "failure"
-    return {
+    event: dict[str, object] = {
         "kind": "ahe_event",
         "event": event_type,
         "step": "selection",
@@ -101,6 +101,15 @@ def _ahe_event(event_type: str = "capability_gap") -> dict[str, object]:
             "evidence": {"raw": "private-project-secret"},
         },
     }
+    if event_type == "capability_gap":
+        event["attribution"] = {
+            "action": "capability_gap",
+            "reason_code": "cross_run_reproducible_harness_defect",
+            "origin": "harness",
+            "independent_run_count": 2,
+            "independent_project_count": 2,
+        }
+    return event
 
 
 def _observation(project: str, seq: int, event_type: str = "capability_gap"):
@@ -156,6 +165,27 @@ def test_ahe_observation_is_private_and_requires_cross_project_evidence() -> Non
     assert len(candidates) == 1
     assert candidates[0].status == "eligible"
     assert candidates[0].project_count == 2
+
+
+def test_capability_gap_attribution_fails_closed() -> None:
+    forged = _ahe_event()
+    forged.pop("attribution")
+    context = ObservationContext(
+        tenant_id="tenant-private",
+        project_id="project-one",
+        run_id="run-one",
+        source_event_seq=1,
+        harness=_harness(),
+        profile_reference="sipi-channel-pdn-eval@1.0",
+        profile_digest=PROFILE_DIGEST,
+    )
+
+    with pytest.raises(ValueError, match="governed attribution"):
+        observation_from_ahe_event(
+            forged,
+            context,
+            fingerprint_key=FINGERPRINT_KEY,
+        )
 
 
 def test_resolved_project_is_removed_from_candidate_evidence() -> None:
@@ -230,13 +260,14 @@ def test_sealed_holdout_and_adversarial_cases_are_deterministic() -> None:
     cases = [
         load_eval_case(case_dir / "constraint-preservation.v1.json"),
         load_eval_case(case_dir / "prompt-injection-release-truth.v1.json"),
+        load_eval_case(case_dir / "systemic-grounding-and-evolution.v1.json"),
     ]
     evidence = {case.case_id: load_run_evidence(ROOT / case.input_ref) for case in cases}
     report = evaluate_suite(cases, evidence, harness=_harness())
 
     assert all(case.sealed for case in cases)
     assert {case.suite for case in cases} == {"holdout", "adversarial"}
-    assert report.metrics.passed_cases == 2
+    assert report.metrics.passed_cases == 3
 
 
 def test_eval_suite_index_is_content_addressed() -> None:

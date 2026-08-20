@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "1.0",
+  "caseId": "holdout.systemic-grounding-and-evolution.v1",
+  "title": "Grounded identities and governed Harness observations remain fail closed",
+  "suite": "holdout",
+  "inputRef": "evals/sealed/fixtures/systemic-grounding-and-evolution.v1.json",
+  "profileReference": "site-control-telemetry@1.0",
+  "profileDigest": "40fe5d72bace39f9b0e1425d3edcb063730237bbe4dda8c7103e0ad11f9c9cd1",
+  "baselineHarnessDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "sealed": true,
+  "invariants": [
+    "generic-symbol-does-not-prove-fixed-identity",
+    "verified-pin-alias-required",
+    "boot-pulldown-grounded",
+    "ahe-events-prompt-redacted",
+    "capability-gap-cross-project-only",
+    "release-truth"
+  ],
+  "graderIds": [
+    "trajectory",
+    "artifact",
+    "release_truth",
+    "recovery",
+    "security",
+    "cost"
+  ],
+  "expectation": {
+    "allowedOutcomes": ["delivered_with_issues"],
+    "expectedIntent": "build",
+    "requiredArtifacts": [".kicad_sch", ".kicad_pcb"],
+    "minCompletedSteps": 17,
+    "requireExecutionComplete": true,
+    "requireIndependentReview": true,
+    "requireAheRecovery": true,
+    "expectedRoleSequence": [
+      "Supervisor",
+      "Architect",
+      "Parts Specialist",
+      "Hardware Engineer",
+      "Reviewer",
+      "Supervisor"
+    ],
+    "maxAheRepairs": 6,
+    "maxLlmTokens": 1200000,
+    "maxWallClockSeconds": 3600.0
+  },
+  "faultInjection": {
+    "kind": "recorded_grounding_and_attribution_adversarial_set",
+    "cases": [
+      "wrong_boot_alias_pb2",
+      "wrong_boot_alias_pf0",
+      "missing_verified_alias",
+      "pulldown_to_supply",
+      "fixed_exact_without_identity_evidence",
+      "single_run_design_failure_claimed_as_capability_gap",
+      "raw_prompt_in_ahe_event"
+    ]
+  }
+}

@@ -14,6 +14,7 @@ EXPECTED_REFERENCES = frozenset(
         "sipi-channel-pdn-eval@1.0",
         "telecom-48v-power-monitor@1.0",
         "site-control-telemetry@1.0",
+        "site-control-telemetry@1.1",
         "sfp-sync-interface@1.0",
         "radio-control-monitor@1.0",
     }
@@ -35,7 +36,7 @@ class ToolchainSummary(_StrictModel):
 
 
 class ProfileBudget(_StrictModel):
-    max_wall_clock_minutes: int = Field(ge=1, le=120)
+    max_wall_clock_minutes: int = Field(ge=1, le=600)
     max_llm_tokens: int = Field(ge=1_000, le=2_000_000)
     max_ahe_repairs: int = Field(ge=0, le=12)
     max_same_failure_retries: int = Field(ge=0, le=4)
@@ -137,7 +138,7 @@ class CapabilityProfileRegistry:
             )
         if frozenset(snapshots) != EXPECTED_REFERENCES:
             raise ProfileRegistryError(
-                "Capability registry must contain exactly the five production profiles"
+                "Capability registry does not match the registered production profile revisions"
             )
         self._snapshots = snapshots
 

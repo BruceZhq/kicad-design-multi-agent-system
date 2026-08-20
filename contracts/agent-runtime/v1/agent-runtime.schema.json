@@ -112,6 +112,110 @@
             { "$ref": "#/$defs/deliveryStatus" },
             { "type": "null" }
           ]
+        },
+        "ui_snapshot": {
+          "$ref": "#/$defs/uiSnapshotWire"
+        }
+      },
+      "additionalProperties": false
+    },
+    "uiSnapshotWire": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "snapshot_cursor",
+        "coverage_start_event_id",
+        "coverage_complete",
+        "current_role",
+        "current_phase",
+        "role_statuses",
+        "pipeline",
+        "recent_events",
+        "delivery",
+        "reviewer"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "snapshot_cursor": { "type": "integer", "minimum": 0 },
+        "coverage_start_event_id": { "type": ["integer", "null"], "minimum": 1 },
+        "coverage_complete": { "type": "boolean" },
+        "current_role": {
+          "type": ["string", "null"]
+        },
+        "current_phase": { "type": ["string", "null"] },
+        "role_statuses": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["role", "label", "status", "phase", "last_event_id"],
+            "properties": {
+              "role": { "type": "string" },
+              "label": { "type": "string" },
+              "status": { "type": "string" },
+              "phase": { "type": ["string", "null"] },
+              "last_event_id": { "type": ["integer", "null"], "minimum": 1 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "pipeline": {
+          "type": "object",
+          "required": ["status", "completed_steps", "total_steps", "current_step", "current_step_index"],
+          "properties": {
+            "status": { "type": "string" },
+            "completed_steps": { "type": ["integer", "null"], "minimum": 0 },
+            "total_steps": { "type": ["integer", "null"], "minimum": 1 },
+            "current_step": { "type": ["string", "null"] },
+            "current_step_index": { "type": ["integer", "null"], "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "recent_events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["event_id", "kind", "role", "phase", "status", "detail", "occurred_at", "step_index", "total_steps"],
+            "properties": {
+              "event_id": { "type": "integer", "minimum": 1 },
+              "kind": { "enum": ["workflow", "pipeline_step", "llm_output", "artifact_manifest"] },
+              "role": { "type": ["string", "null"] },
+              "phase": { "type": ["string", "null"] },
+              "status": { "type": "string" },
+              "detail": { "type": ["string", "null"] },
+              "occurred_at": { "type": ["string", "null"], "format": "date-time" },
+              "step_index": { "type": ["integer", "null"], "minimum": 1 },
+              "total_steps": { "type": ["integer", "null"], "minimum": 1 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "delivery": {
+          "type": "object",
+          "required": ["status", "manifest_id", "artifact_count", "artifacts", "errors"],
+          "properties": {
+            "status": {
+              "anyOf": [
+                { "$ref": "#/$defs/deliveryStatus" },
+                { "type": "null" }
+              ]
+            },
+            "manifest_id": { "type": ["string", "null"] },
+            "artifact_count": { "type": "integer", "minimum": 0 },
+            "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifactWire" } },
+            "errors": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "reviewer": {
+          "type": "object",
+          "required": ["status", "phase", "report_path", "last_event_id"],
+          "properties": {
+            "status": { "type": "string" },
+            "phase": { "type": ["string", "null"] },
+            "report_path": { "type": ["string", "null"] },
+            "last_event_id": { "type": ["integer", "null"], "minimum": 1 }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -210,6 +314,9 @@
         "threadId",
         "createdAt",
         "eventCount",
+        "executionLeaseActive",
+        "recoverable",
+        "checkedAt",
         "result"
       ],
       "properties": {
@@ -227,6 +334,10 @@
         "eventCount": { "type": "integer", "minimum": 0 },
         "oldestEventId": { "type": ["integer", "null"], "minimum": 0 },
         "newestEventId": { "type": ["integer", "null"], "minimum": 0 },
+        "executionLeaseActive": { "type": "boolean" },
+        "recoverable": { "type": "boolean" },
+        "leaseExpiresAt": { "type": ["string", "null"], "format": "date-time" },
+        "checkedAt": { "type": "string", "format": "date-time" },
         "errorCode": { "type": ["string", "null"] },
         "error": { "type": ["string", "null"] },
         "result": { "$ref": "#/$defs/runtimeResult" }
@@ -369,9 +480,14 @@
         "event_count",
         "oldest_event_id",
         "newest_event_id",
+        "execution_lease_active",
+        "recoverable",
+        "lease_expires_at",
+        "checked_at",
         "error_code",
         "error",
         "artifact_manifest",
+        "ui_snapshot",
         "delivery_status"
       ],
       "properties": {
@@ -389,6 +505,10 @@
         "event_count": { "type": "integer", "minimum": 0 },
         "oldest_event_id": { "type": ["integer", "null"], "minimum": 1 },
         "newest_event_id": { "type": ["integer", "null"], "minimum": 1 },
+        "execution_lease_active": { "type": "boolean" },
+        "recoverable": { "type": "boolean" },
+        "lease_expires_at": { "type": ["string", "null"], "format": "date-time" },
+        "checked_at": { "type": "string", "format": "date-time" },
         "error_code": { "type": ["string", "null"] },
         "error": { "type": ["string", "null"] },
         "artifact_manifest": {
@@ -397,6 +517,7 @@
             { "type": "null" }
           ]
         },
+        "ui_snapshot": { "$ref": "#/$defs/uiSnapshotWire" },
         "delivery_status": {
           "anyOf": [
             { "$ref": "#/$defs/deliveryStatus" },

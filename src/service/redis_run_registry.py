@@ -36,6 +36,7 @@ from service.run_registry import (
     RunOverloadedError,
     RunState,
 )
+from service.run_ui_snapshot import build_ui_snapshot
 from service.runtime_identity import audit_scopes
 from service.sse import format_buffered_sse
 
@@ -95,6 +96,71 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _is_done_payload(payload: str) -> bool:
+    return payload.strip() == "data: [DONE]"
+
+
+def _done_delivery_action(
+    fields: Mapping[str, str],
+    *,
+    status: str,
+    current_fence: int,
+    newest_event_id: int,
+    event_id: int,
+) -> str:
+    """Classify a DONE marker without deleting its durable audit history."""
+
+    payload = fields.get("payload", "")
+    if not _is_done_payload(payload):
+        return "deliver"
+    terminal = status in _TERMINAL_STATES
+    event_fence = fields.get("fencing_token")
+    if event_fence is None:
+        # Backward compatibility for terminal runs written before events were
+        # fenced. A legacy DONE is valid only when it is the final event.
+        return "deliver" if terminal and event_id == newest_event_id else "skip"
+    try:
+        fence = int(event_fence)
+    except ValueError:
+        return "skip"
+    if fence != current_fence:
+        return "skip"
+    if not terminal:
+        # The writer appends DONE immediately before committing terminal state.
+        # Hold the cursor so this marker can be re-read after that commit, or
+        # invalidated by a fenced takeover if the writer dies in between.
+        return "wait"
+    return "deliver" if event_id == newest_event_id else "skip"
+
+
+# HGETALL, XRANGE and TIME execute in one Redis script, so the event projection
+# is pinned to the same high-water mark as the lifecycle state.
+_LOAD_STATUS_SNAPSHOT_LUA = r"""
+local state = redis.call('HGETALL', KEYS[1])
+if #state == 0 then return {state, {}, redis.call('TIME')} end
+local cursor = tonumber(redis.call('HGET', KEYS[1], 'last_event_id') or '0')
+local max_id = cursor .. '-0'
+local events = redis.call('XREVRANGE', KEYS[2], max_id, '-', 'COUNT', 256)
+local oldest = redis.call('XRANGE', KEYS[2], '-', max_id, 'COUNT', 1)
+return {state, events, redis.call('TIME'), oldest}
+"""
+
+
+def _decode_flat_pairs(values: list[Any]) -> dict[str, str]:
+    return {
+        _text(values[index]): _text(values[index + 1])
+        for index in range(0, len(values), 2)
+    }
+
+
+def _decode_snapshot_rows(values: list[Any]) -> list[tuple[str, dict[str, str]]]:
+    return [
+        (_text(row[0]), _decode_flat_pairs(list(row[1])))
+        for row in values
+        if isinstance(row, (list, tuple)) and len(row) == 2
+    ]
+
+
 @dataclass
 class RunHandle:
     """Portable run snapshot plus local-only compatibility handles."""
@@ -126,6 +192,11 @@ class RunHandle:
     owner_id: str = ""
     fencing_token: int = 0
     lease_until_ms: int = 0
+    execution_lease_active: bool = False
+    recoverable: bool = False
+    lease_expires_at: datetime | None = None
+    checked_at: datetime = field(default_factory=_utcnow)
+    ui_snapshot: dict[str, Any] = field(default_factory=dict)
     done: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     task: asyncio.Task[None] | None = field(default=None, repr=False)
 
@@ -148,11 +219,16 @@ class RunHandle:
             "event_count": self.next_event_id - 1,
             "oldest_event_id": self.oldest_event_id,
             "newest_event_id": self.newest_event_id,
+            "execution_lease_active": self.execution_lease_active,
+            "recoverable": self.recoverable,
+            "lease_expires_at": self.lease_expires_at,
+            "checked_at": self.checked_at,
             "error_code": self.error_code,
             "error": self.error,
             "interaction_id": self.interaction_id,
             "interaction_state_version": self.interaction_state_version,
             "artifact_manifest": result.get("artifact_manifest"),
+            "ui_snapshot": self.ui_snapshot,
             "delivery_status": result.get("delivery_status"),
         }
 
@@ -202,6 +278,7 @@ if redis.call('EXISTS', state) == 1 then
       'error_code', '',
       'error', '',
       'http_status', '500',
+      'terminal_event_emitted', '0',
       'state_version', tonumber(redis.call('HGET', state, 'state_version') or '0') + 1)
     redis.call('ZADD', active, new_lease, state)
     redis.call('ZREM', running, state)
@@ -268,7 +345,8 @@ if ARGV[5] ~= '' then
   if prior then return {0, tonumber(prior)} end
 end
 local event_id = redis.call('HINCRBY', KEYS[1], 'last_event_id', 1)
-redis.call('XADD', KEYS[2], event_id .. '-0', 'payload', ARGV[3])
+redis.call('XADD', KEYS[2], event_id .. '-0',
+  'payload', ARGV[3], 'fencing_token', ARGV[2], 'terminal', ARGV[6])
 redis.call('XTRIM', KEYS[2], 'MAXLEN', tonumber(ARGV[4]))
 if ARGV[5] ~= '' then redis.call('HSET', KEYS[3], ARGV[5], event_id) end
 if ARGV[6] == '1' then redis.call('HSET', KEYS[1], 'terminal_event_emitted', '1') end
@@ -431,12 +509,12 @@ redis.call('HSET', KEYS[1],
   'state_version', tonumber(redis.call('HGET', KEYS[1], 'state_version') or '0') + 1)
 if redis.call('HGET', KEYS[1], 'kind') == 'stream' then
   local event_id = redis.call('HINCRBY', KEYS[1], 'last_event_id', 1)
-  redis.call('XADD', KEYS[2], event_id .. '-0', 'payload', ARGV[5])
-  if redis.call('HGET', KEYS[1], 'terminal_event_emitted') ~= '1' then
-    local done_id = redis.call('HINCRBY', KEYS[1], 'last_event_id', 1)
-    redis.call('XADD', KEYS[2], done_id .. '-0', 'payload', ARGV[6])
-    redis.call('HSET', KEYS[1], 'terminal_event_emitted', '1')
-  end
+  redis.call('XADD', KEYS[2], event_id .. '-0',
+    'payload', ARGV[5], 'fencing_token', fence, 'terminal', '0')
+  local done_id = redis.call('HINCRBY', KEYS[1], 'last_event_id', 1)
+  redis.call('XADD', KEYS[2], done_id .. '-0',
+    'payload', ARGV[6], 'fencing_token', fence, 'terminal', '1')
+  redis.call('HSET', KEYS[1], 'terminal_event_emitted', '1')
   redis.call('XTRIM', KEYS[2], 'MAXLEN', tonumber(ARGV[7]))
 end
 redis.call('ZREM', KEYS[5], KEYS[1])
@@ -588,7 +666,7 @@ local lease_until = now_ms + tonumber(ARGV[6])
 redis.call('HSET', KEYS[1],
   'status', 'queued', 'owner_id', ARGV[5], 'lease_until_ms', lease_until,
   'interaction_id', '', 'interaction_state_version', '', 'finished_at', '',
-  'error_code', '', 'error', '',
+  'error_code', '', 'error', '', 'terminal_event_emitted', '0',
   'state_version', tonumber(redis.call('HGET', KEYS[1], 'state_version') or '0') + 1)
 redis.call('HSET', KEYS[7], response_key, response_identity)
 redis.call('ZADD', KEYS[4], lease_until, KEYS[1])
@@ -770,7 +848,7 @@ class RedisRunRegistry:
             payload,
             record.event_buffer_size,
             event_key or "",
-            "1" if "data: [DONE]" in payload else "0",
+            "1" if _is_done_payload(payload) else "0",
             audit_payload,
         )
         code, event_id = int(reply[0]), int(reply[1])
@@ -787,7 +865,7 @@ class RedisRunRegistry:
         record.next_event_id = max(record.next_event_id, event_id + 1)
         record.newest_event_id = event_id
         record.oldest_event_id = record.oldest_event_id or event_id
-        if "data: [DONE]" in payload:
+        if _is_done_payload(payload):
             record.terminal_event_emitted = True
         return event_id
 
@@ -964,13 +1042,36 @@ class RedisRunRegistry:
             )
             if response:
                 for _, entries in response:
+                    delivery_state = _decoded_hash(await client.hgetall(keys["state"]))
+                    if not delivery_state:
+                        raise RunNotFoundError(record.request_id)
+                    delivery_status = delivery_state.get("status", "")
+                    delivery_fence = int(delivery_state.get("fencing_token", "0"))
+                    delivery_newest = int(delivery_state.get("last_event_id", "0"))
+                    wait_for_terminal = False
                     for stream_id, fields in entries:
                         event_id = self._stream_sequence(stream_id)
                         if event_id <= cursor:
                             continue
+                        decoded = _decoded_hash(fields)
+                        action = _done_delivery_action(
+                            decoded,
+                            status=delivery_status,
+                            current_fence=delivery_fence,
+                            newest_event_id=delivery_newest,
+                            event_id=event_id,
+                        )
+                        if action == "wait":
+                            wait_for_terminal = True
+                            break
                         cursor = event_id
-                        payload = _decoded_hash(fields).get("payload", "")
+                        if action == "skip":
+                            continue
+                        payload = decoded.get("payload", "")
                         yield self._format_event(event_id, payload)
+                    if wait_for_terminal:
+                        await asyncio.sleep(min(0.05, self.heartbeat_seconds))
+                        break
             else:
                 gap = await self._replay_gap(keys["state"], keys["events"], cursor)
                 if gap is not None:
@@ -1198,7 +1299,7 @@ class RedisRunRegistry:
                 await self.append_event(
                     record,
                     "data: [DONE]\n\n",
-                    event_key="terminal-done",
+                    event_key=f"terminal-done:{record.fencing_token}",
                 )
                 refreshed = await self.get(record.request_id, record.user_id)
             target: RunState = "failed" if refreshed.stream_failed else "completed"
@@ -1499,7 +1600,7 @@ class RedisRunRegistry:
                 await self.append_event(
                     record,
                     "data: [DONE]\n\n",
-                    event_key="terminal-done",
+                    event_key=f"terminal-done:{record.fencing_token}",
                 )
         except (RunConflictError, RunNotFoundError):
             # A concurrent cancellation may already have emitted terminal events.
@@ -1508,7 +1609,13 @@ class RedisRunRegistry:
     async def _load_handle(self, request_id: str) -> RunHandle:
         client = await self._client()
         keys = self._keys(request_id)
-        values = _decoded_hash(await client.hgetall(keys["state"]))
+        raw_state, raw_rows, clock, raw_oldest = await client.eval(
+            _LOAD_STATUS_SNAPSHOT_LUA,
+            2,
+            keys["state"],
+            keys["events"],
+        )
+        values = _decode_flat_pairs(list(raw_state))
         if not values:
             raise RunNotFoundError(request_id)
         result: Any = None
@@ -1517,9 +1624,27 @@ class RedisRunRegistry:
                 result = json.loads(values["result_json"])
             except json.JSONDecodeError:
                 result = None
-        oldest_rows = await client.xrange(keys["events"], min="-", max="+", count=1)
-        newest_rows = await client.xrevrange(keys["events"], max="+", min="-", count=1)
+        event_rows = _decode_snapshot_rows(list(raw_rows))
+        event_rows.sort(key=lambda row: self._stream_sequence(row[0]))
+        oldest_rows = _decode_snapshot_rows(list(raw_oldest))
         last_event_id = int(values.get("last_event_id", "0"))
+        checked_at = datetime.fromtimestamp(
+            (int(clock[0]) * 1000 + int(clock[1]) // 1000) / 1000,
+            UTC,
+        )
+        lease_until_ms = int(values.get("lease_until_ms", "0"))
+        execution_pending = values.get("status") in {"queued", "running"}
+        result_object = result if isinstance(result, dict) else {}
+        ui_snapshot = build_ui_snapshot(
+            [
+                (self._stream_sequence(stream_id), fields.get("payload", ""))
+                for stream_id, fields in event_rows
+            ],
+            snapshot_cursor=last_event_id,
+            run_status=values.get("status", "queued"),
+            artifact_manifest=result_object.get("artifact_manifest"),
+            delivery_status=result_object.get("delivery_status"),
+        )
         handle = RunHandle(
             request_id=values["request_id"],
             fingerprint=values["fingerprint"],
@@ -1547,11 +1672,28 @@ class RedisRunRegistry:
             stream_failed=values.get("stream_failed") == "1",
             terminal_event_emitted=values.get("terminal_event_emitted") == "1",
             next_event_id=last_event_id + 1,
-            oldest_event_id=(self._stream_sequence(oldest_rows[0][0]) if oldest_rows else None),
-            newest_event_id=(self._stream_sequence(newest_rows[0][0]) if newest_rows else None),
+            oldest_event_id=(
+                self._stream_sequence(oldest_rows[0][0]) if oldest_rows else None
+            ),
+            newest_event_id=(self._stream_sequence(event_rows[-1][0]) if event_rows else None),
             owner_id=values.get("owner_id", ""),
             fencing_token=int(values.get("fencing_token", "0")),
-            lease_until_ms=int(values.get("lease_until_ms", "0")),
+            lease_until_ms=lease_until_ms,
+            execution_lease_active=(
+                execution_pending
+                and lease_until_ms > int(checked_at.timestamp() * 1000)
+            ),
+            recoverable=(
+                execution_pending
+                and lease_until_ms <= int(checked_at.timestamp() * 1000)
+            ),
+            lease_expires_at=(
+                datetime.fromtimestamp(lease_until_ms / 1000, UTC)
+                if lease_until_ms > 0
+                else None
+            ),
+            checked_at=checked_at,
+            ui_snapshot=ui_snapshot,
         )
         if handle.is_terminal:
             handle.done.set()

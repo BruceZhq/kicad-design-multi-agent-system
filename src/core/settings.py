@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     MAX_CONCURRENT_RUNS: int = Field(default=4, ge=1, le=64)
     MAX_QUEUED_RUNS: int = Field(default=16, ge=0, le=1_000)
     MAX_REQUEST_BODY_BYTES: int = Field(default=2_000_000, ge=1_024, le=100_000_000)
-    RUN_TIMEOUT_SECONDS: float = Field(default=3_600, ge=1, le=86_400)
+    RUN_TIMEOUT_SECONDS: float = Field(default=36_000, ge=1, le=86_400)
     SSE_HEARTBEAT_SECONDS: float = Field(default=15, ge=1, le=60)
     SSE_EVENT_BUFFER_SIZE: int = Field(default=4_096, ge=32, le=100_000)
     SSE_MAX_EVENT_BYTES: int = Field(default=1_000_000, ge=1_024, le=10_000_000)
@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     TEMPORAL_TLS: bool | None = None
     RATSNESTPRO_TEMPORAL_TASK_QUEUE: str = "ratsnest-hardware"
     RATSNESTPRO_TEMPORAL_WORKER_CONCURRENCY: int = Field(default=1, ge=1, le=8)
-    RATSNESTPRO_TEMPORAL_WORKFLOW_TIMEOUT_SECONDS: int = Field(default=7_200, ge=60, le=86_400)
+    RATSNESTPRO_TEMPORAL_WORKFLOW_TIMEOUT_SECONDS: int = Field(default=36_000, ge=60, le=86_400)
     RATSNESTPRO_TEMPORAL_STEP_TIMEOUT_SECONDS: int = Field(default=600, ge=10, le=7_200)
     RATSNESTPRO_TEMPORAL_ROUTING_TIMEOUT_SECONDS: int = Field(default=1_800, ge=10, le=14_400)
     RATSNESTPRO_TEMPORAL_HEARTBEAT_SECONDS: int = Field(default=15, ge=1, le=300)

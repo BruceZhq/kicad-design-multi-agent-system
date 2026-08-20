@@ -1124,7 +1124,7 @@ flowchart LR
 | 意图 | `src/agents/ratsnestpro/intent_router.py`：`IntentDecision`、`classify_intent`、`parse_llm_decision` |
 | checkpoint/store | `src/memory/postgres.py`、`src/service/service.py` lifespan与`_handle_input` |
 | 同thread单写 | `src/service/run_coordination.py`：`serialize_thread_run`、PostgreSQL advisory lock |
-| AHE contracts/loop | `src/RatsNestPro-main/RatsNestPro-main/src/ratsnestpro/orchestration/ahe.py`和`pipeline.py` |
+| AHE contracts/loop | `src/ratsnestpro/orchestration/ahe.py`和`pipeline.py` |
 | EHE | `src/agents/ratsnestpro/ehe_memory.py`：`record/strategy_score/candidate_summary/promote_verified_run` |
 | Temporal | `src/agents/ratsnestpro/temporal/workflow.py`、`client.py`、`activities.py` |
 | DeepSeek与reasoning | `src/core/llm.py`、`src/service/llm_output.py`、`src/service/service.py`流式分支 |

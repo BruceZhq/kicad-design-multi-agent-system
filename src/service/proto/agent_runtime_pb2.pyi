@@ -107,7 +107,7 @@ class SubscribeRunEventsRequest(_message.Message):
     def __init__(self, run: _Optional[_Union[GetRunRequest, _Mapping]] = ..., last_event_seq: _Optional[int] = ...) -> None: ...
 
 class Run(_message.Message):
-    __slots__ = ("request_id", "graph_run_id", "kind", "state", "agent_id", "thread_id", "created_at", "started_at", "finished_at", "event_count", "oldest_event_seq", "newest_event_seq", "error_code", "error", "result_json")
+    __slots__ = ("request_id", "graph_run_id", "kind", "state", "agent_id", "thread_id", "created_at", "started_at", "finished_at", "event_count", "oldest_event_seq", "newest_event_seq", "error_code", "error", "result_json", "execution_lease_active", "recoverable", "lease_expires_at", "checked_at")
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     GRAPH_RUN_ID_FIELD_NUMBER: _ClassVar[int]
     KIND_FIELD_NUMBER: _ClassVar[int]
@@ -123,6 +123,10 @@ class Run(_message.Message):
     ERROR_CODE_FIELD_NUMBER: _ClassVar[int]
     ERROR_FIELD_NUMBER: _ClassVar[int]
     RESULT_JSON_FIELD_NUMBER: _ClassVar[int]
+    EXECUTION_LEASE_ACTIVE_FIELD_NUMBER: _ClassVar[int]
+    RECOVERABLE_FIELD_NUMBER: _ClassVar[int]
+    LEASE_EXPIRES_AT_FIELD_NUMBER: _ClassVar[int]
+    CHECKED_AT_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     graph_run_id: str
     kind: str
@@ -138,7 +142,11 @@ class Run(_message.Message):
     error_code: str
     error: str
     result_json: str
-    def __init__(self, request_id: _Optional[str] = ..., graph_run_id: _Optional[str] = ..., kind: _Optional[str] = ..., state: _Optional[_Union[RunState, str]] = ..., agent_id: _Optional[str] = ..., thread_id: _Optional[str] = ..., created_at: _Optional[str] = ..., started_at: _Optional[str] = ..., finished_at: _Optional[str] = ..., event_count: _Optional[int] = ..., oldest_event_seq: _Optional[int] = ..., newest_event_seq: _Optional[int] = ..., error_code: _Optional[str] = ..., error: _Optional[str] = ..., result_json: _Optional[str] = ...) -> None: ...
+    execution_lease_active: bool
+    recoverable: bool
+    lease_expires_at: str
+    checked_at: str
+    def __init__(self, request_id: _Optional[str] = ..., graph_run_id: _Optional[str] = ..., kind: _Optional[str] = ..., state: _Optional[_Union[RunState, str]] = ..., agent_id: _Optional[str] = ..., thread_id: _Optional[str] = ..., created_at: _Optional[str] = ..., started_at: _Optional[str] = ..., finished_at: _Optional[str] = ..., event_count: _Optional[int] = ..., oldest_event_seq: _Optional[int] = ..., newest_event_seq: _Optional[int] = ..., error_code: _Optional[str] = ..., error: _Optional[str] = ..., result_json: _Optional[str] = ..., execution_lease_active: bool = ..., recoverable: bool = ..., lease_expires_at: _Optional[str] = ..., checked_at: _Optional[str] = ...) -> None: ...
 
 class RunEvent(_message.Message):
     __slots__ = ("event_seq", "run_id", "type", "payload_json", "created_at")

@@ -4,7 +4,10 @@ import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "
 
 import { AccountMenu } from "@/components/account-menu";
 import { MarkdownContent } from "@/components/markdown-content";
-import { requestedCapabilityProfile, requiresNewRun } from "@/lib/request-intent";
+import {
+  requestedCapabilityProfile,
+  runSubmissionMode,
+} from "@/lib/request-intent";
 import { readSseStream } from "@/lib/sse";
 import {
   CapabilityProfileMetadata,
@@ -12,20 +15,32 @@ import {
   ConversationSummary,
   DisplayMessage,
   HumanInputRequest,
+  RunActivitySnapshot,
   RunArtifact,
   RunEvent,
+  RunEventConnectionState,
+  RunRuntimeStatus,
   RunSummary,
   ServiceInfo,
   TerminalRunEvent,
+  canReconnectRuntimeEvents,
+  canRecoverRuntime,
   isTerminalRunEvent,
   isTerminalReplayFailure,
+  isRunActivityRoleReached,
   makeMessage,
   parseArtifactList,
   parseChatMessage,
   parseConversationList,
   parseHumanInputRequest,
   parseRunEvent,
+  parseRunRuntimeStatus,
   parseRunSummary,
+  reduceRunActivity,
+  runActivityStatusPresentation,
+  runtimeStatusFetchMode,
+  runtimeStatusLabel,
+  selectNewerActivitySnapshot,
 } from "@/types/chat";
 import { TeamConfig, TeamRole } from "@/types/team";
 
@@ -64,6 +79,18 @@ class HumanInputRequestedError extends Error {}
 
 type Channel = "design" | "evidence" | "review";
 type ModelLoadState = "waiting" | "loading" | "ready" | "error";
+interface ObservedRun {
+  runId: string;
+  threadId: string;
+  controller: AbortController;
+}
+
+interface ProfileMigrationNotice {
+  sourceRunId: string;
+  sourceRevisionNumber: number;
+  sourceProfile: string;
+  targetProfile: string;
+}
 
 function newId(): string {
   return crypto.randomUUID();
@@ -150,19 +177,57 @@ function phaseForRole(role: TeamRole): string[] {
   return [`specialist:${role.role_id}`];
 }
 
-function roleStatus(role: TeamRole, events: DisplayMessage[], busy: boolean): string {
+function roleStatus(
+  role: TeamRole,
+  events: DisplayMessage[],
+  busy: boolean,
+  activity: RunActivitySnapshot | null,
+): ReturnType<typeof runActivityStatusPresentation> {
   const phases = phaseForRole(role);
+  if (activity) {
+    const snapshot = activity.roleStatuses.find((item) =>
+      item.role === role.role_id || phases.some((phase) =>
+        item.role === phase || item.phase === phase || item.phase?.startsWith(`${phase}:`) === true,
+      ),
+    );
+    if (snapshot) {
+      return runActivityStatusPresentation(snapshot.status);
+    }
+    return activity.complete
+      ? { label: "等待中", tone: "neutral" }
+      : { label: "未知", tone: "neutral" };
+  }
   const matching = events.filter((message) => {
     const phase = String(message.custom_data.phase ?? "");
     return phases.some((candidate) => phase === candidate || phase.startsWith(`${candidate}:`));
   });
   const latest = matching.at(-1);
   const status = String(latest?.custom_data.status ?? "");
-  if (status === "started" || status === "retrying" || status === "waiting") return "执行中";
-  if (status === "completed" || status === "ok") return "已完成";
-  if (status === "blocked" || status === "failed" || status === "error") return "有问题";
-  if (role.role_id === "supervisor-ratsnestpro" && busy) return "正在统筹";
-  return "等待中";
+  if (status) return runActivityStatusPresentation(status);
+  if (role.role_id === "supervisor-ratsnestpro" && busy) return { label: "正在统筹", tone: "live" };
+  return { label: "等待中", tone: "neutral" };
+}
+
+const ACTIVITY_STEP_LABELS: Record<string, string> = {
+  layout_write: "确定性布局写入",
+  schematic_generation: "原理图生成",
+  pcb_generation: "PCB 生成",
+  dsn_export: "DSN 导出",
+  freerouting: "Freerouting 布线",
+  ses_import: "SES 导回",
+  erc: "ERC 检查",
+  drc: "DRC 检查",
+  bom_cpl: "BOM / CPL 生成",
+  gerber: "Gerber 生成",
+  drill: "钻孔文件生成",
+  reviewer: "独立审查",
+};
+
+function activityStepLabel(value: string | null): string {
+  if (!value) return "工作流事件";
+  const normalized = value.startsWith("pipeline:") ? value.slice("pipeline:".length) : value;
+  const label = ACTIVITY_STEP_LABELS[normalized];
+  return label ? `${label}（${normalized}）` : normalized;
 }
 
 function messageAgent(message: DisplayMessage): string {
@@ -191,6 +256,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
   const [model, setModel] = useState("");
   const [profiles, setProfiles] = useState<CapabilityProfileMetadata[]>([]);
   const [profileReference, setProfileReference] = useState("");
+  const [profileMigrationNotice, setProfileMigrationNotice] = useState<ProfileMigrationNotice | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceContext | null>(null);
   const [workspaceSetupRequired, setWorkspaceSetupRequired] = useState(false);
   const [workspaceCreating, setWorkspaceCreating] = useState(false);
@@ -213,11 +279,21 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
   const [runState, setRunState] = useState<"idle" | "running" | "waiting_for_input" | TerminalRunEvent | "disconnected" | "rejected">("idle");
   const [interaction, setInteraction] = useState<InteractionState | null>(null);
   const [latestRun, setLatestRun] = useState<RunSummary | null>(null);
+  const [runtimeStatus, setRuntimeStatus] = useState<RunRuntimeStatus | null>(null);
+  const [activitySnapshot, setActivitySnapshot] = useState<RunActivitySnapshot | null>(null);
+  const [runtimeStatusError, setRuntimeStatusError] = useState("");
+  const [runtimeStatusStale, setRuntimeStatusStale] = useState(false);
+  const [eventStreamState, setEventStreamState] = useState<RunEventConnectionState>("idle");
+  const [recoveryPending, setRecoveryPending] = useState(false);
   const [artifacts, setArtifacts] = useState<RunArtifact[]>([]);
   const [artifactLoading, setArtifactLoading] = useState(false);
   const [artifactError, setArtifactError] = useState("");
   const [channel, setChannel] = useState<Channel>("design");
   const activeRun = useRef<ActiveRun | null>(null);
+  const observedRun = useRef<ObservedRun | null>(null);
+  const eventCursors = useRef<Record<string, number>>({});
+  const terminalRuntimeRefresh = useRef<string | null>(null);
+  const terminalStatusRequests = useRef<Set<string>>(new Set());
   const selectedThread = useRef("");
   const skipHistoryThread = useRef<string | null>(null);
   const messageEnd = useRef<HTMLDivElement | null>(null);
@@ -450,6 +526,103 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     messageEnd.current?.scrollIntoView({ behavior: busy ? "smooth" : "auto" });
   }, [busy, liveMessage, messages]);
 
+  useEffect(() => {
+    const selected = conversations.find((item) => item.threadId === threadId);
+    if (!workspaceReady || !workspace || !selected) return;
+    const nonTerminal = runtimeStatusFetchMode(selected.state) === "poll";
+    if (!nonTerminal && terminalStatusRequests.current.has(selected.latestRunId)) return;
+
+    let disposed = false;
+    let terminalRequestStarted = false;
+    let timer: number | undefined;
+    let freshnessTimer: number | undefined;
+    let requestController: AbortController | null = null;
+    const poll = async (): Promise<void> => {
+      if (disposed || document.hidden) return;
+      if (!nonTerminal) {
+        if (terminalRequestStarted || terminalStatusRequests.current.has(selected.latestRunId)) return;
+        terminalRequestStarted = true;
+      }
+      const controller = new AbortController();
+      requestController = controller;
+      try {
+        const response = await fetch(
+          `/api/runs/${encodeURIComponent(selected.latestRunId)}/runtime-status?organization_id=${encodeURIComponent(workspace.organization.tenantId)}`,
+          { cache: "no-store", signal: controller.signal },
+        );
+        if (response.status === 401) {
+          expireAuthentication();
+          return;
+        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const parsed = parseRunRuntimeStatus(await response.json());
+        if (!parsed || parsed.runId !== selected.latestRunId) throw new Error("invalid runtime status");
+        if (!nonTerminal) terminalStatusRequests.current.add(selected.latestRunId);
+        setRuntimeStatus(parsed);
+        setActivitySnapshot((current) => selectNewerActivitySnapshot(current, parsed.activity));
+        setRuntimeStatusError("");
+        setRuntimeStatusStale(false);
+        if (nonTerminal) {
+          if (freshnessTimer !== undefined) window.clearTimeout(freshnessTimer);
+          freshnessTimer = window.setTimeout(() => setRuntimeStatusStale(true), 10_000);
+        }
+        if (parsed.recoveryState === "TERMINAL") {
+          void loadDelivery(parsed.runId);
+          if (terminalRuntimeRefresh.current !== parsed.runId) {
+            terminalRuntimeRefresh.current = parsed.runId;
+            setConversationRefresh((value) => value + 1);
+          }
+          return;
+        }
+      } catch (error) {
+        if (!nonTerminal && controller.signal.aborted && !disposed) terminalRequestStarted = false;
+        if (!disposed && !controller.signal.aborted) {
+          if (!nonTerminal) terminalStatusRequests.current.add(selected.latestRunId);
+          setRuntimeStatusError(error instanceof Error ? error.message : "运行状态暂不可用");
+          setRuntimeStatusStale(true);
+        }
+      }
+      if (nonTerminal && !disposed && !document.hidden) timer = window.setTimeout(() => void poll(), 4_000);
+    };
+    const onVisibilityChange = (): void => {
+      if (document.hidden) {
+        if (timer !== undefined) window.clearTimeout(timer);
+        if (freshnessTimer !== undefined) window.clearTimeout(freshnessTimer);
+        if (nonTerminal) setRuntimeStatusStale(true);
+        requestController?.abort();
+      } else if (nonTerminal || (!terminalRequestStarted && !terminalStatusRequests.current.has(selected.latestRunId))) {
+        void poll();
+      }
+    };
+    setRuntimeStatusError("");
+    setRuntimeStatusStale(false);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    void poll();
+    return () => {
+      disposed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      if (freshnessTimer !== undefined) window.clearTimeout(freshnessTimer);
+      requestController?.abort();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [workspaceReady, workspace, conversations, threadId]);
+
+  useEffect(() => {
+    if (!runtimeStatus || !activitySnapshot || runtimeStatus.recoveryState !== "ACTIVE" || runtimeStatusStale) return;
+    const selected = conversations.find((item) => item.threadId === threadId);
+    if (!selected || selected.latestRunId !== runtimeStatus.runId) return;
+    if (activeRun.current?.runId !== runtimeStatus.runId) {
+      void observeExistingRun(runtimeStatus, activitySnapshot);
+    }
+    return () => {
+      const observed = observedRun.current;
+      if (observed?.runId === runtimeStatus.runId && observed.threadId === threadId) {
+        observed.controller.abort();
+        observedRun.current = null;
+      }
+    };
+  }, [runtimeStatus?.runId, runtimeStatus?.recoveryState, activitySnapshot === null, threadId]);
+
   async function loadDelivery(runId: string): Promise<void> {
     if (!workspace) return;
     setArtifactLoading(true);
@@ -478,6 +651,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
   }
 
   function handleRunEvent(event: RunEvent): HumanInputRequest | null {
+    setActivitySnapshot((current) => reduceRunActivity(current, event));
     const humanInput = parseHumanInputRequest(event);
     if (humanInput) {
       commitLive();
@@ -579,19 +753,27 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     if (!message || busy || interaction?.status === "waiting" || interaction?.status === "error" || !workspaceReady || !workspace || !model || !selectedProfile) return;
 
     const idempotencyKey = newId();
-    const activeRunProfileReference = latestRun?.capabilityProfile
-      ? `${latestRun.capabilityProfile.id}@${latestRun.capabilityProfile.version}`
-      : latestRun
-        ? null
-        : undefined;
-    const newProject = requiresNewRun(
+    const mode = runSubmissionMode(
       message,
-      effectiveProfileReference,
-      activeRunProfileReference,
+      selectedProfile,
+      latestRun ? latestRun.capabilityProfile : undefined,
     );
-    const submissionThreadId = newProject ? newId() : threadId;
+    const profileMigration = mode === "profile-migration";
+    const newProject = mode === "explicit-new-project" || profileMigration;
+    const migrationSource = profileMigration ? latestRun : null;
+    if (profileMigration && migrationSource) {
+      const source = migrationSource.capabilityProfile
+        ? `${migrationSource.capabilityProfile.id}@${migrationSource.capabilityProfile.version}`
+        : "未知能力快照";
+      const confirmed = window.confirm(
+        `能力范围将从 ${source} 迁移到 ${selectedProfile.id}@${selectedProfile.version}。\n\n系统会创建新的工程会话，并由服务端仅重放截至 Revision ${migrationSource.revisionNumber} 的用户需求与确认链；旧工程证据、产物和检查点不会继承，目标能力范围将从头验证。该操作可能消耗 Token。是否继续？`,
+      );
+      if (!confirmed) return;
+    }
+    let submissionThreadId = profileMigration ? threadId : newProject ? newId() : threadId;
     const baseRunId = newProject ? null : latestRun?.runId ?? null;
-    if (newProject) {
+    const forkSourceRunId = migrationSource?.runId ?? null;
+    if (newProject && !profileMigration) {
       skipHistoryThread.current = submissionThreadId;
       localStorage.setItem(THREAD_KEY, submissionThreadId);
       selectedThread.current = submissionThreadId;
@@ -604,19 +786,26 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     }
     const controller = new AbortController();
     activeRun.current = { idempotencyKey, runId: null, controller, lastEventId: 0 };
-    setMessages((current) => [
-      ...(newProject ? [] : current),
-      displayMessage(makeMessage("human", message)),
-    ]);
-    setInteraction(null);
-    setLive(displayMessage(makeMessage("ai", ""), true));
-    setDraft("");
-    setStatus("智能体团队正在工作");
+    if (!profileMigration) {
+      setMessages((current) => [
+        ...(newProject ? [] : current),
+        displayMessage(makeMessage("human", message)),
+      ]);
+      if (mode !== "revision") setProfileMigrationNotice(null);
+      setInteraction(null);
+      setLive(displayMessage(makeMessage("ai", ""), true));
+      setDraft("");
+      setLatestRun(null);
+      setRuntimeStatus(null);
+      setActivitySnapshot(null);
+      setRuntimeStatusError("");
+      setArtifacts([]);
+      setArtifactError("");
+    }
+    setStatus(profileMigration ? "正在创建安全的能力范围迁移…" : "智能体团队正在工作");
     setRunState("running");
-    setLatestRun(null);
-    setArtifacts([]);
-    setArtifactError("");
     setBusy(true);
+    setEventStreamState("connecting");
 
     let lastEventId = 0;
     let reconnectDelay = 600;
@@ -624,6 +813,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     let runId: string | null = null;
     let replayRejected = false;
     let awaitingInput = false;
+    let migrationSwitched = !profileMigration;
 
     try {
       for (let attempt = 0; attempt <= MAX_RECONNECTS && terminal === null; attempt += 1) {
@@ -639,6 +829,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
               thread_id: submissionThreadId,
               request_id: idempotencyKey,
               base_run_id: baseRunId,
+              fork_source_run_id: forkSourceRunId,
               last_event_id: lastEventId,
               capability_profile: {
                 id: selectedProfile.id,
@@ -674,6 +865,44 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
             throw new Error("运行标识缺失或发生变化");
           }
           runId = responseRunId;
+          if (profileMigration && !migrationSwitched) {
+            if (selectedThread.current !== submissionThreadId) {
+              throw new NonRetryableRequestError("已离开来源会话，迁移任务将在后台继续");
+            }
+            const responseThreadId = safeIdentity(response.headers.get("x-thread-id"));
+            const responseSourceRunId = safeIdentity(response.headers.get("x-forked-from-run-id"));
+            if (!responseThreadId || responseSourceRunId !== forkSourceRunId || !migrationSource) {
+              throw new NonRetryableRequestError("服务端未返回可验证的迁移谱系");
+            }
+            submissionThreadId = responseThreadId;
+            skipHistoryThread.current = responseThreadId;
+            localStorage.setItem(THREAD_KEY, responseThreadId);
+            selectedThread.current = responseThreadId;
+            const url = new URL(window.location.href);
+            url.searchParams.set("thread_id", responseThreadId);
+            window.history.replaceState(null, "", url);
+            setThreadId(responseThreadId);
+            setMessages([displayMessage(makeMessage("human", message))]);
+            setProfileMigrationNotice({
+              sourceRunId: migrationSource.runId,
+              sourceRevisionNumber: migrationSource.revisionNumber,
+              sourceProfile: migrationSource.capabilityProfile
+                ? `${migrationSource.capabilityProfile.id}@${migrationSource.capabilityProfile.version}`
+                : "未知能力快照",
+              targetProfile: `${selectedProfile.id}@${selectedProfile.version}`,
+            });
+            setInteraction(null);
+            setLive(displayMessage(makeMessage("ai", ""), true));
+            setDraft("");
+            setLatestRun(null);
+            setRuntimeStatus(null);
+            setActivitySnapshot(null);
+            setRuntimeStatusError("");
+            setArtifacts([]);
+            setArtifactError("");
+            migrationSwitched = true;
+          }
+          setEventStreamState("connected");
           if (activeRun.current?.idempotencyKey === idempotencyKey) {
             activeRun.current.runId = runId;
           }
@@ -707,31 +936,41 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
         } catch (error) {
           if (error instanceof HumanInputRequestedError) {
             controller.abort();
+            setEventStreamState("idle");
             break;
           }
           if (controller.signal.aborted) throw error;
           if (error instanceof NonRetryableRequestError) throw error;
           if (attempt === MAX_RECONNECTS) throw error;
-          setStatus(`连接中断，正在恢复（${attempt + 1}/${MAX_RECONNECTS}）`);
+          setEventStreamState("retrying");
+          setStatus(`实时事件连接中断，正在恢复（${attempt + 1}/${MAX_RECONNECTS}）`);
           await waitForRetry(Math.min(reconnectDelay * 2 ** attempt, 5_000), controller.signal);
         }
       }
       if (!awaitingInput) commitLive();
+      if (terminal !== null) setEventStreamState("idle");
     } catch (error) {
       if (selectedThread.current !== submissionThreadId) {
         // The user opened another conversation. The backend run continues;
         // only this page's event subscription was detached.
+      } else if (profileMigration && !migrationSwitched) {
+        setEventStreamState("disconnected");
+        setStatus(error instanceof Error ? `能力范围迁移未确认：${error.message}` : "能力范围迁移未确认");
+        setRunState(error instanceof NonRetryableRequestError ? "rejected" : "disconnected");
       } else if (controller.signal.aborted) {
+        setEventStreamState("disconnected");
         updateLive((item) => ({ ...item, content: item.content || "已停止接收运行事件，正在确认后端取消状态。", pending: false }));
         commitLive();
         setStatus("已停止接收，正在确认取消状态");
         setRunState("disconnected");
       } else if (error instanceof NonRetryableRequestError) {
+        setEventStreamState("disconnected");
         updateLive((item) => ({ ...item, content: item.content || `请求未被接受：${error.message}`, pending: false }));
         commitLive();
         setStatus("请求未被接受");
         setRunState("rejected");
       } else {
+        setEventStreamState("disconnected");
         const reason = error instanceof Error ? error.message : "连接失败";
         updateLive((item) => ({ ...item, content: item.content || `连接中断：${reason}`, pending: false }));
         commitLive();
@@ -741,6 +980,106 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     } finally {
       if (activeRun.current?.idempotencyKey === idempotencyKey) activeRun.current = null;
       if (selectedThread.current === submissionThreadId) setBusy(false);
+    }
+  }
+
+  async function followExistingRun(
+    runId: string,
+    initialLastEventId: number,
+    expectedThreadId: string,
+    idempotencyKey: string,
+    controller: AbortController,
+  ): Promise<void> {
+    if (!workspace) throw new NonRetryableRequestError("工作区不可用");
+    let lastEventId = initialLastEventId;
+    let reconnectDelay = 600;
+    let terminal: TerminalRunEvent | null = null;
+    let replayRejected = false;
+    let awaitingInput = false;
+    for (let attempt = 0; attempt <= MAX_RECONNECTS && terminal === null; attempt += 1) {
+      try {
+        const events = await fetch(
+          `/api/runs/${encodeURIComponent(runId)}/events?organization_id=${encodeURIComponent(workspace.organization.tenantId)}`,
+          {
+            headers: { Accept: "text/event-stream", "Last-Event-ID": String(lastEventId) },
+            signal: controller.signal,
+          },
+        );
+        if (events.status === 401) {
+          expireAuthentication();
+          throw new NonRetryableRequestError("登录已失效，请重新登录");
+        }
+        if (!events.ok || !events.body) {
+          const detail: unknown = await events.json().catch(() => null);
+          const reason = errorText(detail, `事件订阅失败（HTTP ${events.status}）`);
+          if (events.status < 500) throw new NonRetryableRequestError(reason);
+          throw new Error(reason);
+        }
+        setEventStreamState("connected");
+        await readSseStream(events.body, (sseEvent) => {
+          if (sseEvent.retry !== undefined) reconnectDelay = Math.max(250, sseEvent.retry);
+          try {
+            const runEvent = parseRunEvent(JSON.parse(sseEvent.data));
+            if (!runEvent || runEvent.runId !== runId || runEvent.eventId <= lastEventId) return;
+            lastEventId = runEvent.eventId;
+            eventCursors.current[runId] = lastEventId;
+            if (activeRun.current?.idempotencyKey === idempotencyKey) {
+              activeRun.current.lastEventId = lastEventId;
+            }
+            if (selectedThread.current !== expectedThreadId) return;
+            if (handleRunEvent(runEvent)) {
+              awaitingInput = true;
+              throw new HumanInputRequestedError();
+            }
+            if (isTerminalReplayFailure(runEvent)) replayRejected = true;
+            if (isTerminalRunEvent(runEvent.type)) terminal = runEvent.type;
+          } catch (error) {
+            if (error instanceof HumanInputRequestedError) throw error;
+          }
+        });
+        if (replayRejected) throw new NonRetryableRequestError("事件回放窗口已过期，请重新加载会话历史");
+        if (terminal === null) throw new Error("响应流在终态事件前结束");
+      } catch (error) {
+        if (error instanceof HumanInputRequestedError) {
+          controller.abort();
+          setEventStreamState("idle");
+          break;
+        }
+        if (controller.signal.aborted || error instanceof NonRetryableRequestError || attempt === MAX_RECONNECTS) throw error;
+        setEventStreamState("retrying");
+        setStatus(`实时事件连接中断，正在恢复（${attempt + 1}/${MAX_RECONNECTS}）`);
+        await waitForRetry(Math.min(reconnectDelay * 2 ** attempt, 5_000), controller.signal);
+      }
+    }
+    if (!awaitingInput) {
+      commitLive();
+      setEventStreamState("idle");
+    }
+  }
+
+  async function observeExistingRun(
+    current: RunRuntimeStatus,
+    snapshot: RunActivitySnapshot | null = activitySnapshot,
+  ): Promise<void> {
+    if (!workspace || current.recoveryState !== "ACTIVE") return;
+    if (!snapshot) return;
+    if (activeRun.current?.runId === current.runId || observedRun.current?.runId === current.runId) return;
+    observedRun.current?.controller.abort();
+    const observedThreadId = threadId;
+    const controller = new AbortController();
+    observedRun.current = { runId: current.runId, threadId: observedThreadId, controller };
+    const cursor = Math.max(snapshot.snapshotCursor, eventCursors.current[current.runId] ?? 0);
+    setEventStreamState("connecting");
+    setStatus("正在连接后台任务的实时事件…");
+    try {
+      await followExistingRun(current.runId, cursor, observedThreadId, `observe:${current.runId}`, controller);
+    } catch (error) {
+      if (!controller.signal.aborted && selectedThread.current === observedThreadId) {
+        setEventStreamState("disconnected");
+        setStatus("后台执行仍在线，但实时事件连接已断开");
+      }
+    } finally {
+      if (observedRun.current?.controller === controller) observedRun.current = null;
     }
   }
 
@@ -787,67 +1126,19 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
       setLive(displayMessage(makeMessage("ai", ""), true));
       setRunState("running");
       setBusy(true);
+      setEventStreamState("connecting");
       setStatus("已提交，智能体团队继续工作");
 
-      let lastEventId = current.lastEventId;
-      let reconnectDelay = 600;
-      let terminal: TerminalRunEvent | null = null;
-      let replayRejected = false;
-      let awaitingInput = false;
-      for (let attempt = 0; attempt <= MAX_RECONNECTS && terminal === null; attempt += 1) {
-        try {
-          const events = await fetch(
-            `/api/runs/${encodeURIComponent(current.runId)}/events?organization_id=${encodeURIComponent(workspace.organization.tenantId)}`,
-            {
-              headers: { Accept: "text/event-stream", "Last-Event-ID": String(lastEventId) },
-              signal: controller.signal,
-            },
-          );
-          if (events.status === 401) {
-            expireAuthentication();
-            throw new NonRetryableRequestError("登录已失效，请重新登录");
-          }
-          if (!events.ok || !events.body) {
-            const detail: unknown = await events.json().catch(() => null);
-            const reason = errorText(detail, `事件订阅失败（HTTP ${events.status}）`);
-            if (events.status < 500) throw new NonRetryableRequestError(reason);
-            throw new Error(reason);
-          }
-          await readSseStream(events.body, (sseEvent) => {
-            if (sseEvent.retry !== undefined) reconnectDelay = Math.max(250, sseEvent.retry);
-            try {
-              const runEvent = parseRunEvent(JSON.parse(sseEvent.data));
-              if (!runEvent || runEvent.runId !== current.runId || runEvent.eventId <= lastEventId) return;
-              lastEventId = runEvent.eventId;
-              if (activeRun.current?.idempotencyKey === current.idempotencyKey) {
-                activeRun.current.lastEventId = lastEventId;
-              }
-              if (selectedThread.current !== interactionThreadId) return;
-              if (handleRunEvent(runEvent)) {
-                awaitingInput = true;
-                throw new HumanInputRequestedError();
-              }
-              if (isTerminalReplayFailure(runEvent)) replayRejected = true;
-              if (isTerminalRunEvent(runEvent.type)) terminal = runEvent.type;
-            } catch (error) {
-              if (error instanceof HumanInputRequestedError) throw error;
-            }
-          });
-          if (replayRejected) throw new NonRetryableRequestError("事件回放窗口已过期，请重新加载会话历史");
-          if (terminal === null) throw new Error("响应流在终态事件前结束");
-        } catch (error) {
-          if (error instanceof HumanInputRequestedError) {
-            controller.abort();
-            break;
-          }
-          if (controller.signal.aborted || error instanceof NonRetryableRequestError || attempt === MAX_RECONNECTS) throw error;
-          setStatus(`连接中断，正在恢复（${attempt + 1}/${MAX_RECONNECTS}）`);
-          await waitForRetry(Math.min(reconnectDelay * 2 ** attempt, 5_000), controller.signal);
-        }
-      }
-      if (!awaitingInput) commitLive();
+      await followExistingRun(
+        current.runId,
+        current.lastEventId,
+        interactionThreadId,
+        current.idempotencyKey,
+        controller,
+      );
     } catch (error) {
       if (!controller.signal.aborted && selectedThread.current === interactionThreadId) {
+        setEventStreamState("disconnected");
         const reason = error instanceof Error ? error.message : "提交澄清信息失败";
         setInteraction({ ...current, status: "error", answer, error: reason });
         setStatus(reason);
@@ -856,6 +1147,68 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     } finally {
       if (activeRun.current?.idempotencyKey === current.idempotencyKey) activeRun.current = null;
       if (selectedThread.current === interactionThreadId) setBusy(false);
+    }
+  }
+
+  async function recoverRun(): Promise<void> {
+    if (!workspace || !runtimeStatus || runtimeStatus.recoveryState !== "RECOVERABLE" || recoveryPending) return;
+    const confirmed = window.confirm(
+      "从上次保存的检查点恢复任务？\n\n恢复后会继续调用模型和工程工具，可能产生 Token 与计算消耗。",
+    );
+    if (!confirmed) return;
+
+    const runId = runtimeStatus.runId;
+    const recoveryThreadId = threadId;
+    const idempotencyKey = newId();
+    const controller = new AbortController();
+    activeRun.current = {
+      idempotencyKey,
+      runId,
+      controller,
+      lastEventId: runtimeStatus.lastEventId,
+    };
+    setRecoveryPending(true);
+    setBusy(true);
+    setInteraction(null);
+    setLive(displayMessage(makeMessage("ai", ""), true));
+    setRunState("running");
+    setEventStreamState("connecting");
+    setStatus("正在恢复中断的任务…");
+    setRuntimeStatus((current) => current ? { ...current, recoveryState: "RECOVERING" } : current);
+    try {
+      const response = await fetch(
+        `/api/runs/${encodeURIComponent(runId)}/recover?organization_id=${encodeURIComponent(workspace.organization.tenantId)}`,
+        { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, signal: controller.signal },
+      );
+      if (response.status === 401) {
+        expireAuthentication();
+        throw new NonRetryableRequestError("登录已失效，请重新登录");
+      }
+      if (!response.ok) {
+        const detail: unknown = await response.json().catch(() => null);
+        throw new NonRetryableRequestError(errorText(detail, `恢复请求失败（HTTP ${response.status}）`));
+      }
+      setStatus("任务已接管，正在从原检查点继续");
+      await followExistingRun(
+        runId,
+        runtimeStatus.lastEventId,
+        recoveryThreadId,
+        idempotencyKey,
+        controller,
+      );
+    } catch (error) {
+      if (!controller.signal.aborted && selectedThread.current === recoveryThreadId) {
+        setEventStreamState("disconnected");
+        const reason = error instanceof Error ? error.message : "恢复任务失败";
+        setStatus(reason);
+        setRunState("disconnected");
+        setLive(null);
+      }
+    } finally {
+      if (activeRun.current?.idempotencyKey === idempotencyKey) activeRun.current = null;
+      if (selectedThread.current === recoveryThreadId) setBusy(false);
+      setRecoveryPending(false);
+      setConversationRefresh((value) => value + 1);
     }
   }
 
@@ -915,6 +1268,8 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
   function createThread() {
     activeRun.current?.controller.abort();
     activeRun.current = null;
+    observedRun.current?.controller.abort();
+    observedRun.current = null;
     const nextThread = newId();
     localStorage.setItem(THREAD_KEY, nextThread);
     selectedThread.current = nextThread;
@@ -927,10 +1282,13 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     setStatus("新工程会话已创建");
     setRunState("idle");
     setLatestRun(null);
+    setProfileMigrationNotice(null);
+    setActivitySnapshot(null);
     setArtifacts([]);
     setArtifactError("");
     setInteraction(null);
     setBusy(false);
+    setEventStreamState("idle");
   }
 
   async function removeConversation(conversation: ConversationSummary): Promise<void> {
@@ -978,12 +1336,16 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
   const allVisible = liveMessage ? [...messages, liveMessage] : messages;
   const visibleMessages = allVisible.filter((message) => channelIncludes(message, channel));
   const eventMessages = messages.filter((message) => message.type === "custom");
-  const recentEvents = eventMessages.slice(-6).reverse();
-  const reviewerCompleted = eventMessages.some((message) => {
+  const recentMessageEvents = eventMessages.slice(-6).reverse();
+  const reviewerFromMessages = eventMessages.some((message) => {
     const phase = String(message.custom_data.phase ?? "").toLowerCase();
     const eventStatus = String(message.custom_data.status ?? "").toLowerCase();
     return phase.includes("review") && (eventStatus === "completed" || eventStatus === "ok");
   });
+  const reviewerSnapshot = activitySnapshot?.roleStatuses.find((item) => item.role === "reviewer");
+  const reviewerStatus = reviewerSnapshot?.status.toLowerCase();
+  const reviewerCompleted = reviewerStatus === "completed" || reviewerStatus === "ok" || reviewerStatus === "release_ready" ||
+    (!activitySnapshot && reviewerFromMessages);
   const kicadArtifacts = artifacts.filter((artifact) =>
     artifact.kind.includes("kicad") || /\.kicad_(?:pro|sch|pcb)$/i.test(artifact.fileName),
   );
@@ -991,11 +1353,44 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     /(?:bom|cpl|gerber|drill|manufactur)/i.test(artifact.kind) ||
     /\.(?:csv|pos|gbr|drl|zip)$/i.test(artifact.fileName),
   );
-  const deliveryState = artifactLoading
+  const snapshotArtifactText = activitySnapshot?.delivery.artifacts.map((artifact) => JSON.stringify(artifact)).join("\n") ?? "";
+  const snapshotKicadCount = activitySnapshot?.delivery.artifacts.filter((artifact) => /kicad_(?:pro|sch|pcb)|\.kicad_(?:pro|sch|pcb)/i.test(JSON.stringify(artifact))).length ?? 0;
+  const snapshotManufacturingCount = snapshotArtifactText
+    ? activitySnapshot?.delivery.artifacts.filter((artifact) => /bom|cpl|gerber|drill|\.gbr|\.drl|\.csv|\.pos/i.test(JSON.stringify(artifact))).length ?? 0
+    : 0;
+  const deliveryState = activitySnapshot?.delivery.status ?? latestRun?.deliveryStatus ?? (artifactLoading
     ? "正在验证产物清单"
-    : artifactError
-      ? artifactError
-      : latestRun?.deliveryStatus ?? (busy ? "执行中" : "等待任务");
+    : artifactError || "交付状态未知");
+  const pipelineBlocked = ["blocked", "failed", "error", "execution_blocked"]
+    .includes(activitySnapshot?.pipelineStatus?.toLowerCase() ?? "");
+  const blockedAt = activitySnapshot?.currentStep
+    ? `${activityStepLabel(activitySnapshot.currentStep)}${activitySnapshot.currentStepIndex !== null ? `（第 ${activitySnapshot.currentStepIndex}/${activitySnapshot.totalSteps ?? "?"} 步）` : ""}`
+    : "当前步骤";
+  const reviewerReached = activitySnapshot ? isRunActivityRoleReached(activitySnapshot, "reviewer") : reviewerFromMessages;
+  const reviewerState = activitySnapshot && pipelineBlocked && !reviewerReached
+    ? `未到达（${blockedAt}阻断）`
+    : reviewerSnapshot
+      ? runActivityStatusPresentation(reviewerSnapshot.status).label
+      : activitySnapshot
+        ? activitySnapshot.complete ? "未到达" : "状态未知"
+        : reviewerFromMessages ? "已完成" : "状态未知";
+  const selectedConversation = conversations.find((item) => item.threadId === threadId);
+  const runtimeNonTerminal = selectedConversation?.state === "QUEUED" || selectedConversation?.state === "RUNNING" ||
+    selectedConversation?.state === "WAITING_FOR_INPUT" || (runtimeStatus !== null &&
+      runtimeStatus.recoveryState !== "TERMINAL" && runtimeStatus.recoveryState !== "UNKNOWN");
+  const runtimeActive = runtimeStatus?.recoveryState === "ACTIVE" && !runtimeStatusStale;
+  const headerStatus = runtimeActive && eventStreamState === "disconnected"
+    ? "后台执行仍在线，但实时事件连接已断开"
+    : runtimeStatus && runtimeStatusStale
+      ? "运行状态暂不可确认"
+      : eventStreamState === "retrying"
+        ? "实时事件连接中断，正在重连"
+        : runtimeActive && eventStreamState === "connected"
+          ? "后台执行在线，实时事件已连接"
+          : runtimeActive
+            ? "执行器租约在线，正在连接实时事件"
+            : status;
+  const headerRunning = (busy || runtimeActive) && eventStreamState !== "disconnected" && !runtimeStatusStale;
   const modelPlaceholder = authenticationRequired
     ? "登录后读取模型"
     : modelLoadState === "loading"
@@ -1074,12 +1469,12 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
           <section className="team-roster">
             <small>智能体团队</small>
             {team.roles.map((role) => {
-              const currentStatus = roleStatus(role, eventMessages, busy);
+              const currentStatus = roleStatus(role, eventMessages, busy, activitySnapshot);
               return (
                 <div className="roster-row" key={role.role_id}>
                   <span>{role.badge}</span>
                   <strong title={role.responsibility}>{role.name}</strong>
-                  <em className={currentStatus === "执行中" || currentStatus === "正在统筹" ? "live" : currentStatus === "有问题" ? "issue" : ""}>{currentStatus}</em>
+                  <em className={currentStatus.tone === "neutral" ? "" : currentStatus.tone === "attention" ? "issue attention" : currentStatus.tone}>{currentStatus.label}</em>
                 </div>
               );
             })}
@@ -1145,10 +1540,19 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
         <section className="conversation-column">
           <header className="conversation-header">
             <div><strong># {channel === "design" ? "设计执行" : channel === "evidence" ? "资料与证据" : "审查问题"}</strong><span>{team.roles.length} 位智能体 · Supervisor 在线</span></div>
-            <span className={`live-state ${busy ? "running" : ""}`}><i /> {status}</span>
+            <span className={`live-state ${headerRunning ? "running" : ""}`}><i /> {headerStatus}</span>
           </header>
 
           <div className="conversation-scroll" aria-live="polite" aria-busy={busy}>
+            {channel === "design" && profileMigrationNotice && (
+              <section className="profile-migration-notice" aria-label="能力范围迁移来源">
+                <strong>能力范围迁移 · 新工程根节点</strong>
+                <span>
+                  {profileMigrationNotice.sourceProfile} → {profileMigrationNotice.targetProfile} · 来源 Revision {profileMigrationNotice.sourceRevisionNumber}
+                </span>
+                <small title={profileMigrationNotice.sourceRunId}>服务端已固定来源 Run {profileMigrationNotice.sourceRunId.slice(0, 8)}… 的用户意图重放范围；旧证据与检查点不继承，目标能力范围会从头验证。</small>
+              </section>
+            )}
             {authenticationRequired ? (
               <AuthenticationRequiredState loginHref={loginHref} />
             ) : workspaceSetupRequired ? (
@@ -1159,6 +1563,18 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
               <WelcomeState setDraft={setDraft} />
             ) : (
               visibleMessages.map((message) => <MessageCard key={message.clientId} message={message} />)
+            )}
+            {channel === "design" && runtimeStatus && (
+              <RunRuntimeCard
+                status={runtimeStatus}
+                activity={activitySnapshot}
+                error={runtimeStatusError}
+                stale={runtimeStatusStale}
+                streamState={eventStreamState}
+                recovering={recoveryPending}
+                onRecover={() => void recoverRun()}
+                onReconnect={() => void observeExistingRun(runtimeStatus)}
+              />
             )}
             {channel === "design" && interaction && (
               <HumanInputCard key={interaction.request.interactionId} interaction={interaction} onRespond={respondToInteraction} />
@@ -1175,7 +1591,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
               placeholder="描述需求，或在任务进行中补充约束与反馈…"
               rows={2}
               maxLength={100_000}
-              disabled={!workspaceReady || interaction?.status === "waiting" || interaction?.status === "error"}
+              disabled={!workspaceReady || runtimeNonTerminal || interaction?.status === "waiting" || interaction?.status === "error"}
               aria-label="KiCad 硬件设计需求"
             />
             <div className="composer-footer">
@@ -1183,7 +1599,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
               {busy ? (
                 <button className="stop-button" type="button" onClick={() => void cancelRun()}>停止</button>
               ) : (
-                <button className="send-button galaxy-tooltip" data-tooltip="发送给 Supervisor" type="submit" disabled={!draft.trim() || !workspaceReady || !model || !profileReference || interaction?.status === "waiting" || interaction?.status === "error"} aria-label="发送需求"><span>→</span></button>
+                <button className="send-button galaxy-tooltip" data-tooltip="发送给 Supervisor" type="submit" disabled={!draft.trim() || !workspaceReady || runtimeNonTerminal || !model || !profileReference || interaction?.status === "waiting" || interaction?.status === "error"} aria-label="发送需求"><span>→</span></button>
               )}
             </div>
           </form>
@@ -1192,9 +1608,9 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
         <aside className="delivery-sidebar">
           <small className="panel-label">本次交付</small>
           {latestRun && <p className="revision-label">Revision {latestRun.revisionNumber} · {deliveryState}</p>}
-          <DeliveryCard icon="板" title="KiCad 项目" state={kicadArtifacts.length ? `${kicadArtifacts.length} 个已验证文件` : deliveryState} ready={kicadArtifacts.length > 0} />
-          <DeliveryCard icon="料" title="BOM / CPL / Gerber" state={manufacturingArtifacts.length ? `${manufacturingArtifacts.length} 个已验证文件` : deliveryState} ready={manufacturingArtifacts.length > 0} />
-          <DeliveryCard icon="审" title="Reviewer 执行" state={reviewerCompleted ? "已完成" : busy ? "等待 Reviewer" : "待执行"} ready={reviewerCompleted} />
+          <DeliveryCard icon="板" title="KiCad 项目" state={kicadArtifacts.length ? `${kicadArtifacts.length} 个已验证文件` : snapshotKicadCount ? `${snapshotKicadCount} 个快照文件` : deliveryState} ready={kicadArtifacts.length > 0 || snapshotKicadCount > 0} />
+          <DeliveryCard icon="料" title="BOM / CPL / Gerber" state={manufacturingArtifacts.length ? `${manufacturingArtifacts.length} 个已验证文件` : snapshotManufacturingCount ? `${snapshotManufacturingCount} 个快照文件` : deliveryState} ready={manufacturingArtifacts.length > 0 || snapshotManufacturingCount > 0} />
+          <DeliveryCard icon="审" title="Reviewer 执行" state={reviewerState} ready={reviewerCompleted} />
 
           {workspace && artifacts.length > 0 && (
             <section className="artifact-list" aria-label="可下载产物">
@@ -1212,17 +1628,111 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
 
           <section className="activity-panel">
             <small className="panel-label">实时事件</small>
-            {recentEvents.length === 0 ? <p>任务开始后，这里显示各智能体的节点状态。</p> : recentEvents.map((message) => (
-              <div key={message.clientId}>
-                <i />
-                <span><strong>{String(message.custom_data.phase ?? message.custom_data.kind ?? "workflow")}</strong><small>{String(message.custom_data.status ?? "event")}</small></span>
-              </div>
-            ))}
+            {activitySnapshot ? (
+              <>
+                {!activitySnapshot.complete && <p>仅显示当前可验证的部分时间线，较早事件状态未知。</p>}
+                {(activitySnapshot.currentStep || activitySnapshot.pipelineStatus) && (
+                  <p>
+                    当前：{activityStepLabel(activitySnapshot.currentStep)}
+                    {activitySnapshot.currentStepIndex !== null && ` · 第 ${activitySnapshot.currentStepIndex}/${activitySnapshot.totalSteps ?? "?"} 步`}
+                    {activitySnapshot.pipelineStatus && ` · ${activitySnapshot.pipelineStatus}`}
+                  </p>
+                )}
+                {activitySnapshot.delivery.errors.map((error, index) => <p className="activity-error" key={`${index}:${String(error)}`}>交付错误：{String(error)}</p>)}
+                {activitySnapshot.delivery.error && <p className="activity-error">{activitySnapshot.delivery.error}</p>}
+                {activitySnapshot.recentEvents.length === 0 ? <p>快照中暂无结构化工作流事件。</p> : activitySnapshot.recentEvents.slice(-6).reverse().map((event) => (
+                  <div key={event.eventId}>
+                    <i />
+                    <span>
+                      <strong>{activityStepLabel(event.phase || event.type)}</strong>
+                      <small>{event.stepIndex !== null ? `第 ${event.stepIndex}/${event.totalSteps ?? activitySnapshot.totalSteps ?? "?"} 步 · ` : ""}{event.status || "event"} · #{event.eventId}</small>
+                      {event.detail && <small className="activity-detail" title={event.detail}>{event.detail}</small>}
+                    </span>
+                  </div>
+                ))}
+              </>
+            ) : recentMessageEvents.length === 0 ? <p>运行快照不可用，角色与步骤状态暂时未知。</p> : recentMessageEvents.map((message) => (
+                <div key={message.clientId}>
+                  <i />
+                  <span><strong>{String(message.custom_data.phase ?? message.custom_data.kind ?? "workflow")}</strong><small>{String(message.custom_data.status ?? "event")}</small></span>
+                </div>
+              ))}
           </section>
           <p className="audit-note">♢ 消息、工具调用、显式模型推理与工作流事件均保留在当前会话中</p>
         </aside>
       </div>
     </main>
+  );
+}
+
+function RunRuntimeCard({
+  status,
+  activity,
+  error,
+  stale,
+  streamState,
+  recovering,
+  onRecover,
+  onReconnect,
+}: {
+  status: RunRuntimeStatus;
+  activity: RunActivitySnapshot | null;
+  error: string;
+  stale: boolean;
+  streamState: RunEventConnectionState;
+  recovering: boolean;
+  onRecover: () => void;
+  onReconnect: () => void;
+}) {
+  const completedSteps = activity?.completedSteps ?? status.completedSteps;
+  const totalSteps = activity?.totalSteps ?? status.totalSteps;
+  const progress = completedSteps !== undefined && completedSteps !== null && totalSteps !== undefined && totalSteps !== null
+    ? `${completedSteps}/${totalSteps} 步`
+    : null;
+  return (
+    <article className={`run-runtime-card ${stale ? "stale" : status.recoveryState.toLowerCase()}`} aria-live="polite">
+      <header>
+        <span><i /> {stale
+          ? "运行状态暂不可确认"
+          : status.recoveryState === "ACTIVE" && streamState === "disconnected"
+            ? "后台执行仍在线，但实时事件连接已断开"
+            : runtimeStatusLabel(status.recoveryState)}</span>
+        <small>{new Date(status.checkedAt).toLocaleTimeString("zh-CN")}</small>
+      </header>
+      <div>
+        <strong>{activity?.currentPhase || activity?.currentStep || status.currentPhase || "当前阶段暂无权威记录"}</strong>
+        <span>{[
+          progress,
+          `快照游标 #${activity?.snapshotCursor ?? status.lastEventId}`,
+          `累计 ${status.eventCount}`,
+          status.runtimeState,
+        ].filter(Boolean).join(" · ")}</span>
+        {activity && (activity.pipelineStatus || activity.delivery.status) && (
+          <p>{[
+            activity.pipelineStatus && `流水线 ${activity.pipelineStatus}`,
+            activity.delivery.status && `交付 ${activity.delivery.status}`,
+          ].filter(Boolean).join(" · ")}</p>
+        )}
+        {activity && !activity.complete && <p>时间线覆盖不完整；缺失角色和步骤保持未知，不根据聊天文本推断。</p>}
+        {activity?.delivery.errors.map((item, index) => <p key={`${index}:${String(item)}`}>交付错误：{String(item)}</p>)}
+        {activity?.delivery.error && <p>{activity.delivery.errorCode ? `${activity.delivery.errorCode}：` : ""}{activity.delivery.error}</p>}
+        {status.detail && <p>{status.detail}</p>}
+        {error && <p>状态刷新暂时失败：{error}</p>}
+      </div>
+      {canRecoverRuntime(status.recoveryState, stale) && (
+        <button type="button" onClick={onRecover} disabled={recovering}>
+          {recovering ? "正在恢复…" : "恢复任务"}
+        </button>
+      )}
+      {canReconnectRuntimeEvents(status.recoveryState, stale, streamState) && (
+        <button type="button" onClick={onReconnect}>重新连接事件</button>
+      )}
+      {!stale && status.recoveryState === "ACTIVE" && streamState !== "disconnected" && (
+        <em>{streamState === "connected" ? "执行器租约在线 · 实时事件已连接" : "执行器租约在线 · 正在连接实时事件"}</em>
+      )}
+      {!stale && status.recoveryState === "RECOVERING" && <em>正在接管检查点</em>}
+      {!stale && status.recoveryState === "WAITING_FOR_INPUT" && <em>请回复下方确认项</em>}
+    </article>
   );
 }
 

@@ -9,6 +9,44 @@ from pathlib import Path
 from typing import Any
 
 from agents.ratsnestpro.tools import ratsnest_run_pcb_pipeline_until
+from core import settings
+from service.governance_scope import (
+    GOVERNANCE_SCOPE_ENV,
+    verify_governance_scope_token,
+)
+
+_GOVERNANCE_ENV_FIELDS = {
+    "tenant_scope": "RATSNESTPRO_TENANT_SCOPE",
+    "project_scope": "RATSNESTPRO_PROJECT_SCOPE",
+    "run_scope": "RATSNESTPRO_RUN_SCOPE",
+    "harness_version_id": "RATSNESTPRO_HARNESS_VERSION_ID",
+    "harness_manifest_digest": "RATSNESTPRO_HARNESS_MANIFEST_DIGEST",
+}
+
+
+def _install_governance_environment(command: dict[str, Any]) -> None:
+    for name in (GOVERNANCE_SCOPE_ENV, *_GOVERNANCE_ENV_FIELDS.values()):
+        os.environ.pop(name, None)
+    token = str(command.get("governance_scope_token", "")).strip()
+    if not token:
+        return
+    if settings.RATSNEST_INTERNAL_SIGNING_SECRET is None:
+        return
+    try:
+        scope = verify_governance_scope_token(
+            token,
+            secret=settings.RATSNEST_INTERNAL_SIGNING_SECRET.get_secret_value(),
+        )
+    except ValueError:
+        return
+    for field, environment_name in _GOVERNANCE_ENV_FIELDS.items():
+        value = str(command.get(field, ""))
+        if value != str(getattr(scope, field)):
+            for name in _GOVERNANCE_ENV_FIELDS.values():
+                os.environ.pop(name, None)
+            return
+        os.environ[environment_name] = value
+    os.environ[GOVERNANCE_SCOPE_ENV] = token
 
 
 def _read_object(path: Path) -> dict[str, Any]:
@@ -26,6 +64,7 @@ def main() -> int:
 
     try:
         command = _read_object(args.command_path)
+        _install_governance_environment(command)
         workflow_id = str(command.get("workflow_id", "")).strip()
         if workflow_id:
             os.environ["RATSNESTPRO_LLM_TRANSCRIPT_WORKFLOW_ID"] = workflow_id

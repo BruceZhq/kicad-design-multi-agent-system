@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from fastapi import HTTPException
 
+from service.run_ui_snapshot import build_ui_snapshot
 from service.sse import format_buffered_sse
 
 RunKind = Literal["invoke", "stream"]
@@ -78,6 +79,7 @@ class RunRecord:
     interaction_id: str | None = None
     interaction_state_version: int | None = None
     accepted_responses: dict[str, tuple[str, int]] = field(default_factory=dict)
+    event_keys: dict[str, int] = field(default_factory=dict)
     execution_generation: int = 1
     events: deque[tuple[int, str]] = field(init=False)
     next_event_id: int = 1
@@ -93,9 +95,17 @@ class RunRecord:
         return self.status in _TERMINAL_STATES
 
     def public_dict(self) -> dict[str, Any]:
+        checked_at = datetime.now(UTC)
         oldest = self.events[0][0] if self.events else None
         newest = self.events[-1][0] if self.events else None
         result = self.result if isinstance(self.result, dict) else {}
+        ui_snapshot = build_ui_snapshot(
+            list(self.events),
+            snapshot_cursor=self.next_event_id - 1,
+            run_status=self.status,
+            artifact_manifest=result.get("artifact_manifest"),
+            delivery_status=result.get("delivery_status"),
+        )
         return {
             "request_id": self.request_id,
             "run_id": self.run_id,
@@ -109,11 +119,22 @@ class RunRecord:
             "event_count": self.next_event_id - 1,
             "oldest_event_id": oldest,
             "newest_event_id": newest,
+            "execution_lease_active": (
+                self.status in {"queued", "running"}
+                and self.task is not None
+                and not self.task.done()
+            ),
+            # The in-memory backend cannot survive a process restart. Only the
+            # Redis backend can advertise a durable run as recoverable.
+            "recoverable": False,
+            "lease_expires_at": None,
+            "checked_at": checked_at,
             "error_code": self.error_code,
             "error": self.error,
             "interaction_id": self.interaction_id,
             "interaction_state_version": self.interaction_state_version,
             "artifact_manifest": result.get("artifact_manifest"),
+            "ui_snapshot": ui_snapshot,
             "delivery_status": result.get("delivery_status"),
         }
 
@@ -378,11 +399,19 @@ class RunRegistry:
                 record.done.set()
             await self._notify(record)
 
-    async def append_event(self, record: RunRecord, payload: str) -> int:
+    async def append_event(
+        self,
+        record: RunRecord,
+        payload: str,
+        *,
+        event_key: str | None = None,
+    ) -> int:
         if record.status == "waiting_for_input" and "data: [DONE]" in payload:
             raise InvalidRunTransitionError(
                 "A run waiting for input cannot emit a terminal stream marker."
             )
+        if event_key and event_key in record.event_keys:
+            return record.event_keys[event_key]
         encoded_size = len(payload.encode("utf-8"))
         if encoded_size > self.max_event_bytes:
             record.stream_failed = True
@@ -392,6 +421,8 @@ class RunRegistry:
         event_id = record.next_event_id
         record.next_event_id += 1
         record.events.append((event_id, payload))
+        if event_key:
+            record.event_keys[event_key] = event_id
         if "data: [DONE]" in payload:
             record.terminal_event_emitted = True
         await self._notify(record)

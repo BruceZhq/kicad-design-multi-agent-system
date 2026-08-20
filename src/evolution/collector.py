@@ -71,6 +71,30 @@ def _failure_signature(event: dict[str, Any], detail: dict[str, Any]) -> str | N
     return str(failure_ids[0]).rsplit(":", 1)[-1].strip() or None
 
 
+def _validate_governed_attribution(event_type: str, event: dict[str, Any]) -> None:
+    attribution = event.get("attribution")
+    if event_type == "capability_gap":
+        if not isinstance(attribution, dict):
+            raise ValueError("capability_gap requires governed attribution")
+        if (
+            attribution.get("action") != "capability_gap"
+            or attribution.get("origin") != "harness"
+            or attribution.get("reason_code")
+            != "cross_run_reproducible_harness_defect"
+            or int(attribution.get("independent_run_count", 0) or 0) < 2
+            or int(attribution.get("independent_project_count", 0) or 0) < 2
+        ):
+            raise ValueError(
+                "capability_gap requires two-run, two-project Harness evidence"
+            )
+    elif event_type == "harness_defect_observed":
+        if not isinstance(attribution, dict) or (
+            attribution.get("action") != "observe_harness"
+            or attribution.get("origin") != "harness"
+        ):
+            raise ValueError("Harness observations require explicit Harness attribution")
+
+
 def _outcome(event_type: str, event: dict[str, Any]) -> ObservationOutcome:
     if event_type == "capability_gap_resolved":
         return ObservationOutcome.RESOLVED
@@ -105,6 +129,7 @@ def observation_from_ahe_event(
     step = str(event.get("step", "")).strip()
     if not event_type or not step:
         raise ValueError("AHE event and step are required")
+    _validate_governed_attribution(event_type, event)
 
     detail = _event_detail(event)
     repair = event.get("repair") if isinstance(event.get("repair"), dict) else {}
@@ -185,7 +210,13 @@ def aggregate_candidates(
         by_project = active.setdefault(key, {})
         if item.event_type == "capability_gap_resolved":
             by_project.pop(item.project_fingerprint, None)
-        elif item.event_type == "capability_gap":
+        elif (
+            item.event_type == "harness_defect_observed"
+            and item.recoverability == "harness_observation"
+        ) or (
+            item.event_type == "capability_gap"
+            and item.recoverability == "capability_gap"
+        ):
             by_project.setdefault(item.project_fingerprint, []).append(item)
 
     candidates: list[EvolutionCandidate] = []

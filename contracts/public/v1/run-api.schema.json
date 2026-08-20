@@ -111,6 +111,30 @@
       },
       "additionalProperties": false
     },
+    "forkRunRequest": {
+      "type": "object",
+      "required": ["capabilityProfile", "replayMode"],
+      "properties": {
+        "capabilityProfile": { "$ref": "#/$defs/capabilityProfileSelector" },
+        "replayMode": { "const": "THROUGH_SOURCE_REVISION" },
+        "changeRequest": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 100000,
+          "pattern": "\\S"
+        },
+        "model": {
+          "type": ["string", "null"],
+          "maxLength": 200
+        },
+        "teamMembers": {
+          "type": ["array", "null"],
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/teamMemberRequest" }
+        }
+      },
+      "additionalProperties": false
+    },
     "deliveryStatus": {
       "enum": ["execution_blocked", "delivered_with_issues", "release_ready"]
     },
@@ -147,6 +171,7 @@
         "runId",
         "rootRunId",
         "parentRunId",
+        "forkedFromRunId",
         "revisionNumber",
         "projectId",
         "threadId",
@@ -161,6 +186,7 @@
         "runId": { "type": "string", "format": "uuid" },
         "rootRunId": { "type": "string", "format": "uuid" },
         "parentRunId": { "type": ["string", "null"], "format": "uuid" },
+        "forkedFromRunId": { "type": ["string", "null"], "format": "uuid" },
         "revisionNumber": { "type": "integer", "minimum": 1 },
         "projectId": { "type": "string", "format": "uuid" },
         "threadId": {
@@ -189,6 +215,142 @@
         "eventCount": { "type": "integer", "minimum": 0 },
         "errorCode": { "type": ["string", "null"] },
         "error": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "runtimeStatusResponse": {
+      "type": "object",
+      "required": [
+        "runId",
+        "controlState",
+        "runtimeState",
+        "recoveryState",
+        "leaseActive",
+        "recoverable",
+        "leaseExpiresAt",
+        "lastEventId",
+        "eventCount",
+        "checkedAt",
+        "activity"
+      ],
+      "properties": {
+        "runId": { "type": "string", "format": "uuid" },
+        "controlState": {
+          "enum": ["QUEUED", "RUNNING", "WAITING_FOR_INPUT", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"]
+        },
+        "runtimeState": {
+          "enum": ["QUEUED", "RUNNING", "WAITING_FOR_INPUT", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT", "UNKNOWN"]
+        },
+        "recoveryState": {
+          "enum": ["ACTIVE", "RECOVERABLE", "RECOVERING", "WAITING_FOR_INPUT", "TERMINAL", "UNKNOWN"]
+        },
+        "leaseActive": { "type": ["boolean", "null"] },
+        "recoverable": { "type": ["boolean", "null"] },
+        "leaseExpiresAt": { "type": ["string", "null"], "format": "date-time" },
+        "lastEventId": { "type": "integer", "minimum": 0 },
+        "eventCount": { "type": "integer", "minimum": 0 },
+        "checkedAt": { "type": "string", "format": "date-time" },
+        "activity": { "$ref": "#/$defs/runActivitySnapshot" }
+      },
+      "additionalProperties": false
+    },
+    "runActivitySnapshot": {
+      "type": "object",
+      "required": [
+        "currentRole",
+        "roleStatuses",
+        "currentPhase",
+        "pipelineStatus",
+        "completedSteps",
+        "totalSteps",
+        "currentStep",
+        "currentStepIndex",
+        "recentEvents",
+        "delivery",
+        "snapshotCursor",
+        "coverageStartEventId",
+        "complete",
+        "checkedAt"
+      ],
+      "properties": {
+        "currentRole": {
+          "anyOf": [
+            { "enum": ["supervisor", "architect", "parts-specialist", "hardware-engineer", "reviewer"] },
+            { "type": "string", "pattern": "^specialist:[a-z0-9][a-z0-9-]{0,62}$" },
+            { "type": "null" }
+          ]
+        },
+        "roleStatuses": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/roleActivityStatus" }
+        },
+        "currentPhase": { "type": ["string", "null"] },
+        "pipelineStatus": { "type": ["string", "null"] },
+        "completedSteps": { "type": ["integer", "null"], "minimum": 0 },
+        "totalSteps": { "type": ["integer", "null"], "minimum": 1 },
+        "currentStep": { "type": ["string", "null"] },
+        "currentStepIndex": { "type": ["integer", "null"], "minimum": 0 },
+        "recentEvents": {
+          "type": "array",
+          "maxItems": 50,
+          "items": { "$ref": "#/$defs/structuredActivityEvent" }
+        },
+        "delivery": { "$ref": "#/$defs/deliveryFacts" },
+        "snapshotCursor": { "type": "integer", "minimum": 0 },
+        "coverageStartEventId": { "type": ["integer", "null"], "minimum": 1 },
+        "complete": { "type": "boolean" },
+        "checkedAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "roleActivityStatus": {
+      "type": "object",
+      "required": ["role", "label", "status", "phase", "lastEventId"],
+      "properties": {
+        "role": { "type": "string" },
+        "label": { "type": ["string", "null"] },
+        "status": { "type": "string" },
+        "phase": { "type": ["string", "null"] },
+        "lastEventId": { "type": ["integer", "null"], "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "structuredActivityEvent": {
+      "type": "object",
+      "required": [
+        "eventId", "type", "role", "phase", "status", "detail",
+        "occurredAt", "stepIndex", "totalSteps"
+      ],
+      "properties": {
+        "eventId": { "type": "integer", "minimum": 1 },
+        "type": { "type": ["string", "null"] },
+        "role": { "type": ["string", "null"] },
+        "phase": { "type": ["string", "null"] },
+        "status": { "type": ["string", "null"] },
+        "detail": { "type": ["string", "null"] },
+        "occurredAt": { "type": ["string", "null"], "format": "date-time" },
+        "stepIndex": { "type": ["integer", "null"], "minimum": 0 },
+        "totalSteps": { "type": ["integer", "null"], "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "deliveryFacts": {
+      "type": "object",
+      "required": [
+        "controlState", "status", "manifestId", "artifactCount", "artifacts",
+        "errors", "terminal", "errorCode", "error", "finishedAt"
+      ],
+      "properties": {
+        "controlState": { "type": "string" },
+        "status": { "type": ["string", "null"] },
+        "manifestId": { "type": ["string", "null"] },
+        "artifactCount": { "type": ["integer", "null"], "minimum": 0 },
+        "artifacts": { "type": "array", "items": { "type": "object" } },
+        "errors": { "type": "array", "items": { "type": "string" } },
+        "terminal": { "type": "boolean" },
+        "errorCode": { "type": ["string", "null"] },
+        "error": { "type": ["string", "null"] },
+        "finishedAt": { "type": ["string", "null"], "format": "date-time" }
       },
       "additionalProperties": false
     },

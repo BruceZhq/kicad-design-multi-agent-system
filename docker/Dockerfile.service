@@ -43,10 +43,7 @@ COPY src/evolution/ ./evolution/
 COPY src/memory/ ./memory/
 COPY src/schema/ ./schema/
 COPY src/service/ ./service/
-COPY src/RatsNestPro-main/RatsNestPro-main/pyproject.toml /opt/ratsnestpro/pyproject.toml
-COPY src/RatsNestPro-main/RatsNestPro-main/README.md /opt/ratsnestpro/README.md
-COPY src/RatsNestPro-main/RatsNestPro-main/src/ratsnestpro/ /opt/ratsnestpro/src/ratsnestpro/
-RUN uv pip install --system --no-deps --editable /opt/ratsnestpro
+COPY src/ratsnestpro/ ./ratsnestpro/
 COPY src/run_service.py .
 
 RUN groupadd --gid 10001 ratsnest \

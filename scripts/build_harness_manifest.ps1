@@ -74,7 +74,7 @@ $sourceTreeDigest = Get-TreeDigest -Prefixes @(
 )
 $bundleDigest = Get-TreeDigest -Prefixes @(
     "src/agents/ratsnestpro/",
-    "src/RatsNestPro-main/RatsNestPro-main/src/ratsnestpro/",
+    "src/ratsnestpro/",
     "src/evolution/",
     "config/harness/"
 )

@@ -241,6 +241,18 @@ class RatsNestHardwareWorkflow:
                     "heartbeat_seconds": heartbeat,
                     "workflow_id": workflow.info().workflow_id,
                     "requirement_hash": str(input["requirement_hash"]),
+                    "tenant_scope": str(input.get("tenant_scope", "")),
+                    "project_scope": str(input.get("project_scope", "")),
+                    "run_scope": str(input.get("run_scope", "")),
+                    "harness_version_id": str(
+                        input.get("harness_version_id", "")
+                    ),
+                    "harness_manifest_digest": str(
+                        input.get("harness_manifest_digest", "")
+                    ),
+                    "governance_scope_token": str(
+                        input.get("governance_scope_token", "")
+                    ),
                 }
                 if manifest_path:
                     command["manifest_path"] = manifest_path

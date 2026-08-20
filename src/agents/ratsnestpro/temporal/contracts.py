@@ -54,6 +54,13 @@ def llm_transcript_filename(workflow_id: str) -> str:
     return f"llm_outputs-{digest}.jsonl"
 
 
+def ahe_event_filename(workflow_id: str) -> str:
+    """Name the per-workflow AHE audit log without exposing its identity."""
+
+    digest = hashlib.sha256(workflow_id.encode("utf-8")).hexdigest()[:20]
+    return f"ahe_events-{digest}.jsonl"
+
+
 def hardware_workflow_id(request_id: str) -> str:
     """Return the single durable Hardware Workflow ID owned by one SaaS run."""
 
@@ -80,6 +87,12 @@ _WORKFLOW_IDENTITY_FIELDS: tuple[str, ...] = (
     "tenant_id",
     "project_id",
     "principal_id",
+    "tenant_scope",
+    "project_scope",
+    "run_scope",
+    "harness_version_id",
+    "harness_manifest_digest",
+    "governance_scope_token",
 )
 
 

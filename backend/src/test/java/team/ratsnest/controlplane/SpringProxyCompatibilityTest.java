@@ -6,9 +6,10 @@ import java.lang.reflect.Modifier;
 
 import org.junit.jupiter.api.Test;
 
-import team.ratsnest.controlplane.evolution.EvolutionAdminController;
-import team.ratsnest.controlplane.evolution.EvolutionCollector;
-import team.ratsnest.controlplane.harness.HarnessReleaseAdminController;
+import team.ratsnest.controlplane.evolution.api.EvolutionAdminController;
+import team.ratsnest.controlplane.evolution.application.EvolutionCollector;
+import team.ratsnest.controlplane.harness.api.HarnessReleaseAdminController;
+import team.ratsnest.controlplane.run.infrastructure.persistence.JdbcRunEventIngestionStore;
 
 class SpringProxyCompatibilityTest {
 
@@ -17,5 +18,6 @@ class SpringProxyCompatibilityTest {
         assertThat(Modifier.isFinal(EvolutionCollector.class.getModifiers())).isFalse();
         assertThat(Modifier.isFinal(EvolutionAdminController.class.getModifiers())).isFalse();
         assertThat(Modifier.isFinal(HarnessReleaseAdminController.class.getModifiers())).isFalse();
+        assertThat(Modifier.isFinal(JdbcRunEventIngestionStore.class.getModifiers())).isFalse();
     }
 }

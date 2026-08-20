@@ -17,6 +17,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from agents.ratsnestpro.temporal.contracts import (
+    ahe_event_filename,
     hardware_workflow_id,
     hardware_workflow_identity,
     llm_transcript_filename,
@@ -26,6 +27,8 @@ from agents.ratsnestpro.temporal.contracts import (
 )
 from agents.ratsnestpro.temporal.workflow import RatsNestHardwareWorkflow
 from core import settings
+from service.ahe_event import RedisAheEventReader, stream_ahe_event_record
+from service.durable_event_stream import RedisEventStreamConfig
 from service.llm_output import stream_llm_output_record
 from service.llm_output_stream import (
     LlmOutputRedisConfig,
@@ -138,6 +141,12 @@ async def dispatch_hardware_workflow(
     model_type: str | None,
     attempt: int,
     ahe_budget: dict[str, int] | None = None,
+    tenant_scope: str = "",
+    project_scope: str = "",
+    run_scope: str = "",
+    harness_version_id: str = "",
+    harness_manifest_digest: str = "",
+    governance_scope_token: str = "",
 ) -> dict[str, Any]:
     """Start once, or attach when a LangGraph checkpoint replays dispatch."""
 
@@ -182,6 +191,12 @@ async def dispatch_hardware_workflow(
         "model_name": model_name,
         "model_type": model_type,
         "ahe_budget": ahe_budget or {},
+        "tenant_scope": tenant_scope,
+        "project_scope": project_scope,
+        "run_scope": run_scope,
+        "harness_version_id": harness_version_id,
+        "harness_manifest_digest": harness_manifest_digest,
+        "governance_scope_token": governance_scope_token,
         "retry_attempts": settings.RATSNESTPRO_TEMPORAL_RETRY_ATTEMPTS,
         "step_timeout_seconds": settings.RATSNESTPRO_TEMPORAL_STEP_TIMEOUT_SECONDS,
         "routing_timeout_seconds": settings.RATSNESTPRO_TEMPORAL_ROUTING_TIMEOUT_SECONDS,
@@ -252,13 +267,25 @@ def _llm_transcript_path(run_ref: dict[str, Any]) -> Path:
     return root / "runs" / run_name / llm_transcript_filename(str(run_ref["workflow_id"]))
 
 
-def _forward_llm_outputs(
+def _ahe_event_path(run_ref: dict[str, Any]) -> Path:
+    root = Path(os.getenv("RATSNESTPRO_WORKSPACE_ROOT", "data/ratsnestpro")).expanduser().resolve()
+    run_name = safe_name(
+        str(run_ref.get("workspace_run_name", run_ref.get("run_name", ""))),
+        "design",
+    )
+    return root / "runs" / run_name / ahe_event_filename(str(run_ref["workflow_id"]))
+
+
+def _forward_jsonl_records(
     path: Path,
     cursor: int,
     callback: ProgressCallback | None,
-    seen_record_ids: set[str] | None = None,
+    seen_record_ids: set[str],
+    *,
+    expected_kind: str,
+    transform: Callable[[dict[str, Any]], dict[str, Any]],
 ) -> int:
-    """Forward new JSONL records without putting their bodies in Event History."""
+    """Forward complete JSONL records while safely skipping partial writes."""
 
     if callback is None or not path.is_file():
         return cursor
@@ -276,19 +303,72 @@ def _forward_llm_outputs(
                 record = json.loads(line.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
-            if not isinstance(record, dict) or record.get("kind") != "llm_output":
+            if not isinstance(record, dict) or record.get("kind") != expected_kind:
                 continue
             record_id = str(record.get("record_id", ""))
-            if seen_record_ids is not None and record_id:
+            if record_id:
                 if record_id in seen_record_ids:
                     continue
                 seen_record_ids.add(record_id)
-            callback(stream_llm_output_record(record, transcript_path=str(path)))
+            callback(transform(record))
+
+
+def _forward_llm_outputs(
+    path: Path,
+    cursor: int,
+    callback: ProgressCallback | None,
+    seen_record_ids: set[str],
+) -> int:
+    return _forward_jsonl_records(
+        path,
+        cursor,
+        callback,
+        seen_record_ids,
+        expected_kind="llm_output",
+        transform=lambda record: stream_llm_output_record(
+            record,
+            transcript_path=str(path),
+        ),
+    )
+
+
+def _forward_ahe_events(
+    path: Path,
+    cursor: int,
+    callback: ProgressCallback | None,
+    seen_record_ids: set[str],
+) -> int:
+    return _forward_jsonl_records(
+        path,
+        cursor,
+        callback,
+        seen_record_ids,
+        expected_kind="ahe_event",
+        transform=lambda record: stream_ahe_event_record(
+            record,
+            audit_path=str(path),
+        ),
+    )
 
 
 def _llm_stream_config() -> LlmOutputRedisConfig:
     return LlmOutputRedisConfig(
         enabled=settings.RATSNESTPRO_LLM_STREAM_ENABLED,
+        url=(
+            settings.REDIS_URL.get_secret_value()
+            if settings.REDIS_URL is not None
+            else None
+        ),
+        key_prefix=settings.REDIS_KEY_PREFIX,
+        maxlen=settings.RATSNESTPRO_LLM_STREAM_MAXLEN,
+        ttl_seconds=settings.RATSNESTPRO_LLM_STREAM_TTL_SECONDS,
+        socket_timeout_seconds=settings.RATSNESTPRO_LLM_STREAM_SOCKET_TIMEOUT_SECONDS,
+    )
+
+
+def _ahe_stream_config() -> RedisEventStreamConfig:
+    return RedisEventStreamConfig(
+        enabled=settings.REDIS_URL is not None,
         url=(
             settings.REDIS_URL.get_secret_value()
             if settings.REDIS_URL is not None
@@ -320,6 +400,25 @@ async def _forward_redis_llm_outputs(
     return last_id
 
 
+async def _forward_redis_ahe_events(
+    reader: RedisAheEventReader,
+    cursor: str,
+    callback: ProgressCallback | None,
+    seen_record_ids: set[str],
+) -> str:
+    if callback is None:
+        return cursor
+    last_id, records = await reader.read_after(cursor)
+    for _, record in records:
+        record_id = str(record.get("record_id", ""))
+        if record_id and record_id in seen_record_ids:
+            continue
+        if record_id:
+            seen_record_ids.add(record_id)
+        callback(stream_ahe_event_record(record))
+    return last_id
+
+
 async def await_hardware_workflow(
     run_ref: dict[str, Any],
     *,
@@ -336,19 +435,34 @@ async def await_hardware_workflow(
     result_task = asyncio.create_task(handle.result())
     last_version = -1
     transcript_path = _llm_transcript_path(run_ref)
+    ahe_path = _ahe_event_path(run_ref)
     transcript_cursor = int(run_ref.get("llm_jsonl_cursor", 0) or 0)
+    ahe_jsonl_cursor = int(run_ref.get("ahe_jsonl_cursor", 0) or 0)
     stream_cursor = str(run_ref.get("llm_stream_last_id", "0-0") or "0-0")
-    seen_record_ids: set[str] = set()
+    ahe_stream_cursor = str(run_ref.get("ahe_stream_last_id", "0-0") or "0-0")
+    seen_llm_record_ids: set[str] = set()
+    seen_ahe_record_ids: set[str] = set()
     stream_config = _llm_stream_config()
+    ahe_stream_config = _ahe_stream_config()
     stream_reader: RedisLlmOutputReader | None = None
+    ahe_stream_reader: RedisAheEventReader | None = None
     if on_progress is not None and stream_config.enabled and stream_config.url:
         try:
             stream_reader = RedisLlmOutputReader.connect(stream_config, workflow_id)
         except Exception:  # invalid/unavailable Redis configuration falls back to JSONL
             stream_reader = None
+    if on_progress is not None and ahe_stream_config.enabled and ahe_stream_config.url:
+        try:
+            ahe_stream_reader = RedisAheEventReader.connect(
+                ahe_stream_config,
+                workflow_id,
+            )
+        except Exception:  # invalid/unavailable Redis configuration falls back to JSONL
+            ahe_stream_reader = None
     poll_seconds = max(0.1, float(settings.RATSNESTPRO_TEMPORAL_POLL_SECONDS))
 
     async def forward_outputs() -> None:
+        nonlocal ahe_jsonl_cursor, ahe_stream_cursor, ahe_stream_reader
         nonlocal stream_reader, stream_cursor, transcript_cursor
         if stream_reader is not None:
             try:
@@ -356,20 +470,40 @@ async def await_hardware_workflow(
                     stream_reader,
                     stream_cursor,
                     on_progress,
-                    seen_record_ids,
+                    seen_llm_record_ids,
                 )
                 run_ref["llm_stream_last_id"] = stream_cursor
             except Exception:  # Redis loss falls through to the JSONL audit copy
                 with suppress(Exception):
                     await stream_reader.close()
                 stream_reader = None
+        if ahe_stream_reader is not None:
+            try:
+                ahe_stream_cursor = await _forward_redis_ahe_events(
+                    ahe_stream_reader,
+                    ahe_stream_cursor,
+                    on_progress,
+                    seen_ahe_record_ids,
+                )
+                run_ref["ahe_stream_last_id"] = ahe_stream_cursor
+            except Exception:  # Redis loss falls through to the JSONL audit copy
+                with suppress(Exception):
+                    await ahe_stream_reader.close()
+                ahe_stream_reader = None
         transcript_cursor = _forward_llm_outputs(
             transcript_path,
             transcript_cursor,
             on_progress,
-            seen_record_ids,
+            seen_llm_record_ids,
         )
         run_ref["llm_jsonl_cursor"] = transcript_cursor
+        ahe_jsonl_cursor = _forward_ahe_events(
+            ahe_path,
+            ahe_jsonl_cursor,
+            on_progress,
+            seen_ahe_record_ids,
+        )
+        run_ref["ahe_jsonl_cursor"] = ahe_jsonl_cursor
 
     try:
         while True:
@@ -398,3 +532,6 @@ async def await_hardware_workflow(
         if stream_reader is not None:
             with suppress(Exception):
                 await stream_reader.close()
+        if ahe_stream_reader is not None:
+            with suppress(Exception):
+                await ahe_stream_reader.close()

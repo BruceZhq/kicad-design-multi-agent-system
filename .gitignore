@@ -70,6 +70,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 .pytest-tmp-*/
+.mypy_cache/
 .ruff_cache/
 cover/
 
@@ -193,6 +194,13 @@ data/keycloak/
 # Private Credentials, ignore everything in the folder but the .gitkeep file
 privatecredentials/*
 !privatecredentials/.gitkeep
+
+# Local EDA/LLM credentials and generated KiCad editor state.
+.ericai_authrecord
+*.ericai_authrecord
+*.kicad_prl
+*-backups/
+src/ratsnestpro/knowledge/.index/
 
 # Node (scripts/agui-client)
 node_modules/
