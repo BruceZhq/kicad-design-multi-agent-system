@@ -1,3 +1,4 @@
+from enum import StrEnum
 from functools import cache
 
 from langchain_anthropic import ChatAnthropic
@@ -61,6 +62,49 @@ type ModelT = (
     | ChatOllama
     | FakeToolModel
 )
+
+
+class InferencePurpose(StrEnum):
+    ROUTING = "routing"
+    SUMMARIZATION = "summarization"
+    CHAT = "chat"
+    REASONING = "reasoning"
+    REVIEW = "review"
+
+
+def _purpose_endpoint(purpose: InferencePurpose) -> tuple[str, str, str] | None:
+    small = purpose in {
+        InferencePurpose.ROUTING,
+        InferencePurpose.SUMMARIZATION,
+        InferencePurpose.CHAT,
+    }
+    base_url = settings.INFERENCE_SMALL_BASE_URL if small else settings.INFERENCE_LARGE_BASE_URL
+    model = settings.INFERENCE_SMALL_MODEL if small else settings.INFERENCE_LARGE_MODEL
+    secret = settings.INFERENCE_SMALL_API_KEY if small else settings.INFERENCE_LARGE_API_KEY
+    if not base_url or not model:
+        return None
+    return base_url.rstrip("/"), model, secret.get_secret_value() if secret else "local-vllm"
+
+
+@cache
+def get_model_for_purpose(
+    model_name: AllModelEnum | None,
+    /,
+    *,
+    purpose: InferencePurpose = InferencePurpose.REASONING,
+) -> ModelT:
+    endpoint = _purpose_endpoint(purpose)
+    if endpoint is None:
+        return get_model_for_plain_call(model_name)
+    base_url, model, api_key = endpoint
+    return ChatOpenAI(
+        model=model,
+        streaming=True,
+        base_url=base_url,
+        api_key=api_key,
+        timeout=60,
+        max_retries=3,
+    )
 
 
 @cache

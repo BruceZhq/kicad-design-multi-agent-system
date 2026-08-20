@@ -37,6 +37,7 @@ jobs:
           uv run --frozen ruff check src tests
           uv run --frozen pytest -q \
             tests/evolution \
+            tests/memory \
             tests/test_ahe_event_bridge.py \
             tests/test_governance_scope_bridge.py \
             tests/test_harness_systemic_repairs.py \

@@ -1,5 +1,10 @@
 \set ON_ERROR_STOP on
 
+-- The Agent Runtime stores tenant-scoped semantic memory in PostgreSQL.  The
+-- extension is provisioned by the local platform bootstrap rather than by the
+-- less-privileged Flyway role.
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- Local/Compose bootstrap only. Production roles are provisioned by the
 -- platform and the two passwords must be different secret values.
 SELECT format(

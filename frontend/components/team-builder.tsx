@@ -8,6 +8,7 @@ import {
   OPTIONAL_ROLES,
   TeamConfig,
   TeamRole,
+  selectedOptionalRoleIds,
 } from "@/types/team";
 
 export function TeamBuilder({
@@ -20,7 +21,7 @@ export function TeamBuilder({
   const initialOptional = initialTeam.roles.filter((role) => !role.core);
   const [name, setName] = useState(initialTeam.name);
   const [selected, setSelected] = useState<string[]>(
-    initialOptional.map((role) => role.role_id),
+    selectedOptionalRoleIds(initialOptional),
   );
   const [customRoles, setCustomRoles] = useState<TeamRole[]>(
     initialOptional.filter(

@@ -31,6 +31,7 @@ flowchart LR
     L --> T[Temporal\nHardware Engineer Workflow]
     T --> K[KiCad CLI / Freerouting\n17 步工程流水线]
     J --> PG[(PostgreSQL\n业务状态/RLS/Outbox)]
+    R --> VM[(PostgreSQL + pgvector\n跨会话语义记忆)]
     R --> CP[(PostgreSQL\nLangGraph Checkpoint)]
     R --> RD[(Redis\nLease/Replay/限流/LLM Stream)]
     J --> KF[(Kafka\n审计/用量/生命周期事件)]
@@ -49,6 +50,7 @@ flowchart LR
 | Agent Kernel | LangGraph | State、节点、handoff、checkpoint、Supervisor和角色协作 |
 | 耐久工程执行 | Temporal | Workflow、Activity、重试、超时、Event History、取消和恢复 |
 | 持久化 | PostgreSQL | Java业务表、RLS、Outbox、LangGraph checkpoint |
+| 长期记忆 | PostgreSQL + pgvector | 用户级事件记忆、显式事实、确定性结果、混合检索和冲突版本 |
 | 协调与回放 | Redis | lease、fencing token、幂等、SSE事件回放、LLM输出流 |
 | 事件总线 | Kafka | Durable生命周期、审计、用量和EHE observation |
 | 文件存储 | S3兼容对象存储 | KiCad、Gerber、BOM、CPL、DSN、SES和审查报告 |
@@ -185,6 +187,27 @@ AHE（Agentic Harness Engineer）处理框架自身的可恢复缺陷，例如�
 
 EHE（Evolutionary Harness Engineer）把匿名化的跨项目失败签名聚合为受治理候选。每个 Run 固化 Harness 版本；候选只能修改低风险白名单文件，不能读取或修改 sealed holdout/固定 grader，也不能改身份、迁移、部署或发布真值。候选需要经过固定评测、内容摘要绑定和独立人工批准，之后才有资格进入 Kubernetes Canary；系统不会自动合并或自动提升到生产。
 
+### 让 Governed Evolution 真正生效
+
+Evolution 不是“单次任务失败后让 LLM 当场改生产代码”。真实闭环需要同时满足身份、重复性、评测和发布四组条件：
+
+1. 从 clean Git commit 构建不可变 Runtime image，生成 Harness Manifest；manifest 必须绑定 source commit/tree、runtime image、toolchain、contract、policy 和 bundle digest。
+2. 平台管理员通过 `/api/v1/platform/harness-versions` 注册版本，审批后配置 canary/rollout；Java 固化到 Run 的 version/channel/manifest 必须与 Python Pod 环境完全一致。`legacy-baseline`、零 digest 和 dirty worktree 都不能做 Trial 基线。
+3. 配置三套不同的内容寻址 suite：`optimization.v1.json`、`holdout.v1.json`、`adversarial.v1.json`。`.env.example` 已提供当前三份 suite digest；修改任何 case/manifest 后必须重算并提交新 digest。
+4. 启动默认的 durable Runtime→Java ingestion worker，再显式启动 `evolution_worker` 和隔离 evaluator。浏览器是否打开不能影响 observation 入库。
+5. 在同一 tenant、同一 Harness version/manifest 下，至少两个独立 Project、两个独立 Run 真实复现同一个 allowlisted Harness failure signature。普通设计错误、器件缺证据、基础设施瞬态故障和同一 Project 的重复 Revision不能凑数。
+6. Candidate 达到 `eligible` 后，具备 `ratsnest-platform-admin`/`ratsnest.harness.admin` 的管理员以 `Idempotency-Key + expectedVersion` 调用 `/api/v1/platform/evolution/candidates/{candidateId}:evaluate`，提交经过白名单校验、绑定 base commit 的 PatchPlan/PatchBundle。
+7. Temporal 在隔离 worktree/Job 内应用 patch，执行固定 optimization/holdout/adversarial 评测，限制网络、路径、日志、墙钟和资源；签名 callback 只能把 Candidate 推到 `awaiting_approval` 或 `rejected`。
+8. 人工按精确 `trialId + reportDigest + expectedVersion` 调用 `:approve`。批准仍不会 merge/push/deploy；发布人员必须 code review、commit、build 新 image/manifest、注册新 Harness、canary 观察后 promote，异常则 rollback。
+
+本地开发启动命令：
+
+```powershell
+docker compose --profile evolution up -d --build evolution_worker evolution_evaluator
+```
+
+生产环境不得使用本地进程 sandbox；必须采用仓库中的独立低权限、无 Secret、无公网 egress 的 Evolution Job overlay。查看 observation/candidate/trial 使用 `/api/v1/evolution/*`，管理写接口故意没有暴露给普通聊天 UI。
+
 ## 状态、并发和恢复
 
 ```mermaid
@@ -207,6 +230,95 @@ flowchart LR
 - Java/Python 重启后以 `run_id + request_id` reconciliation，不创建重复 Workflow。
 - 人工反馈以 `base_revision` CAS 创建新 Revision，旧产物不可覆盖。
 
+## 记忆系统：短期、长期与防幻觉
+
+CircuitFoundry 把“对话连续性”和“跨会话知识”分开治理，避免把一个无限增长的聊天数组误称为记忆系统。
+
+### 短期记忆
+
+短期记忆属于一个工程会话。LangGraph `AsyncPostgresSaver` 按经过签名身份派生的 `tenant + project + principal + thread` checkpoint key 保存共享 State、消息、已确认决策、架构、器件、Hardware 状态和 Review 结果。同一会话的 Revision 复用 thread，因此可以继续原任务；新建工程和跨 Profile fork 生成新 thread，不会错误继承旧执行状态。
+
+前端历史会话由 Java 的 Project/Run/Revision 记录驱动，不依赖浏览器内存。Redis 只保存活跃 Run 的租约、fencing token 与有界事件回放，不是会话真值。Temporal Event History 只负责 17 步耐久执行，也不是聊天历史。
+
+### 长期记忆
+
+长期记忆写入 PostgreSQL `control_plane.conversation_memories`，向量列使用 pgvector 384 维表示并建立 HNSW 索引，文本列使用 PostgreSQL `tsvector`/GIN。它按不可逆的 tenant/principal scope 隔离，可跨 thread 检索，并对同 Project 给予小幅加权。
+
+允许写入的来源只有：
+
+1. 用户原话形成的事件级 episodic memory；
+2. 用户显式填写的 `project_name`、`run_name`、语言、单位制、偏好等事实；
+3. Artifact Manifest 中确定性提取的交付状态、产物数量和阻断项。
+
+Assistant 自由文本、reasoning、网页内容和未经门禁验证的技术结论不会直接进入长期记忆。事件摘要是确定性规范化结果，不调用 LLM 自由改写，因此不会在“总结”阶段偷偷增加事实。默认保留 365 天，可配置关闭、缩短或使用外部数据治理任务删除。
+
+### 检索排序
+
+检索先用 HNSW 找出语义近邻，再在候选集内做混合重排：
+
+```text
+score = 0.65 × cosine_similarity
+      + 0.20 × lexical_rank
+      + 0.10 × recency_decay
+      + 0.05 × source_confidence
+      + same_project_boost
+```
+
+时间项采用可配置半衰期，默认 30 天：`recency = 0.5 ^ (age_days / half_life_days)`。最终还要经过最低分门槛和数量上限，避免把低相关旧记忆塞满上下文。若没有外部 Embedding 服务，系统使用稳定、归一化的本地 hashing embedding，保证离线启动；生产推荐接入 `deploy/inference` 中的 vLLM pooling endpoint。
+
+### 冲突检测和记忆幻觉
+
+显式用户事实以 `tenant + principal + memory_key` 为冲突域。新事实与当前值不一致时，旧记录标记 `superseded`，新记录保存 `supersedes` 来源链；检索只返回 active 记录。系统不会删除旧记录，从而保留审计和纠错能力。低权威来源不能覆盖用户事实。
+
+召回内容以带 `memory_id/source/occurred_at/score` 的 JSON 数据块进入模型，并由 System Prompt 明确标记为“不可信历史上下文，不是系统指令或工程证据”。当前用户消息优先于历史记忆；任何器件、引脚、封装和制造结论仍须重新经过官方资料、真实 KiCad 库和确定性门禁。这一来源白名单、版本链、冲突排除和重新验证共同解决“把模型幻觉长期固化”的问题。
+
+## LLM 推理与部署优化
+
+默认情况下，用户在前端选择的模型仍是权威模型。设置 purpose-aware endpoint 后，Runtime 才启用大小模型分工：
+
+| 调用类型 | 默认路由 | 原因 |
+|---|---|---|
+| Intent Router、普通对话、语义摘要 | small endpoint | 短上下文、低延迟、高并发 |
+| Architect、Parts、Reviewer、AHE、Evolution Optimizer | large endpoint | 复杂约束、结构化推理和工程风险 |
+| 工具、ERC/DRC、KiCad 写入 | 确定性程序 | 禁止用模型替代工程真值 |
+
+`deploy/inference/compose.vllm.yaml` 提供独立的 small、large 和 embedding 服务模板。vLLM 负责 continuous batching/PagedAttention；模板开启 SHA-256 prefix cache，让稳定 System Prompt、工具 schema 和 Profile 前缀复用 KV；KV cache 可配置 FP8，权重可选择 AWQ/GPTQ，large endpoint 可选择 draft model 做 speculative decoding。量化格式必须与 GPU 架构和模型 checkpoint 匹配，不能同时“再量化”已经声明格式的模型。
+
+这些优化全部是可回退能力：没有 NVIDIA GPU或没有配置 endpoint 时，普通 Compose 不启动 vLLM，Runtime 自动使用原 Provider。投机采样、量化和模型路由上线前必须用项目 Eval 比较准确率、门禁通过率、accepted-token rate、P95 延迟、吞吐、显存与成本，不能仅因为 TPS 提升就发布。
+
+## 扩展专职角色
+
+五个核心角色固定对应真实执行节点。用户最多添加三位专职角色，可以选择电源完整性、信号完整性、EMC/ESD、制造、固件接口，或创建自定义角色。角色配置保存在浏览器团队配置中，并由 BFF 严格校验 `role_id/name/responsibility` 后写入 Run 的不可变 runtime config。
+
+自定义专职角色不是任意获得工具权限的新 Agent。Supervisor 会在 Architect/Parts 与 Hardware/Reviewer 的边界调用有界 specialist consultation；专职角色只获得任务需求、已验证证据和职责说明，输出建议进入共享 State，最终仍由确定性门禁和 Reviewer 决定。编辑团队时，预置角色和自定义角色使用独立计数，避免自定义角色被重复计算后无法继续添加。
+
+如果要通过代码增加一个组织级角色：
+
+1. 在 `frontend/types/team.ts` 增加可选展示元数据；
+2. 在 Agent Kernel 定义允许读取的 State 投影和输出 schema；
+3. 为它声明工具 allowlist、超时、预算与失败语义；
+4. 在 Supervisor 路由和 Reviewer 汇总中接入；
+5. 增加至少一个正例和越权负例。
+
+仅在前端增加一张卡片不会自动获得新工具或跳过安全边界。
+
+## Java 控制面架构选择
+
+Java 控制面采用“按业务能力分模块的模块化单体 + Port/Adapter”，而不是全局 `controller/service/impl/mapper` 目录，也不是把每张表拆成微服务。
+
+```text
+run/
+  api/                 Spring MVC、wire DTO、SSE
+  application/         submission/query/interaction/lifecycle use case
+  domain/model/        Run、Interaction、DeliveryStatus
+  domain/port/         RunStore、RuntimeGateway、OutboxPort
+  infrastructure/      JdbcRunStore、HTTP/gRPC Runtime、Kafka adapter
+```
+
+这种结构与常规 `service/impl/mapper` 相比，多了显式业务边界和 Port，但不会为了只有一个实现而制造空接口。当前 JDBC SQL 通过 `JdbcClient` adapter 隔离；如果未来复杂动态 SQL、批量映射或团队规范确实需要 MyBatis，只替换 infrastructure persistence adapter，不改变 application/domain/API。HTTP 与 gRPC 也保持同一个 Agent Runtime Port 的两个条件化实现。
+
+现在把 Run、Project、Tenant、Artifact 全拆成微服务并不会更先进：它会把创建 Run 时的一次本地事务拆成分布式事务，同时引入服务发现、重试风暴、链路追踪、消息兼容和补偿逻辑。当前更合理的服务边界已经独立部署：Python Runtime、Temporal Worker、Evolution Evaluator、身份、数据库、消息总线和对象存储。只有具备独立数据所有权、独立扩缩容需求和明确 Saga/Outbox 协议的能力，才允许从 Java 模块中抽取。完整决策见 [ADR-0002](docs/adr/0002-modular-monolith-and-service-boundaries.md)。
+
 ## 目录结构
 
 ```text
@@ -217,7 +329,7 @@ flowchart LR
 ├── src/agents/ratsnestpro/           LangGraph Supervisor 与子智能体
 ├── src/service/                     Python internal REST/gRPC、Redis、Kafka、SSE
 ├── src/core/                        LLM provider 与运行配置
-├── src/memory/postgres.py            LangGraph PostgreSQL checkpoint
+├── src/memory/                       LangGraph checkpoint + 跨会话向量记忆
 ├── src/ratsnestpro/                  KiCad/EDA/17步确定性流水线
 ├── contracts/                       REST、SSE、gRPC、Runtime JSON Schema
 ├── docker/                          Runtime、Frontend、Keycloak、Freerouting 镜像
@@ -238,7 +350,22 @@ Copy-Item .env.example .env
 docker compose --profile control-plane --profile identity --profile artifact-store up -d --build
 ```
 
-Compose 会先幂等预置 `ratsnest_app` 与 `ratsnest_migrator`，再用独立的 Flyway 进程执行 V1–V15，成功后才启动 Java 控制面。生产环境仍应由平台预置数据库角色，并通过独立 Kubernetes Flyway Job 执行迁移。
+Compose 会先幂等预置 pgvector、`ratsnest_app` 与 `ratsnest_migrator`，再用独立的 Flyway 进程执行 V1–V18，成功后才启动 Java 控制面。生产环境仍应由平台预置数据库角色/pgvector extension，并通过独立 Kubernetes Flyway Job 执行迁移。
+
+### 推荐的首次启动检查
+
+```powershell
+docker compose --profile control-plane --profile identity --profile artifact-store ps
+Invoke-WebRequest http://localhost:8081/actuator/health/readiness
+Invoke-WebRequest http://localhost:3000/api/health
+Invoke-WebRequest http://localhost:8080/health/ready
+```
+
+如果前端显示 `An unexpected server error occurred`，先查询 Java 日志中的 request ID。数据库结构问题必须通过下一条不可变 Flyway migration 修复，禁止手工修改历史 migration。V16 专门修复 V15 event-ingestion trigger 在 `FORCE ROW LEVEL SECURITY` 下以 migrator 身份初始化游标时被拒绝的问题；它没有关闭应用租户 RLS。
+
+### 可选 vLLM
+
+普通开发不需要启动 GPU 服务。需要本地推理优化时，按 [vLLM 部署说明](deploy/inference/README.md) 单独启动 inference overlay，再在 `.env` 配置 small/large/embedding endpoint。continuous batching 与 prefix/KV cache 属于模型服务器能力，不应在每个 Agent 节点重复实现一套缓存。
 
 访问地址：
 
@@ -283,6 +410,8 @@ docker compose --profile evolution up -d --build evolution_worker evolution_eval
 
 1. 本地 Compose 已具备组件连通配置，但真实 Kubernetes Metrics API、跨区域 failover/failback、TLS 重启恢复和 RPO/RTO 仍需要在目标集群演练。
 2. 交付工程是否满足全部硬件设计规则仍需 Reviewer 和人工硬件工程师确认；系统不会把 `delivered_with_issues` 冒充 `release_ready`。
+3. hashing embedding 是离线可用性后备，不等价于高质量语义模型；生产应配置经过中文/硬件语料 Eval 的 384 维 embedding endpoint。
+4. Governed Evolution 不会自动 merge、push 或 deploy；候选通过评测后仍需要人工批准、代码审查、构建不可变镜像和 Canary。
 
 ## License
 

@@ -36,7 +36,12 @@ from langsmith import uuid7
 from agents import DEFAULT_AGENT, AgentGraph, get_agent, get_all_agent_info, load_agent
 from core import settings
 from core.settings import RunRegistryBackend
-from memory import initialize_database
+from memory import (
+    LongTermMemory,
+    initialize_database,
+    initialize_long_term_memory,
+    render_memory_context,
+)
 from schema import (
     ChatHistory,
     ChatHistoryInput,
@@ -85,6 +90,7 @@ from service.utils import (
 
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
+_long_term_memory: LongTermMemory | None = None
 
 _AHE_RECORD_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -239,7 +245,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
         await run_registry.startup()
         # Initialize the thread-scoped LangGraph checkpointer.
-        async with initialize_database() as saver:
+        async with initialize_database() as saver, initialize_long_term_memory() as memory:
+            global _long_term_memory
+            _long_term_memory = memory
             if hasattr(saver, "setup"):  # ignore: union-attr
                 await saver.setup()
 
@@ -285,6 +293,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.exception("Error during database/store/agents initialization")
         raise
     finally:
+        _long_term_memory = None
         app.state.ready = False
         if grpc_server is not None:
             await grpc_server.stop(settings.RATSNEST_INTERNAL_GRPC_SHUTDOWN_SECONDS)
@@ -398,6 +407,26 @@ async def _handle_input(
         "request_id": user_input.request_id,
         "request_fingerprint": _request_fingerprint(user_input, agent_id),
     }
+    if runtime_scope is not None and _long_term_memory is not None:
+        try:
+            remembered = await _long_term_memory.search(
+                tenant_scope=runtime_scope.tenant,
+                principal_scope=runtime_scope.principal,
+                project_scope=runtime_scope.project,
+                query=user_input.message,
+            )
+            if remembered:
+                configurable["long_term_memory_context"] = render_memory_context(remembered)
+            await _long_term_memory.record_user_event(
+                tenant_scope=runtime_scope.tenant,
+                principal_scope=runtime_scope.principal,
+                project_scope=runtime_scope.project,
+                thread_id=client_thread_id,
+                request_id=str(user_input.request_id),
+                message=user_input.message,
+            )
+        except Exception:  # noqa: BLE001 - memory is advisory, execution is authoritative
+            logger.warning("Cross-conversation memory is unavailable for this run", exc_info=True)
     if runtime_scope is not None:
         configurable.update(
             {
@@ -475,6 +504,7 @@ async def _handle_input(
             "harness_manifest_digest",
             "governance_scope_token",
             "model",
+            "long_term_memory_context",
         }
         if overlap := reserved_keys & runtime_agent_config.keys():
             raise HTTPException(
@@ -925,6 +955,24 @@ async def _produce_stream_events(
             logger.warning("Ignoring AHE event without a valid durable record_id.")
             continue
         await run_registry.append_event(record, event, event_key=event_key)
+    runtime_scope = execution_scope(user_input)
+    manifest = result.get("artifact_manifest")
+    if runtime_scope is not None and _long_term_memory is not None and isinstance(manifest, dict):
+        artifacts = manifest.get("artifacts", [])
+        errors = manifest.get("errors", [])
+        try:
+            await _long_term_memory.record_verified_outcome(
+                tenant_scope=runtime_scope.tenant,
+                principal_scope=runtime_scope.principal,
+                project_scope=runtime_scope.project,
+                thread_id=_ensure_thread_id(user_input),
+                request_id=_ensure_request_id(user_input),
+                delivery_status=str(manifest.get("delivery_status", "unknown")),
+                artifact_count=len(artifacts) if isinstance(artifacts, list) else 0,
+                blockers=[str(item) for item in errors] if isinstance(errors, list) else [],
+            )
+        except Exception:  # noqa: BLE001 - outcome memory is advisory
+            logger.warning("Unable to persist verified run outcome memory", exc_info=True)
     return result
 
 

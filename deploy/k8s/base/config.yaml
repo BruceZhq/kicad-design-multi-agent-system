@@ -11,6 +11,12 @@ data:
   POSTGRES_HOST: postgres-rw.ratsnest-data.svc.cluster.local
   POSTGRES_PORT: "5432"
   POSTGRES_DB: agent_service
+  LONG_TERM_MEMORY_ENABLED: "true"
+  LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS: "384"
+  LONG_TERM_MEMORY_RETRIEVAL_LIMIT: "8"
+  LONG_TERM_MEMORY_RECENCY_HALF_LIFE_DAYS: "30"
+  LONG_TERM_MEMORY_MIN_SCORE: "0.22"
+  LONG_TERM_MEMORY_RETENTION_DAYS: "365"
   RUN_TIMEOUT_SECONDS: "36000"
   RUN_REGISTRY_BACKEND: redis
   REDIS_KEY_PREFIX: ratsnest:cell-01
@@ -62,11 +68,11 @@ data:
   RATSNEST_RUN_OUTBOX_ENABLED: "false"
   RATSNEST_RUN_OUTBOX_TOPIC: ratsnest.runs.v1
   RATSNEST_RUN_RECONCILIATION_ENABLED: "false"
-  # Release automation must replace these with the content digests of the
-  # immutable evaluation suites. Empty values intentionally fail closed.
-  RATSNEST_EVOLUTION_OPTIMIZATION_SUITE_DIGEST: ""
-  RATSNEST_EVOLUTION_HOLDOUT_SUITE_DIGEST: ""
-  RATSNEST_EVOLUTION_ADVERSARIAL_SUITE_DIGEST: ""
+  # Content-addressed suite identities. Release automation must verify these
+  # against the exact checked-out suite manifests before rollout.
+  RATSNEST_EVOLUTION_OPTIMIZATION_SUITE_DIGEST: "72045680ee4a669af184ecd6a89469b7afcfaaa555831aa8b9728b3380877163"
+  RATSNEST_EVOLUTION_HOLDOUT_SUITE_DIGEST: "9d0de693c854ecb54ba704e624d2a5e9e2b1f0af9e27b8cfbb1d177562568751"
+  RATSNEST_EVOLUTION_ADVERSARIAL_SUITE_DIGEST: "94f49fa90854cc5b7cee49469346a372e73b6139ddecc8a2597008d4a6bfae58"
   RATSNEST_EVOLUTION_REQUIRED_EXECUTOR_MODE: kubernetes_job
   RATSNEST_EVOLUTION_TEMPORAL_TASK_QUEUE: ratsnest-evolution-production
   RATSNEST_DB_URL: jdbc:postgresql://postgres-rw.ratsnest-data.svc.cluster.local:5432/agent_service

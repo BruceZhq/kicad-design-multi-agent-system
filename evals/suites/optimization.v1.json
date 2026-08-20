@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "1.0",
+  "suiteId": "ratsnest-harness-optimization-v1",
+  "suiteDigest": "72045680ee4a669af184ecd6a89469b7afcfaaa555831aa8b9728b3380877163",
+  "cases": [
+    {
+      "ref": "evals/manifests/release-truth-missing-artifact.v1.json",
+      "sha256": "cdab096e34440948567fb1630712cd959045ec9d5e4c280858357a09d6823778",
+      "sealed": false
+    },
+    {
+      "ref": "evals/manifests/ahe-recovery.v1.json",
+      "sha256": "2e1feb761b12b31ce0d8bff38cc8a921b6d675aeb883ba9aab6624259f5a43e9",
+      "sealed": false
+    }
+  ]
+}

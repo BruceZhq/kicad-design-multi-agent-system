@@ -90,8 +90,15 @@ function Assert-CleanCloneSourcesTracked {
         "backend/src/main/resources/db/migration/V9__create_harness_evolution.sql",
         "backend/src/main/resources/db/migration/V10__add_harness_rollout_rollback_target.sql",
         "backend/src/main/resources/db/migration/V11__complete_evolution_trial_proof.sql",
+        "backend/src/main/resources/db/migration/V16__fix_run_event_ingestion_rls.sql",
+        "backend/src/main/resources/db/migration/V17__create_conversation_memory.sql",
+        "backend/src/main/resources/db/migration/V18__protect_conversation_memory.sql",
         "docker/postgres/bootstrap-control-plane.sql",
-        "docker/Dockerfile.evolution"
+        "docker/Dockerfile.evolution",
+        "src/memory/long_term.py",
+        "evals/suites/optimization.v1.json",
+        "evals/suites/holdout.v1.json",
+        "evals/suites/adversarial.v1.json"
     )
     Push-Location $projectRoot
     try {

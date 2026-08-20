@@ -393,9 +393,12 @@ async def propose_patch_proposal(
 ) -> PatchProposal:
     """Request a strict whole-file proposal; applying it remains a separate activity."""
 
-    from core.llm import get_model_for_plain_call
+    from core.llm import InferencePurpose, get_model_for_purpose
 
-    model = get_model_for_plain_call(model_name).with_structured_output(PatchProposal)
+    model = get_model_for_purpose(
+        model_name,
+        purpose=InferencePurpose.REASONING,
+    ).with_structured_output(PatchProposal)
     result = await model.ainvoke(optimizer_prompt(request, policy))
     proposal = result if isinstance(result, PatchProposal) else PatchProposal.model_validate(result)
     validate_patch_plan(

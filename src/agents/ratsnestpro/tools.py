@@ -776,7 +776,7 @@ class _ToolkitLlmClient:
         phase: str = "hardware-engineer",
         max_llm_tokens: int = 1_200_000,
     ) -> None:
-        from core import get_model, get_model_for_plain_call, settings
+        from core import InferencePurpose, get_model, get_model_for_purpose, settings
 
         selected_model = settings.DEFAULT_MODEL
         if model_name:
@@ -797,7 +797,10 @@ class _ToolkitLlmClient:
                     "when dispatching the hardware workflow."
                 )
             selected_model = candidates[0]
-        self._model = get_model_for_plain_call(selected_model)
+        self._model = get_model_for_purpose(
+            selected_model,
+            purpose=InferencePurpose.REASONING,
+        )
         self._fallback_model = get_model(selected_model)
         self._model_name = getattr(selected_model, "value", str(selected_model))
         self._transcript_path = transcript_path

@@ -271,13 +271,19 @@ def test_sealed_holdout_and_adversarial_cases_are_deterministic() -> None:
 
 
 def test_eval_suite_index_is_content_addressed() -> None:
-    index = json.loads((ROOT / "evals" / "suites" / "core.v1.json").read_text())
-    entries = []
-    for item in index["cases"]:
-        digest = hashlib.sha256((ROOT / item["ref"]).read_bytes()).hexdigest()
-        assert digest == item["sha256"]
-        entries.append(f"{item['ref']}|{digest}")
-    assert hashlib.sha256("\n".join(entries).encode()).hexdigest() == index["suiteDigest"]
+    for suite_name in (
+        "core.v1.json",
+        "optimization.v1.json",
+        "holdout.v1.json",
+        "adversarial.v1.json",
+    ):
+        index = json.loads((ROOT / "evals" / "suites" / suite_name).read_text())
+        entries = []
+        for item in index["cases"]:
+            digest = hashlib.sha256((ROOT / item["ref"]).read_bytes()).hexdigest()
+            assert digest == item["sha256"]
+            entries.append(f"{item['ref']}|{digest}")
+        assert hashlib.sha256("\n".join(entries).encode()).hexdigest() == index["suiteDigest"]
 
 
 def test_patch_plan_uses_the_single_governance_registry(tmp_path: Path) -> None:

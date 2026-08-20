@@ -98,6 +98,13 @@ export const DEFAULT_TEAM: TeamConfig = {
   roles: [...CORE_ROLES],
 };
 
+export function selectedOptionalRoleIds(roles: TeamRole[]): string[] {
+  const builtInIds = new Set(OPTIONAL_ROLES.map((role) => role.role_id));
+  return roles
+    .filter((role) => !role.core && builtInIds.has(role.role_id))
+    .map((role) => role.role_id);
+}
+
 function isRole(value: unknown): value is TeamRole {
   if (!value || typeof value !== "object") return false;
   const role = value as Partial<TeamRole>;

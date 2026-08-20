@@ -25,7 +25,7 @@
 - `src/ratsnestpro/`：确定性 EDA 内核。
 - `src/evolution/`：受治理 Harness Evolution。
 - `backend/src/main/java/team/ratsnest/controlplane/`：Java/Spring 控制面。
-- `backend/src/main/resources/db/migration/`：Flyway V1–V12。
+- `backend/src/main/resources/db/migration/`：Flyway V1–V18。
 - `contracts/`、`frontend/`、`compose.yaml`、`deploy/k8s/`：连接上述核心的契约和基础设施。
 
 以下内容只做归类，不逐行讲解：
@@ -48,7 +48,7 @@
 
 - 第 1–3 章：系统边界、完整请求链和框架/中间件总表。
 - 第 4–7 章：Python Runtime、Agent 内核、内嵌 EDA、Harness Evolution。
-- 第 8–9 章：Java 控制面逐包/逐类说明和 Flyway V1–V12。
+- 第 8–9 章：Java 控制面逐包/逐类说明和 Flyway V1–V18。
 - 第 10–12 章：跨语言 contracts、前端 BFF、Compose/Kubernetes/OTel。
 - 第 13–14 章：当前 recovery WIP、测试和 CI 边界。
 - 第 15–18 章：按故障定位代码、推荐阅读路线、维护不变量。
@@ -769,7 +769,7 @@ Trial 会先在数据库进入 pending/evaluating，再派发 Python。派发失
 
 ---
 
-## 9. Flyway V1–V12 讲解
+## 9. Flyway V1–V18 讲解
 
 | 版本 | 文件 | 引入内容与关键约束 |
 |---:|---|---|
@@ -785,6 +785,12 @@ Trial 会先在数据库进入 pending/evaluating，再派发 Python。派发失
 | V10 | `V10__add_harness_rollout_rollback_target.sql` | 保存 previous stable，限制 rollback 目标 |
 | V11 | `V11__complete_evolution_trial_proof.sql` | 拒绝不安全 legacy trial；补 proof digest、pending/workflow 唯一约束 |
 | V12 | `V12__create_conversation_deletions.sql` | principal-scoped conversation tombstone，不删除共享 Run |
+| V13 | `V13__add_run_fork_provenance.sql` | 跨 Profile 安全 fork 来源、根 Run 形状与不可变约束 |
+| V14 | `V14__harden_evolution_observation_attribution.sql` | Evolution observation 的可信归因、幂等与跨项目计数字段 |
+| V15 | `V15__create_run_event_ingestion.sql` | 不依赖浏览器 SSE 的持久事件摄取游标、租约与 CAS |
+| V16 | `V16__fix_run_event_ingestion_rls.sql` | 修复 SECURITY DEFINER 触发器在 FORCE RLS 下的最小内部写权限 |
+| V17 | `V17__create_conversation_memory.sql` | pgvector 长期记忆、全文索引、来源、冲突状态与保留期 |
+| V18 | `V18__protect_conversation_memory.sql` | 对 Java 应用角色关闭直接记忆表访问并通过 FORCE RLS fail-closed |
 
 ### 9.1 V4 `NO FORCE RLS` 的准确含义
 

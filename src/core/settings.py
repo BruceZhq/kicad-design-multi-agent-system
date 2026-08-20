@@ -178,6 +178,16 @@ class Settings(BaseSettings):
     COMPATIBLE_API_KEY: SecretStr | None = None
     COMPATIBLE_BASE_URL: str | None = None
 
+    # Optional purpose-aware OpenAI-compatible inference endpoints. Keeping
+    # these empty preserves the selected provider; vLLM deployments can route
+    # inexpensive intake/summary calls separately from engineering reasoning.
+    INFERENCE_SMALL_BASE_URL: str | None = None
+    INFERENCE_SMALL_MODEL: str | None = None
+    INFERENCE_SMALL_API_KEY: SecretStr | None = None
+    INFERENCE_LARGE_BASE_URL: str | None = None
+    INFERENCE_LARGE_MODEL: str | None = None
+    INFERENCE_LARGE_API_KEY: SecretStr | None = None
+
     LANGCHAIN_TRACING_V2: bool = False
     LANGCHAIN_PROJECT: str = "default"
     LANGCHAIN_ENDPOINT: Annotated[str, BeforeValidator(check_str_is_http)] = (
@@ -199,6 +209,19 @@ class Settings(BaseSettings):
     POSTGRES_APPLICATION_NAME: str = "agent-service-toolkit"
     POSTGRES_MIN_CONNECTIONS_PER_POOL: int = 1
     POSTGRES_MAX_CONNECTIONS_PER_POOL: int = 1
+
+    # Tenant-scoped cross-conversation memory. Embeddings can come from any
+    # OpenAI-compatible endpoint; the deterministic local fallback keeps the
+    # product usable without another external service.
+    LONG_TERM_MEMORY_ENABLED: bool = True
+    LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS: int = Field(default=384, ge=64, le=4096)
+    LONG_TERM_MEMORY_EMBEDDING_BASE_URL: str | None = None
+    LONG_TERM_MEMORY_EMBEDDING_MODEL: str | None = None
+    LONG_TERM_MEMORY_EMBEDDING_API_KEY: SecretStr | None = None
+    LONG_TERM_MEMORY_RETRIEVAL_LIMIT: int = Field(default=8, ge=1, le=20)
+    LONG_TERM_MEMORY_RECENCY_HALF_LIFE_DAYS: float = Field(default=30, ge=1, le=3650)
+    LONG_TERM_MEMORY_MIN_SCORE: float = Field(default=0.22, ge=0, le=1)
+    LONG_TERM_MEMORY_RETENTION_DAYS: int = Field(default=365, ge=1, le=3650)
 
     # Azure OpenAI Settings
     AZURE_OPENAI_API_KEY: SecretStr | None = None

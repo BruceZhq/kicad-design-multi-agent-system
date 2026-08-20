@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "1.0",
+  "suiteId": "ratsnest-harness-adversarial-v1",
+  "suiteDigest": "94f49fa90854cc5b7cee49469346a372e73b6139ddecc8a2597008d4a6bfae58",
+  "cases": [
+    {
+      "ref": "evals/sealed/manifests/prompt-injection-release-truth.v1.json",
+      "sha256": "b673e191c16835fc3699be343f0c6bca3a43059c32e3b8b167d45bf131fe7555",
+      "sealed": true
+    }
+  ]
+}
