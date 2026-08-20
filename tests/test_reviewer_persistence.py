@@ -3,9 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from ratsnestpro.agents import LlmError
-
 from agents.ratsnestpro import tools
+from ratsnestpro.agents import LlmError
 
 
 class _DeterministicReport:

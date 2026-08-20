@@ -54,11 +54,6 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
-client = [
-    { name = "httpx" },
-    { name = "pydantic" },
-    { name = "python-dotenv" },
-]
 dev = [
     { name = "langgraph-cli", extra = ["inmem"] },
     { name = "pre-commit" },
@@ -102,11 +97,6 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-client = [
-    { name = "httpx", specifier = "~=0.28.1" },
-    { name = "pydantic", specifier = "~=2.13.4" },
-    { name = "python-dotenv", specifier = "~=1.2.2" },
-]
 dev = [
     { name = "langgraph-cli", extras = ["inmem"] },
     { name = "pre-commit" },

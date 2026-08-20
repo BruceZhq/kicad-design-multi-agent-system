@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 
 import { AccountMenu } from "@/components/account-menu";
 import { MarkdownContent } from "@/components/markdown-content";
@@ -276,7 +276,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
   const [busy, setBusy] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [status, setStatus] = useState("正在连接服务…");
-  const [runState, setRunState] = useState<"idle" | "running" | "waiting_for_input" | TerminalRunEvent | "disconnected" | "rejected">("idle");
+  const [, setRunState] = useState<"idle" | "running" | "waiting_for_input" | TerminalRunEvent | "disconnected" | "rejected">("idle");
   const [interaction, setInteraction] = useState<InteractionState | null>(null);
   const [latestRun, setLatestRun] = useState<RunSummary | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<RunRuntimeStatus | null>(null);

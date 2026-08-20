@@ -13,19 +13,17 @@ reference-specific cases.
 
 from __future__ import annotations
 
-from collections import Counter
 import itertools
 import json
-import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter
+from pathlib import Path
 
 import pcbnew
-
 
 _NET_RE = re.compile(r"\[([^\]]+)\]")
 _LAYER_RE = re.compile(r"\bon\s+((?:F|B|In\d+)\.Cu)\b")

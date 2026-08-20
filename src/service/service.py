@@ -36,7 +36,7 @@ from langsmith import uuid7
 from agents import DEFAULT_AGENT, AgentGraph, get_agent, get_all_agent_info, load_agent
 from core import settings
 from core.settings import RunRegistryBackend
-from memory import initialize_database, initialize_store
+from memory import initialize_database
 from schema import (
     ChatHistory,
     ChatHistoryInput,
@@ -238,14 +238,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "Set REQUIRE_AUTH_IN_PRODUCTION=false only behind a trusted auth proxy."
             )
         await run_registry.startup()
-        # Initialize both checkpointer (for short-term memory) and store (for long-term memory)
-        async with initialize_database() as saver, initialize_store() as store:
-            # Set up both components
+        # Initialize the thread-scoped LangGraph checkpointer.
+        async with initialize_database() as saver:
             if hasattr(saver, "setup"):  # ignore: union-attr
                 await saver.setup()
-            # Only setup store for Postgres as InMemoryStore doesn't need setup
-            if hasattr(store, "setup"):  # ignore: union-attr
-                await store.setup()
 
             if not settings.AUTH_SECRET:
                 logger.warning(
@@ -253,7 +249,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     "Set AUTH_SECRET in your environment to enable bearer token authentication."
                 )
 
-            # Configure agents with both memory components and async loading
+            # Configure agents with checkpoint persistence and async loading.
             agents = get_all_agent_info()
             for a in agents:
                 try:
@@ -272,8 +268,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     continue
                 # Set checkpointer for thread-scoped memory (conversation history)
                 agent.checkpointer = saver
-                # Set store for long-term memory (cross-conversation knowledge)
-                agent.store = store
                 if a.key not in app.state.failed_agents:
                     logger.info("Agent loaded: %s", a.key)
                     # Continue with other agents rather than failing startup

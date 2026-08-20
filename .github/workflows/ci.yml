@@ -3,7 +3,7 @@ name: CircuitFoundry infrastructure gates
 on:
   pull_request:
   push:
-    branches: [main, "governed-harness-evolution-*"]
+    branches: [main, "governed-harness-evolution-*", "clean-release-*"]
   workflow_dispatch:
 
 permissions:
@@ -32,10 +32,17 @@ jobs:
       - name: Install locked Python dependencies
         run: uv sync --frozen --group dev
 
-      - name: Validate governed evolution code
+      - name: Validate the Python runtime and governed evolution code
         run: |
-          uv run --frozen ruff check src/evolution tests/evolution
-          uv run --frozen pytest -q tests/evolution
+          uv run --frozen ruff check src tests
+          uv run --frozen pytest -q \
+            tests/evolution \
+            tests/test_ahe_event_bridge.py \
+            tests/test_governance_scope_bridge.py \
+            tests/test_harness_systemic_repairs.py \
+            tests/test_intent_router.py \
+            tests/test_run_recovery_status.py \
+            tests/test_runtime_ahe_event_idempotency.py
 
   frontend:
     runs-on: ubuntu-latest
@@ -55,8 +62,9 @@ jobs:
       - name: Install locked frontend dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Type-check and build the production frontend
+      - name: Test, type-check and build the production frontend
         run: |
+          npm test
           npm run typecheck
           npm run build
 

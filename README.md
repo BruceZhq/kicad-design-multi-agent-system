@@ -2,7 +2,7 @@
 
 CircuitFoundry 是由 **CircuitFoundry Engineering** 团队维护、面向版本化 KiCad 硬件设计场景的企业级多智能体系统。它把自然语言需求转换成可审查的 KiCad 工程、制造文件和风险报告，并通过 Java 控制面提供多租户、身份、任务、产物和审计能力。为保持数据库迁移、内部 API 和既有工程兼容，源码中的 `ratsnestpro`、`ratsnest-*` 仍作为稳定的内部标识存在。
 
-当前生产产品只注册一个 Agent：`ratsnestpro-multi-agent`。旧的通用聊天、RAG、AG-UI、语音和多 Agent 示例代码已经从运行时移除，避免启动时加载无关图和错误地把普通聊天 Agent 当成硬件设计 Agent。
+当前生产产品只注册一个 Agent：`ratsnestpro-multi-agent`。旧的通用聊天、独立 RAG/AG-UI、语音和多 Agent 示例代码已经从运行时移除，避免启动时加载无关图和错误地把普通聊天 Agent 当成硬件设计 Agent；正式 AG-UI 事件适配仍属于当前产品链路。
 
 ## 当前能力边界
 
@@ -31,7 +31,7 @@ flowchart LR
     L --> T[Temporal\nHardware Engineer Workflow]
     T --> K[KiCad CLI / Freerouting\n17 步工程流水线]
     J --> PG[(PostgreSQL\n业务状态/RLS/Outbox)]
-    R --> CP[(PostgreSQL\nLangGraph Checkpoint/Store)]
+    R --> CP[(PostgreSQL\nLangGraph Checkpoint)]
     R --> RD[(Redis\nLease/Replay/限流/LLM Stream)]
     J --> KF[(Kafka\n审计/用量/生命周期事件)]
     R --> S3[(S3 兼容存储\n工程与制造产物)]
@@ -48,7 +48,7 @@ flowchart LR
 | Agent Runtime | Python + FastAPI | LangGraph运行、内部身份校验、Redis运行协调、事件转换 |
 | Agent Kernel | LangGraph | State、节点、handoff、checkpoint、Supervisor和角色协作 |
 | 耐久工程执行 | Temporal | Workflow、Activity、重试、超时、Event History、取消和恢复 |
-| 持久化 | PostgreSQL | Java业务表、RLS、Outbox、LangGraph checkpoint/store |
+| 持久化 | PostgreSQL | Java业务表、RLS、Outbox、LangGraph checkpoint |
 | 协调与回放 | Redis | lease、fencing token、幂等、SSE事件回放、LLM输出流 |
 | 事件总线 | Kafka | Durable生命周期、审计、用量和EHE observation |
 | 文件存储 | S3兼容对象存储 | KiCad、Gerber、BOM、CPL、DSN、SES和审查报告 |
@@ -217,7 +217,7 @@ flowchart LR
 ├── src/agents/ratsnestpro/           LangGraph Supervisor 与子智能体
 ├── src/service/                     Python internal REST/gRPC、Redis、Kafka、SSE
 ├── src/core/                        LLM provider 与运行配置
-├── src/memory/postgres.py            LangGraph PostgreSQL checkpoint/store
+├── src/memory/postgres.py            LangGraph PostgreSQL checkpoint
 ├── src/ratsnestpro/                  KiCad/EDA/17步确定性流水线
 ├── contracts/                       REST、SSE、gRPC、Runtime JSON Schema
 ├── docker/                          Runtime、Frontend、Keycloak、Freerouting 镜像
@@ -238,7 +238,7 @@ Copy-Item .env.example .env
 docker compose --profile control-plane --profile identity --profile artifact-store up -d --build
 ```
 
-Compose 会先幂等预置 `ratsnest_app` 与 `ratsnest_migrator`，再用独立的 Flyway 进程执行 V1–V11，成功后才启动 Java 控制面。生产环境仍应由平台预置数据库角色，并通过独立 Kubernetes Flyway Job 执行迁移。
+Compose 会先幂等预置 `ratsnest_app` 与 `ratsnest_migrator`，再用独立的 Flyway 进程执行 V1–V15，成功后才启动 Java 控制面。生产环境仍应由平台预置数据库角色，并通过独立 Kubernetes Flyway Job 执行迁移。
 
 访问地址：
 
@@ -281,8 +281,8 @@ docker compose --profile evolution up -d --build evolution_worker evolution_eval
 
 ## 当前已知边界
 
-2. 本地 Compose 已具备组件连通配置，但真实 Kubernetes Metrics API、跨区域 failover/failback、TLS 重启恢复和 RPO/RTO 仍需要在目标集群演练。
-3. 交付工程是否满足全部硬件设计规则仍需 Reviewer 和人工硬件工程师确认；系统不会把 `delivered_with_issues` 冒充 `release_ready`。
+1. 本地 Compose 已具备组件连通配置，但真实 Kubernetes Metrics API、跨区域 failover/failback、TLS 重启恢复和 RPO/RTO 仍需要在目标集群演练。
+2. 交付工程是否满足全部硬件设计规则仍需 Reviewer 和人工硬件工程师确认；系统不会把 `delivered_with_issues` 冒充 `release_ready`。
 
 ## License
 

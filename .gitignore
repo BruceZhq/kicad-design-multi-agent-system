@@ -146,6 +146,9 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
+!**/.env.example
 .python-version
 .venv
 env/
@@ -186,12 +189,12 @@ cython_debug/
 data/ratsnestpro/
 data/keycloak/
 
-# Chroma db
+# Local database and binary index artifacts
 *.db
 *.sqlite3
 *.bin
 
-# Private Credentials, ignore everything in the folder but the .gitkeep file
+# Private credentials: ignore everything except the empty-directory marker
 privatecredentials/*
 !privatecredentials/.gitkeep
 
@@ -202,7 +205,7 @@ privatecredentials/*
 *-backups/
 src/ratsnestpro/knowledge/.index/
 
-# Node (scripts/agui-client)
+# Node and Next.js build outputs
 node_modules/
 .next/
 *.tsbuildinfo
@@ -216,7 +219,7 @@ bin/
 .t2/
 tests/.tmp-*/
 
-# Live-app smoke test failure screenshot (scripts/smoke_live_app.py)
+# Local smoke-test failure screenshot
 smoke_live_app_failure.png
 
 # Claude Code agent worktrees (ephemeral, per-agent git checkouts)

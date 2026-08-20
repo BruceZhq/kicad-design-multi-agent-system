@@ -8,8 +8,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from urllib.parse import quote
 
-from core import settings
-
 
 @dataclass
 class _ThreadRunSlot:

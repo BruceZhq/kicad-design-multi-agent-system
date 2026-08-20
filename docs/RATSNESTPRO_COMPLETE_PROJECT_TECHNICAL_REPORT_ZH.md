@@ -1072,7 +1072,7 @@ flowchart LR
 
 `messages` 继承 `MessagesState` 的 message reducer，能按 message ID 添加、替换以及用 `RemoveMessage`删除。其余控制字段没有通用“最后追加” reducer，而采用职责单写：Supervisor写 intent/scope，Architect写 architecture，Parts写 parts，Hardware写 dispatch/hardware，Reviewer写 review，Final Report写 artifact manifest。`_RatsNestRoleState.messages` 故意声明普通 list，使子图返回 message delta而非完整父历史；否则父图 reducer会重复追加整段对话。`_history_prune_updates` 删除已经沉淀为结构化 state 的工具大 payload，`_compact_trace` 将 trace限制为32项，工具记录限制为12,000字符，控制 checkpoint 膨胀。
 
-服务层在 `src/service/service.py` lifespan 中按配置创建 `AsyncPostgresSaver`/SQLite/Mongo saver 和 store，并赋给编译图的 `agent.checkpointer/agent.store`。生产使用 `src/memory/postgres.py` 的 `AsyncPostgresSaver` 与 `AsyncPostgresStore`。checkpoint key 是 `v2:{agent_id}:{user_id}:{client_thread_id}` 的转义组合，不再只用客户端 thread ID。`_handle_input` 校验 checkpoint owner、`request_id + request_fingerprint`，同请求在进程重启后以 `input=None` 恢复，人工 interrupt使用 `Command(resume=...)`。
+服务层在 `src/service/service.py` lifespan 中创建 PostgreSQL `AsyncPostgresSaver` 并赋给编译图的 `agent.checkpointer`。checkpoint key 是 `v2:{agent_id}:{user_id}:{client_thread_id}` 的转义组合，不再只用客户端 thread ID。`_handle_input` 校验 checkpoint owner、`request_id + request_fingerprint`，同请求在进程重启后以 `input=None` 恢复，人工 interrupt使用 `Command(resume=...)`。当前没有通用跨会话 Agent Store；跨运行经验仅由受治理的 EHE 账本承载，不能把它描述成用户聊天长期记忆。
 
 并发一致性不是依赖“Python有GIL”。`serialize_thread_run` 先按 `(agent_id,user_id,thread_id)` 使用进程内 `asyncio.Lock`，PostgreSQL模式再使用同一三元组哈希得到的 advisory lock，实现跨实例同 thread单写；不同 thread仍能并发。EDA workspace再加入 execution scope和 requirement digest，Temporal以稳定 Workflow ID控制 Hardware执行。并行只用于无共享写冲突的 Architect内部资料查询（内部知识库与KiCad官方文档 `asyncio.gather`），结果在同一节点确定性 join后一次写回 state。
 
@@ -1467,7 +1467,7 @@ Java 的 `principalId` 不是 Keycloak `sub` 原文，而是对 `principal-v1 + 
 |---|---|---|---|
 | 会话短期状态 | LangGraph Checkpointer；Compose选择PostgreSQL `AsyncPostgresSaver` | graph state、消息、节点断点 | checkpoint thread key使用`agent + opaque user scope + client thread`；同thread本机lock + PostgreSQL advisory lock串行写 |
 | 用户业务资料 | PostgreSQL `control_plane.user_profiles` + 私有S3头像 | 显示名、职位、简介、locale、timezone、头像元数据/字节 | OIDC `(issuer,subject)` 主体RLS、version乐观锁、内容SHA-256；不保存密码 |
-| 长期Agent Store | PostgreSQL `AsyncPostgresStore`；SQLite模式退化为InMemoryStore | 可检索的长期memory | 由Agent namespace负责；生产应统一以tenant/project opaque scope分区 |
+| 通用跨会话Agent记忆 | 当前未实现 | 不保存用户偏好或对话事实的可检索长期memory | 若后续实现，必须使用tenant/project opaque scope、来源证据、冲突检测、保留与删除策略 |
 | 实时Run/SSE | Redis Hash/Stream/ZSet | Run状态、bounded events、队列指标、lease/fencing、audit outbox | Lua原子操作、TTL/有界stream、owner+fence拒绝旧writer；不是最终业务真相 |
 | 长工程恢复 | Temporal Event History + workspace recovery文件 | Workflow/Activity命令、timer、attempt、signal、恢复点 | 稳定Workflow ID、Activity幂等、History replay；高频LLM token不写History |
 | LLM实时输出 | Redis Stream + per-run JSONL | bounded live record、完整本地审计副本 | `record_id` Lua去重；Redis失败不阻断EDA，JSONL作fallback |
@@ -1475,7 +1475,7 @@ Java 的 `principalId` 不是 Keycloak `sub` 原文，而是对 `principal-v1 + 
 | 业务/审计事件 | PostgreSQL Outbox -> Kafka | Run生命周期、完整消息/里程碑、用量/审计 | DB事务+至少一次发布+event_id去重 |
 | 交付文件 | local content-addressed目录或S3兼容对象存储；Java保存Manifest | KiCad、Gerber、BOM/CPL、报告等 | SHA-256、大小、object namespace、短期预签名URL；对象内容不进入PostgreSQL |
 
-必须特别说明：当前 EHE 文件存储是通用Harness经验，不是“每个用户的私人聊天记忆”；它做了身份字段剔除和fingerprint，但若要作为生产多租户知识服务，还需要对象/行级tenant policy、保留策略、删除请求和promotion审批记录。LangGraph自动生成的checkpoint/store表也不属于V1–V7 `control_plane`业务表，二者应使用独立schema/权限治理。
+必须特别说明：当前 EHE 文件存储是通用Harness经验，不是“每个用户的私人聊天记忆”；它做了身份字段剔除和fingerprint，但若要作为生产多租户知识服务，还需要对象/行级tenant policy、保留策略、删除请求和promotion审批记录。LangGraph自动生成的checkpoint表也不属于V1–V15 `control_plane`业务表，二者应使用独立schema/权限治理。
 
 ### 25.6 并发一致性：每一层解决什么竞争
 

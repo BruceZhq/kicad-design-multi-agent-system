@@ -13,6 +13,10 @@ function Add-Target([string]$Candidate) {
     if (-not (Test-Path -LiteralPath $Candidate)) {
         return
     }
+    $item = Get-Item -LiteralPath $Candidate -Force -ErrorAction Stop
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Refusing to clean a reparse point: $($item.FullName)"
+    }
     $resolved = [IO.Path]::GetFullPath(
         (Resolve-Path -LiteralPath $Candidate).Path
     )
@@ -31,6 +35,19 @@ Get-ChildItem -LiteralPath $root -Directory -Force |
         $_.Name -like ".pytest-tmp-*"
     } |
     ForEach-Object { Add-Target $_.FullName }
+
+# Reproducible build outputs are not source and must not accumulate in a
+# release workspace. Keep dependency environments and the shared BuildKit
+# cache because they are intentionally reusable.
+foreach ($relative in @(
+    "backend\bin",
+    "backend\target",
+    "frontend\.next",
+    "frontend\tsconfig.tsbuildinfo",
+    ".ruff-cache"
+)) {
+    Add-Target (Join-Path $root $relative)
+}
 
 foreach ($base in @("src", "tests", "scripts")) {
     $path = Join-Path $root $base

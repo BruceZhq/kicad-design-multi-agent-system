@@ -267,8 +267,7 @@ Temporal workflow 固定推进 17 个步骤。每个 Activity 启动独立子进
 | `src/core/llm.py` | 模型工厂 | 把配置转换成 LangChain ChatModel；支持 OpenAI、Azure、DeepSeek、Anthropic、Google/Vertex、Groq、Bedrock、Ollama、OpenRouter、兼容接口和 fake model |
 | `src/schema/models.py` | provider/model 枚举 | 用 `StrEnum` 固定 API 可见 provider 和模型标识；部分值同时是部署映射 key，不能随意改名 |
 | `src/schema/schema.py` | FastAPI 公共请求/响应模型 | 定义 `UserInput`、`StreamInput`、消息、历史、反馈、服务 metadata、RunStatus；内部身份通过 Pydantic `PrivateAttr` 保存，不被客户端序列化 |
-| `src/schema/task_data.py` | 通用任务状态 | `new/running/complete` 和 `success/error` 的小型结构，用于工具/任务状态表达 |
-| `src/memory/postgres.py` | LangGraph 持久化 | 建立 psycopg async pool，初始化 `AsyncPostgresSaver` 和 `AsyncPostgresStore`；应用 lifespan 中执行 setup |
+| `src/memory/postgres.py` | LangGraph 持久化 | 建立 psycopg async pool，初始化 `AsyncPostgresSaver`；应用 lifespan 中执行 setup |
 | `langgraph.json` | LangGraph CLI 图注册 | 把 `ratsnestpro-multi-agent` 直接映射到 `./src/agents/ratsnestpro/ratsnestpro_agent.py:ratsnestpro_multi_agent`；这条 CLI 路径不同于生产 Runtime 的 `agents.py` 注册表 |
 
 配置上的一个重要区别：`settings.py` 的代码默认允许 memory registry、关闭 Temporal；`compose.yaml` 才把真实集成拓扑覆盖为 Redis registry + Temporal。直接运行 Python 默认值不等同于部署形态。
@@ -277,7 +276,7 @@ Temporal workflow 固定推进 17 个步骤。每个 Activity 启动独立子进
 
 | 文件 | 内容与功能 | 如何实现 |
 |---|---|---|
-| `service.py` | FastAPI 主应用和 Agent 执行总入口 | lifespan 初始化 saver/store/registry/gRPC；提供 invoke、stream、status、cancel、feedback、history、health；把 LangGraph 输出转换成持久化 SSE |
+| `service.py` | FastAPI 主应用和 Agent 执行总入口 | lifespan 初始化 checkpointer、registry 与 gRPC；提供 invoke、stream、status、cancel、feedback、history、health；把 LangGraph 输出转换成持久化 SSE |
 | `internal_api.py` | Java→Python 内部 HTTP API | 使用严格 Pydantic 模型和依赖注入验证签名 claims；校验 URL 中 Run 与 token 中 Run 相同；暴露 runtime info、stream、status、resume、cancel、history、evolution trial |
 | `internal_auth.py` | 内部请求认证 | 验证 HS256、issuer/audience、TTL、method/path/body hash、tenant/project/run；使用常量时间摘要比较 |
 | `runtime_identity.py` | 身份域隔离 | 对 SaaS issuer/subject/tenant/project 进行域分离 hash，生成 Runtime owner/checkpoint/audit scope，避免直接把原始用户标识写入执行存储 |

@@ -13,17 +13,16 @@ There are no component references or board families in the repair policy.
 
 from __future__ import annotations
 
-from collections import Counter
 import json
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter
+from pathlib import Path
 
 import pcbnew
-
 
 _MIN_HOLE_RE = re.compile(r"\bmin hole\s+([0-9.]+)\s*mm\b", re.IGNORECASE)
 
