@@ -136,7 +136,7 @@ class Settings(BaseSettings):
     )
     # Individual non-Temporal calls must not monopolize a LangGraph run. Durable
     # Hardware Engineer work remains governed by the Temporal workflow budgets.
-    RATSNESTPRO_AGENT_CALL_TIMEOUT_SECONDS: float = Field(default=90, ge=5, le=300)
+    RATSNESTPRO_AGENT_CALL_TIMEOUT_SECONDS: float = Field(default=900, ge=5, le=900)
     RATSNESTPRO_TOOL_CALL_TIMEOUT_SECONDS: float = Field(default=60, ge=5, le=300)
 
     AUTH_SECRET: SecretStr | None = None

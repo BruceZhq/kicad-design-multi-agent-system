@@ -4,6 +4,7 @@ metadata:
   name: ratsnest-runtime-config
   namespace: ratsnest
 data:
+  RATSNESTPRO_AGENT_CALL_TIMEOUT_SECONDS: "900"
   MODE: production
   HOST: 0.0.0.0
   PORT: "8080"
