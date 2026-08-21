@@ -5,6 +5,7 @@ metadata:
   namespace: ratsnest
 data:
   RATSNESTPRO_AGENT_CALL_TIMEOUT_SECONDS: "900"
+  RATSNESTPRO_TEMPORAL_STEP_TIMEOUT_SECONDS: "6000"
   MODE: production
   HOST: 0.0.0.0
   PORT: "8080"

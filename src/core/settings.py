@@ -120,7 +120,7 @@ class Settings(BaseSettings):
     RATSNESTPRO_TEMPORAL_TASK_QUEUE: str = "ratsnest-hardware"
     RATSNESTPRO_TEMPORAL_WORKER_CONCURRENCY: int = Field(default=1, ge=1, le=8)
     RATSNESTPRO_TEMPORAL_WORKFLOW_TIMEOUT_SECONDS: int = Field(default=36_000, ge=60, le=86_400)
-    RATSNESTPRO_TEMPORAL_STEP_TIMEOUT_SECONDS: int = Field(default=600, ge=10, le=7_200)
+    RATSNESTPRO_TEMPORAL_STEP_TIMEOUT_SECONDS: int = Field(default=6000, ge=10, le=7_200)
     RATSNESTPRO_TEMPORAL_ROUTING_TIMEOUT_SECONDS: int = Field(default=1_800, ge=10, le=14_400)
     RATSNESTPRO_TEMPORAL_HEARTBEAT_SECONDS: int = Field(default=15, ge=1, le=300)
     RATSNESTPRO_TEMPORAL_POLL_SECONDS: float = Field(default=1.0, ge=0.1, le=30)
