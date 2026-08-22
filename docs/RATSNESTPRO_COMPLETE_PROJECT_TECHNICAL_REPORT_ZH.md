@@ -1,14 +1,14 @@
-# CircuitFoundry 完整项目技术、架构与面试报告
+# KiCad Design Multi-Agent System 完整项目技术、架构与面试报告
 
 > 快照日期：2026-08-19
 > 代码根目录：本仓库根目录
 > 产品定位：面向五类版本化 KiCad 硬件设计场景的企业级、多租户、多智能体 SaaS
-> 兼容说明：产品名称升级为 CircuitFoundry；`ratsnestpro`/`ratsnest-*` 继续作为稳定的内部协议、数据库与运行标识。
+> 兼容说明：产品名称升级为 KiCad Design Multi-Agent System；`ratsnestpro`/`ratsnest-*` 继续作为稳定的内部协议、数据库与运行标识。
 > 重要说明：本文区分“代码已实现”“静态验证通过”“本地集成通过”和“生产环境已演练”。没有真实证据的能力不会写成已经投产。
 
 ## 1. 执行摘要
 
-CircuitFoundry 已经不是一个“把提示词直接交给单个 LLM”的演示程序，而是由三层组成的工程系统：
+KiCad Design Multi-Agent System 已经不是一个“把提示词直接交给单个 LLM”的演示程序，而是由三层组成的工程系统：
 
 1. **产品与 SaaS 控制面**：Next.js 前端通过 Java Spring Boot 控制面完成登录、组织、项目、Run、Revision、产物授权和 SSE 事件访问。
 2. **多智能体执行面**：Python LangGraph 注册了唯一面向产品的 `ratsnestpro-multi-agent`，由 Supervisor、Architect、Parts Specialist、Hardware Engineer 和 Reviewer 分工协作。
@@ -124,7 +124,7 @@ flowchart LR
 ## 5. 代码结构
 
 ```text
-agent-service-toolkit-main/
+kicad-design-multi-agent-system/
 ├─ frontend/                         # Next.js 产品前端和 BFF
 │  ├─ app/api/                       # chat、run、history、artifact、session 代理
 │  ├─ components/                    # team builder、workspace、chat console
@@ -510,7 +510,7 @@ CPU 适合一般服务，但 SSE 长连接 CPU 可能很低，因此 Java/Web �
 
 ### 19.1 最新 Java 构建
 
-- 运行镜像：`agent-service-toolkit-main-control_plane:latest`；
+- 运行镜像：`kicad-design-multi-agent-system-control-plane:latest`；
 - Image ID：`sha256:c4b0f27bf2280b988b07446a28733943baaf7b80badc7c027a7e9ce6bfbd7e08`；
 - Java：21.0.10；运行用户 `10001:10001`；
 - 镜像内 JAR SHA-256：`aacf4f3b09fc2b10c244ca7639aeaa993e2ac4b6bb32c59e627b5060cf9eeeca`；
@@ -1926,7 +1926,7 @@ Java 暴露 `GET/PUT /api/v1/me/profile` 和 `GET/PUT /api/v1/me/profile/avatar`
 
 ## 28. 受治理 Harness Evolution：从 AHE 事件到可回滚 Canary
 
-> 本章是截至 2026-08-19 的源码级实现快照，专门补充第 12 章之后新增的受治理 Harness Evolution。若早期章节中“EHE 只记录经验、完全不产生代码候选”的描述与本章冲突，应以本章为准：当前系统可以让模型提出**受限的完整文件候选**并在隔离 worktree 中执行固定评测，但仍然不能自动 merge、push 或 deploy。对用户展示的产品名为 **CircuitFoundry**；`ratsnestpro`、`ratsnest-*`、数据库 schema、协议 ID 和 Temporal task queue 等内部标识为兼容性接口，不能仅为改名而破坏。
+> 本章是截至 2026-08-19 的源码级实现快照，专门补充第 12 章之后新增的受治理 Harness Evolution。若早期章节中“EHE 只记录经验、完全不产生代码候选”的描述与本章冲突，应以本章为准：当前系统可以让模型提出**受限的完整文件候选**并在隔离 worktree 中执行固定评测，但仍然不能自动 merge、push 或 deploy。对用户展示的产品名为 **KiCad Design Multi-Agent System**；`ratsnestpro`、`ratsnest-*`、数据库 schema、协议 ID 和 Temporal task queue 等内部标识为兼容性接口，不能仅为改名而破坏。
 
 ### 28.1 第一性原理：这里的“进化”到底是什么
 

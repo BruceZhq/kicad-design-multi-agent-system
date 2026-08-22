@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ratsnest.team/contracts/evolution/v1/evolution.schema.json",
-  "title": "CircuitFoundry governed evolution contracts v1",
+  "title": "KiCad Design Multi-Agent System governed evolution contracts v1",
   "oneOf": [
     {
       "$ref": "#/$defs/HarnessManifest"

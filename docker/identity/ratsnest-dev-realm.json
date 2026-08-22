@@ -1,6 +1,6 @@
 {
   "realm": "ratsnest-dev",
-  "displayName": "CircuitFoundry Development",
+  "displayName": "KiCad Design Multi-Agent System Development",
   "enabled": true,
   "sslRequired": "none",
   "registrationAllowed": false,
@@ -18,7 +18,7 @@
     "realm": [
       {
         "name": "engineer",
-        "description": "CircuitFoundry development engineer"
+        "description": "KiCad Design Multi-Agent System development engineer"
       },
       {
         "name": "ratsnest-platform-admin",
@@ -29,7 +29,7 @@
   "clients": [
     {
       "clientId": "ratsnest-api",
-      "name": "CircuitFoundry API",
+      "name": "KiCad Design Multi-Agent System API",
       "description": "Bearer-only audience for the Java control plane",
       "enabled": true,
       "protocol": "openid-connect",
@@ -42,7 +42,7 @@
     },
     {
       "clientId": "ratsnest-web",
-      "name": "CircuitFoundry Web",
+      "name": "KiCad Design Multi-Agent System Web",
       "description": "Development-only confidential client used by oauth2-proxy",
       "enabled": true,
       "protocol": "openid-connect",
@@ -79,7 +79,7 @@
     },
     {
       "clientId": "ratsnest-smoke",
-      "name": "CircuitFoundry Smoke Test",
+      "name": "KiCad Design Multi-Agent System Smoke Test",
       "description": "Development-only public client for bounded automated token checks",
       "enabled": true,
       "protocol": "openid-connect",
@@ -111,7 +111,7 @@
       "username": "ratsnest-dev-engineer",
       "enabled": true,
       "emailVerified": true,
-      "firstName": "CircuitFoundry",
+      "firstName": "KiCad Design Multi-Agent System",
       "lastName": "Developer",
       "email": "ratsnest-dev-engineer@localhost.invalid",
       "realmRoles": [

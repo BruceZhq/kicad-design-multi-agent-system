@@ -34,7 +34,7 @@ export function ProductApp() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
-  if (!ready) return <div className="app-loading">正在准备 CircuitFoundry 工作区…</div>;
+  if (!ready) return <div className="app-loading">正在准备 KiCad Design Multi-Agent System 工作区…</div>;
 
   if (view === "profile") {
     return <ProfilePage onBack={() => { window.location.hash = loadTeam() ? "workspace" : "team"; }} />;

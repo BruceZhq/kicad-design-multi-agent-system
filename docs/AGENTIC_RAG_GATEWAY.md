@@ -56,7 +56,7 @@ Parts Specialist 会使用技术文档、历史 BOM、生命周期与已批准�
 让现有 RAG 容器加入本项目 Compose 网络，并给它固定别名 `agentic-rag`。不需要共享代码目录或数据库卷。
 
 ```powershell
-docker network connect --alias agentic-rag agent-service-toolkit-main_default <你的RAG容器名>
+docker network connect --alias agentic-rag kicad-design-multi-agent-system_default <你的RAG容器名>
 ```
 
 在本项目 `.env` 中设置：
@@ -78,7 +78,7 @@ services:
 networks:
   ratsnest:
     external: true
-    name: agent-service-toolkit-main_default
+    name: kicad-design-multi-agent-system_default
 ```
 
 重建并替换 Agent Runtime 后生效：

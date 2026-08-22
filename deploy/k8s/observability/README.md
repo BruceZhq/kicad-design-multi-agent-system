@@ -1,7 +1,7 @@
 # Observability overlay
 
 This opt-in overlay closes the application telemetry path without bundling stateful
-monitoring backends into each CircuitFoundry cell:
+monitoring backends into each KiCad Design Multi-Agent System cell:
 
 `Next.js / Java / Python -> OTLP collector -> Tempo + Loki`, while Prometheus
 scrapes the collector. Grafana data sources stay under the monitoring platform's

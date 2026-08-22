@@ -1,9 +1,9 @@
 [project]
-name = "agent-service-toolkit"
+name = "kicad-design-multi-agent-system"
 version = "0.1.0"
 description = "Distributed multi-agent runtime built with LangGraph, FastAPI, Temporal, Redis, Kafka and Next.js"
 readme = "README.md"
-authors = [{ name = "Joshua Carroll", email = "carroll.joshk@gmail.com" }]
+authors = [{ name = "BruceZhq", email = "80557211+BruceZhq@users.noreply.github.com" }]
 classifiers = [
     "Development Status :: 4 - Beta",
     "License :: OSI Approved :: MIT License",

@@ -70,9 +70,9 @@ export function TeamBuilder({
   return (
     <main className="team-page">
       <header className="product-header">
-        <a className="wordmark" href="#team" aria-label="CircuitFoundry">
-          <span className="wordmark-symbol">CF</span>
-          <span>CircuitFoundry</span>
+        <a className="wordmark" href="#team" aria-label="KiCad Design Multi-Agent System">
+          <span className="wordmark-symbol">KDMAS</span>
+          <span>KiCad Design Multi-Agent System</span>
         </a>
         <div className="header-center">构建 KiCad 硬件设计团队</div>
         <AccountMenu />
@@ -84,7 +84,7 @@ export function TeamBuilder({
           <h1>先组建团队，再开始工程任务</h1>
           <p>
             任务类型固定为 KiCad 硬件设计。五个核心角色对应真实的
-            CircuitFoundry LangGraph 子智能体；你还可以添加本次任务需要的专职审查角色。
+            KiCad Design Multi-Agent System LangGraph 子智能体；你还可以添加本次任务需要的专职审查角色。
           </p>
         </div>
 

@@ -11,10 +11,10 @@ The options are:
 
 ## Using Gemini Developer API
 
-[Get a Gemini API Key from Google](https://ai.google.dev/gemini-api/docs) and start using it quickly within the Agent Service Toolkit.
+[Get a Gemini API Key from Google](https://ai.google.dev/gemini-api/docs) and start using it quickly within the KiCad Design Multi-Agent System.
 
 1. Put your API Key into the  `GOOGLE_API_KEY` environment variable in your `.env` file
-2. Agent Service Toolkit should see the credentials and you should be good to go
+2. KiCad Design Multi-Agent System should see the credentials and you should be good to go
 
 ## Using Google Vertex AI on Google Cloud Platform
 

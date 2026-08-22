@@ -1,4 +1,4 @@
-# CircuitFoundry contracts
+# KiCad Design Multi-Agent System contracts
 
 Contracts are versioned independently from their transport adapters.
 

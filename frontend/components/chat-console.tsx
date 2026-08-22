@@ -1405,7 +1405,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     <main className="workbench-page">
       <header className="product-header workbench-topbar">
         <span className="window-dots" aria-hidden="true"><i /><i /><i /></span>
-        <div className="header-center"><span className="workbench-brand">CF</span> CircuitFoundry · {team.name}</div>
+        <div className="header-center"><span className="workbench-brand">KDMAS</span> KiCad Design Multi-Agent System · {team.name}</div>
         <AccountMenu />
       </header>
 

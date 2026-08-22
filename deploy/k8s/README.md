@@ -1,4 +1,4 @@
-# CircuitFoundry Kubernetes cell
+# KiCad Design Multi-Agent System Kubernetes cell
 
 This deployment keeps `ratsnestpro-multi-agent` as the only execution runtime.
 Java is the external SaaS control plane; Python remains private:

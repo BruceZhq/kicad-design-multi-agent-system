@@ -206,7 +206,7 @@ class Settings(BaseSettings):
     POSTGRES_HOST: str | None = None
     POSTGRES_PORT: int | None = None
     POSTGRES_DB: str | None = None
-    POSTGRES_APPLICATION_NAME: str = "agent-service-toolkit"
+    POSTGRES_APPLICATION_NAME: str = "kicad-design-multi-agent-system"
     POSTGRES_MIN_CONNECTIONS_PER_POOL: int = 1
     POSTGRES_MAX_CONNECTIONS_PER_POOL: int = 1
 

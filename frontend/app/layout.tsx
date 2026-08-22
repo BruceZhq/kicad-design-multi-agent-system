@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "CircuitFoundry Engineering Console",
+  title: "KiCad Design Multi-Agent System Engineering Console",
   description: "Enterprise multi-agent hardware engineering workspace",
 };
 

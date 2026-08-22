@@ -1,6 +1,6 @@
 # Using Ollama
 
-⚠️ _**Note:** Ollama support in agent-service-toolkit is experimental and may not work as expected. The instructions below have been tested using Docker Desktop on a MacBook Pro. Please file an issue for any challenges you encounter._
+⚠️ _**Note:** Ollama support in kicad-design-multi-agent-system is experimental and may not work as expected. The instructions below have been tested using Docker Desktop on a MacBook Pro. Please file an issue for any challenges you encounter._
 
 You can also use [Ollama](https://ollama.com) to run the LLM powering the agent service.
 

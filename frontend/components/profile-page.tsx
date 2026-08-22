@@ -186,7 +186,7 @@ export function ProfilePage({ onBack }: { onBack: () => void }) {
     return (
       <main className="profile-page">
         <header className="product-header">
-          <a className="wordmark" href="#team"><span className="wordmark-symbol">CF</span><span>CircuitFoundry</span></a>
+          <a className="wordmark" href="#team"><span className="wordmark-symbol">KDMAS</span><span>KiCad Design Multi-Agent System</span></a>
           <div className="header-center">个人资料</div>
           <AccountMenu />
         </header>
@@ -206,7 +206,7 @@ export function ProfilePage({ onBack }: { onBack: () => void }) {
   return (
     <main className="profile-page">
       <header className="product-header">
-        <a className="wordmark" href="#team"><span className="wordmark-symbol">CF</span><span>CircuitFoundry</span></a>
+        <a className="wordmark" href="#team"><span className="wordmark-symbol">KDMAS</span><span>KiCad Design Multi-Agent System</span></a>
         <div className="header-center">账号与个人资料</div>
         <AccountMenu />
       </header>

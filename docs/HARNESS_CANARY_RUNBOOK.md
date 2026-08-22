@@ -1,10 +1,10 @@
-# CircuitFoundry Harness Canary、Evolution Worker 与 Flyway 发布手册
+# KiCad Design Multi-Agent System Harness Canary、Evolution Worker 与 Flyway 发布手册
 
 本手册只描述 Harness Runtime 的版本化发布。浏览器、Java 控制面和数据库迁移保持各自独立的发布边界。所有示例都要求显式传入 Kubernetes context，避免误操作当前默认集群。
 
 ## 发布模型
 
-CircuitFoundry 保留两条物理隔离的 Runtime 路径：
+KiCad Design Multi-Agent System 保留两条物理隔离的 Runtime 路径：
 
 | Channel | API Service | Temporal Worker | Task queue |
 |---|---|---|---|
@@ -113,7 +113,7 @@ Kubernetes 就绪并不等于开始分流。候选版本必须先注册为 `APPR
 以下是精确的控制面调用顺序。Manifest 字段必须来自 `build_harness_manifest.ps1 -Release` 和不可变镜像构建结果，不能手填伪摘要：
 
 ```powershell
-$controlPlane = "https://control.circuitfoundry.example"
+$controlPlane = "https://control.kicad-design-multi-agent-system.example"
 $token = "<platform-admin-access-token>"
 $headers = @{ Authorization = "Bearer $token" }
 $versionId = "harness-1.4.0-rc.1"
@@ -256,7 +256,7 @@ kubectl --context $context -n ratsnest get pods -l ratsnest.io/release-track=sta
 先读取 rollout，响应中的 `previousStableVersionId` 是最近一次 promote 记录的唯一允许目标。它必须对应一个 attested、`RETIRED` 的 HarnessVersion；浏览器或管理员不能指定任意 retired 版本。随后提交以下精确请求体：
 
 ```powershell
-$controlPlane = "https://control.circuitfoundry.example"
+$controlPlane = "https://control.kicad-design-multi-agent-system.example"
 $token = "<platform-admin-access-token>"
 $headers = @{ Authorization = "Bearer $token" }
 $rollout = Invoke-RestMethod `

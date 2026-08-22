@@ -46,8 +46,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   background: rgba(255, 255, 255, 0.92);
   backdrop-filter: blur(18px);
 }
-.wordmark { display: inline-flex; align-items: center; gap: 10px; width: fit-content; color: var(--ink); text-decoration: none; font-weight: 760; }
-.wordmark-symbol { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 11px; background: linear-gradient(145deg, #27272a, #000000); color: white; font-size: 10px; letter-spacing: 0.04em; box-shadow: 0 8px 20px rgba(0, 0, 0, 0.23); }
+.wordmark { display: inline-flex; align-items: center; gap: 10px; width: fit-content; min-width: 0; color: var(--ink); text-decoration: none; font-weight: 760; }
+.wordmark > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wordmark-symbol { display: grid; place-items: center; width: 48px; height: 34px; flex: 0 0 auto; border-radius: 11px; background: linear-gradient(145deg, #27272a, #000000); color: white; font-size: 9px; letter-spacing: 0.03em; box-shadow: 0 8px 20px rgba(0, 0, 0, 0.23); }
 .header-center { color: #6f7180; font-size: 14px; text-align: center; }
 .protected-badge { display: inline-flex; align-items: center; gap: 7px; justify-self: end; color: #71717a; font-size: 13px; }
 .protected-badge i { width: 8px; height: 8px; border: 2px solid #71717a; border-radius: 50%; box-shadow: 0 0 0 4px rgba(0,0,0,0.08); }
@@ -183,7 +184,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .window-dots i:first-child { background: #ffaaa8; }
 .window-dots i:nth-child(2) { background: #ffd68a; }
 .window-dots i:last-child { background: #82d9b9; }
-.workbench-brand { display: inline-grid; width: 26px; height: 26px; margin-right: 7px; place-items: center; border-radius: 8px; background: linear-gradient(145deg,#18181b,#000000); color: #fff; font-size: 9px; font-weight: 800; box-shadow: 0 7px 18px rgba(0,0,0,0.22); vertical-align: middle; }
+.workbench-brand { display: inline-grid; width: 42px; height: 26px; margin-right: 7px; place-items: center; border-radius: 8px; background: linear-gradient(145deg,#18181b,#000000); color: #fff; font-size: 8px; font-weight: 800; box-shadow: 0 7px 18px rgba(0,0,0,0.22); vertical-align: middle; }
 .workbench-shell { display: grid; grid-template-columns: 310px minmax(560px, 1fr) 310px; height: calc(100vh - 76px); min-height: 0; border: 1px solid var(--line); border-top: 0; border-radius: 0 0 26px 26px; overflow: hidden; background: var(--surface); }
 .team-sidebar, .delivery-sidebar { min-height: 0; background: var(--sidebar); }
 .team-sidebar { display: flex; flex-direction: column; padding: 28px 18px 18px; border-right: 1px solid var(--line); overflow-y: auto; }

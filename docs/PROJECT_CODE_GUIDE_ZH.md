@@ -1,4 +1,4 @@
-# CircuitFoundry / RatsNestPro 项目代码讲解手册
+# KiCad Design Multi-Agent System / RatsNestPro 项目代码讲解手册
 
 > 面向接手开发、调试和二次设计的源码导读。重点覆盖 Agent 内核、Python Runtime、Temporal/EDA 执行链和 Java 控制面。
 
@@ -58,7 +58,7 @@
 
 ## 1. 项目定位与核心边界
 
-CircuitFoundry 是一个企业多租户 AI 硬件设计平台。用户以自然语言描述硬件需求，系统经过意图识别、架构规划、器件选型、KiCad 工程生成、布局布线、ERC/DRC、独立审核，最终交付可审计的工程和制造产物。
+KiCad Design Multi-Agent System 是一个企业多租户 AI 硬件设计平台。用户以自然语言描述硬件需求，系统经过意图识别、架构规划、器件选型、KiCad 工程生成、布局布线、ERC/DRC、独立审核，最终交付可审计的工程和制造产物。
 
 它不是“一个 Python Agent 服务”，而是五个相互约束的系统：
 

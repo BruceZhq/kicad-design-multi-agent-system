@@ -1,6 +1,6 @@
-# CircuitFoundry Web
+# KiCad Design Multi-Agent System Web
 
-Next.js 16 / React 19 frontend for the Java CircuitFoundry control plane. The browser talks only to same-origin Next.js route handlers; those handlers forward the authenticated OIDC access token to Java. They never create a `user_id` and never call the Python Agent Runtime directly.
+Next.js 16 / React 19 frontend for the Java KiCad Design Multi-Agent System control plane. The browser talks only to same-origin Next.js route handlers; those handlers forward the authenticated OIDC access token to Java. They never create a `user_id` and never call the Python Agent Runtime directly.
 
 ## Data path
 

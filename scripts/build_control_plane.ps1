@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$outputImage = "agent-service-toolkit-main-control_plane:latest"
+$outputImage = "kicad-design-multi-agent-system-control-plane:latest"
 
 function Assert-LocalJava21Image {
     param([Parameter(Mandatory = $true)][string] $Image)

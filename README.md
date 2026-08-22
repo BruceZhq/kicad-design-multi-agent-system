@@ -1,6 +1,6 @@
-# CircuitFoundry
+# KiCad Design Multi-Agent System
 
-CircuitFoundry 是由 **CircuitFoundry Engineering** 团队维护、面向版本化 KiCad 硬件设计场景的企业级多智能体系统。它把自然语言需求转换成可审查的 KiCad 工程、制造文件和风险报告，并通过 Java 控制面提供多租户、身份、任务、产物和审计能力。为保持数据库迁移、内部 API 和既有工程兼容，源码中的 `ratsnestpro`、`ratsnest-*` 仍作为稳定的内部标识存在。
+KiCad Design Multi-Agent System 是一个面向版本化 KiCad 硬件设计场景的多智能体工程系统。它把自然语言需求转换成可审查的 KiCad 工程、制造文件和风险报告，并通过 Java 控制面提供多租户、身份、任务、产物和审计能力。为保持数据库迁移、内部 API 和既有工程兼容，源码中的 `ratsnestpro`、`ratsnest-*` 仍作为稳定的内部标识存在。
 
 当前生产产品只注册一个 Agent：`ratsnestpro-multi-agent`。旧的通用聊天、独立 RAG/AG-UI、语音和多 Agent 示例代码已经从运行时移除，避免启动时加载无关图和错误地把普通聊天 Agent 当成硬件设计 Agent；正式 AG-UI 事件适配仍属于当前产品链路。
 
@@ -87,7 +87,7 @@ sequenceDiagram
 
 AG-UI（Agent User Interaction）是一个面向 Agent 与前端之间交互事件的通用协议/适配层，通常用于把 Agent 的消息、工具调用、状态更新和流式事件转换为前端可消费的事件流。它适合通用 Copilot 或 Agent UI 集成，但它不是 LangGraph 本身，也不是身份认证协议，更不是 KiCad 执行引擎。
 
-CircuitFoundry 将 AG-UI 作为 Agent 事件的前端交互标准，但不把 AG-UI 当作公网认证入口。正式产品链路固定为：
+KiCad Design Multi-Agent System 将 AG-UI 作为 Agent 事件的前端交互标准，但不把 AG-UI 当作公网认证入口。正式产品链路固定为：
 
 ```text
 浏览器 → OAuth2 Proxy → Next.js BFF → Java Control Plane → Python internal_api/gRPC → RatsNestPro LangGraph
@@ -126,7 +126,7 @@ flowchart TD
 
 LangGraph 是 Agent 的有向状态图运行时。它将每一步输入、输出、共享 State、消息列表、节点转移和 checkpoint 明确化，适合需要长流程、可恢复、可审计和人工反馈的工程任务。
 
-在 CircuitFoundry 中，Supervisor 是图入口。Architect、Parts Specialist、Hardware Engineer 和 Reviewer 不是互相随意调用的聊天机器人，而是具有边界的阶段节点。确定性工具负责文件、引脚、网络、ERC/DRC 和门禁；LLM 负责资料理解、需求分解、候选选择和解释。
+在 KiCad Design Multi-Agent System 中，Supervisor 是图入口。Architect、Parts Specialist、Hardware Engineer 和 Reviewer 不是互相随意调用的聊天机器人，而是具有边界的阶段节点。确定性工具负责文件、引脚、网络、ERC/DRC 和门禁；LLM 负责资料理解、需求分解、候选选择和解释。
 
 ```mermaid
 stateDiagram-v2
@@ -232,7 +232,7 @@ flowchart LR
 
 ## 记忆系统：短期、长期与防幻觉
 
-CircuitFoundry 把“对话连续性”和“跨会话知识”分开治理，避免把一个无限增长的聊天数组误称为记忆系统。
+KiCad Design Multi-Agent System 把“对话连续性”和“跨会话知识”分开治理，避免把一个无限增长的聊天数组误称为记忆系统。
 
 ### 短期记忆
 
@@ -415,4 +415,4 @@ docker compose --profile evolution up -d --build evolution_worker evolution_eval
 
 ## License
 
-项目使用 MIT License，详见 [LICENSE](LICENSE)。
+项目基于 Joshua Carroll 的 [agent-service-toolkit](https://github.com/JoshuaC215/agent-service-toolkit) 进行扩展，保留原项目的 MIT License 与版权声明。当前项目的品牌、维护者和新增实现独立于上游作者；详见 [LICENSE](LICENSE) 与 [NOTICE.md](NOTICE.md)。
