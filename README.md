@@ -415,4 +415,4 @@ docker compose --profile evolution up -d --build evolution_worker evolution_eval
 
 ## License
 
-项目基于 Joshua Carroll 的 [agent-service-toolkit](https://github.com/JoshuaC215/agent-service-toolkit) 进行扩展，保留原项目的 MIT License 与版权声明。当前项目的品牌、维护者和新增实现独立于上游作者；详见 [LICENSE](LICENSE) 与 [NOTICE.md](NOTICE.md)。
+项目使用 MIT License，详见 [LICENSE](LICENSE)。
