@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "scope": "systemic_ahe_governed_evolution_bridge",
+  "captured_at": "2026-08-20",
+  "result": "implemented_and_narrow_verified",
+  "source_hashes": {
+    "src/service/governance_scope.py": "eb26e5d76f3b38be326abd3984f507ac512a63725faa80f40620e5bffa2ca349",
+    "src/service/durable_event_stream.py": "a8f537a1b49fa635dcd22f5cbde146f358ef71c577155328d1249686685d2bae",
+    "src/service/ahe_event.py": "4c7bef0c21595bb943f3a5dcd8397bc45fc125d68f6f1255570646a1a9697f4a",
+    "src/service/llm_output_stream.py": "dca6f069d6d4e50e34c00eac42a694693fe3ecd979450c982cb7a540a0f74e47",
+    "src/service/service.py": "1e16c76dc3ed69ff7d0847a79623694aec1b7d95446039db26e44eda094eb452",
+    "src/service/run_registry.py": "8fd1b5d4a65ab742bd94719a931f29535f8dc117eb2c1cf65f59d0db2e245dd5",
+    "src/agents/ratsnestpro/ehe_memory.py": "ccb561f9cc9a4d4fb1cc3e84ed6873a2d4763c1523ebb9a20b22a7b845fec717",
+    "src/agents/ratsnestpro/tools.py": "48364b511f8a2bc3f438303ea89220f949b29813b907ac90e83e74745bc1a725",
+    "src/agents/ratsnestpro/ratsnestpro_agent.py": "5be80cfbb9b3333bc399b16ef80ffe3dcc129b18ed9cca7929a005fd9d5c22e3",
+    "src/agents/ratsnestpro/temporal/contracts.py": "7089537cb2977ceb2dfe6ddc779e083ec4b219e9cf2924861236827852d26326",
+    "src/agents/ratsnestpro/temporal/client.py": "e3cdd6601d5bc6c598b29c734952a2b7cfc14bb92fc632e98df535b1fc083a83",
+    "src/agents/ratsnestpro/temporal/workflow.py": "4d0a27bee57d81236de33229a2cef1240aef0caf6d9f87a107645863507798a9",
+    "src/agents/ratsnestpro/temporal/activities.py": "a76e0a1c0fd914c5db7582e63027db959d6ac85a29ddc13c705821b986b69e77",
+    "src/agents/ratsnestpro/temporal/step_runner.py": "27c9566d29f3212807a2b8527579401aae893257ed8eb21bcaa198c0dc1eb2ab",
+    "src/ratsnestpro/orchestration/ahe.py": "0968ccaa2bad149fa3b461bac92ad3e49e4f54a7b9b8e4088f98fce7430c1432",
+    "src/ratsnestpro/orchestration/pipeline.py": "78b23f388bc020d08239ec1b69cc94bdafec54cdab189a75eee9b07895cea0a4",
+    "src/ratsnestpro/orchestration/component_resolution.py": "420472b2ee7a00740ddbb71e7154caec836a882055d590bde9d1ea0bf9999892",
+    "src/evolution/collector.py": "33941b1eaf903e1035b2d6c4f584545e287ac42bcbd034ef1fcedc0413f2014e"
+  },
+  "test_and_eval_hashes": {
+    "tests/test_ahe_event_bridge.py": "251ee45c88cb9215f39e876ccd0dc6db06ef5db7ab6ed598d0598884add13464",
+    "tests/test_harness_systemic_repairs.py": "ce431f490dd5df9edebc060e710491d1e77811752da3bbbf25a3e7bdcceda2f2",
+    "tests/test_runtime_ahe_event_idempotency.py": "87be0ac4f7108368f799eef542694150b861f18d37dd9ad3d0fcf12f12bbf201",
+    "tests/test_governance_scope_bridge.py": "9a7688dd3101c068023abeb67b14ec8e45e18422f9e9cb41e652cf3e599633f4",
+    "tests/evolution/test_evolution_core.py": "0af3abc614eeebfe032e3a17d153970dacfb0c1c494ec4b1d5fb3200cad882c5",
+    "evals/sealed/fixtures/systemic-grounding-and-evolution.v1.json": "e8b6189204770112196093ef042f536926fe2ca4361ff7d824ab2583579e8c00",
+    "evals/sealed/manifests/systemic-grounding-and-evolution.v1.json": "ba7e066581c546df2c2a69366f61175fa08d75cdef8a18dc05e47a2d0982e002",
+    "evals/suites/core.v1.json": "3bcff11224a2f38b429ab6a6a2ed93ee1621c47e7c2549d4c8c25cb27aa2c34a"
+  },
+  "verification": {
+    "pytest": "30 bridge/governance tests passed in 29.30s; 10 evolution core tests passed",
+    "ruff": "All checks passed",
+    "runtime_ahe_replay_idempotency": "passed",
+    "trusted_scope_temporal_subprocess_bridge": "passed",
+    "manifest_excludes_governance_token": "passed",
+    "scoped_hdo_survives_ehe_storage_failure": "passed",
+    "docker_or_network_used": false
+  },
+  "sealed_suite": {
+    "evaluation_mode": "recorded_only_not_executed_by_a_deterministic_grader",
+    "manifest_sha256": "ba7e066581c546df2c2a69366f61175fa08d75cdef8a18dc05e47a2d0982e002",
+    "suite_digest": "6178c1354832931995f93a56d54b05850cb62ffdca08ecdb91de172569562de3"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "fab_house": "JLCPCB",
+  "profile": "standard-2layer-1oz",
+  "units": "mm",
+  "min_track_width": 0.15,
+  "min_clearance": 0.15,
+  "min_via_diameter": 0.6,
+  "min_via_drill": 0.3,
+  "min_annular_ring": 0.15,
+  "min_hole_diameter": 0.3,
+  "min_board_edge_clearance": 0.3,
+  "min_silk_width": 0.15,
+  "layer_options": [2, 4, 6],
+  "notes": "Conservative 0.15/0.15 mm working profile within JLCPCB's published 1 oz 2-layer 0.10/0.10 mm capability. Point RATSNESTPRO_PROCESS_CAPABILITY at a custom JSON for a different copper weight or fab house."
+}

@@ -1,0 +1,112 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - capacity.yaml
+  - autoscaling-metric-contracts.yaml
+  - network-policies.yaml
+patches:
+  - path: cell-config.yaml
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+      - op: add
+        path: /spec/template/metadata/labels/ratsnest.io~1cell
+        value: cell-01
+      - op: add
+        path: /spec/template/metadata/labels/topology.kubernetes.io~1region
+        value: us-east-1
+      - op: add
+        path: /spec/template/spec/affinity
+        value:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: topology.kubernetes.io/region
+                      operator: In
+                      values: [us-east-1]
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                podAffinityTerm:
+                  topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/part-of: ratsnestpro
+                  matchLabelKeys: [app]
+      - op: add
+        path: /spec/template/spec/topologySpreadConstraints
+        value:
+          - maxSkew: 1
+            minDomains: 3
+            topologyKey: topology.kubernetes.io/zone
+            whenUnsatisfiable: DoNotSchedule
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/part-of: ratsnestpro
+            matchLabelKeys: [app]
+  - target:
+      group: policy
+      version: v1
+      kind: PodDisruptionBudget
+    patch: |-
+      - op: replace
+        path: /spec/minAvailable
+        value: 2
+  - target:
+      group: autoscaling
+      version: v2
+      kind: HorizontalPodAutoscaler
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 3
+  - target:
+      group: autoscaling
+      version: v2
+      kind: HorizontalPodAutoscaler
+      name: ratsnest-control-plane
+    patch: &sse-metric |-
+      - op: add
+        path: /spec/metrics/-
+        value:
+          type: Pods
+          pods:
+            metric:
+              name: ratsnest_sse_active_connections
+            target:
+              type: AverageValue
+              averageValue: "250"
+  - target:
+      group: autoscaling
+      version: v2
+      kind: HorizontalPodAutoscaler
+      name: ratsnest-web
+    patch: *sse-metric
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: allow-ingress-to-oidc-proxy
+    patch: |-
+      - op: replace
+        path: /spec/ingress/0/from
+        value:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: ingress-nginx
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: allow-control-plane-to-agent-service
+    patch: |-
+      - op: add
+        path: /spec/ingress/0/ports/-
+        value: { protocol: TCP, port: 9090 }

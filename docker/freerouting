@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+exec /usr/bin/java -Djava.awt.headless=true -jar /opt/freerouting/freerouting.jar \
+    --gui.enabled=false "$@"

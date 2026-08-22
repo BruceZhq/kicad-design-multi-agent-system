@@ -1,0 +1,176 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratsnest-agent-service
+  namespace: ratsnest
+  labels:
+    app.kubernetes.io/part-of: ratsnestpro
+    ratsnest.io/release-track: stable
+  annotations:
+    ratsnest.io/harness-version: legacy-baseline
+    ratsnest.io/runtime-image-digest: replace-me
+    ratsnest.io/harness-manifest-digest: 0000000000000000000000000000000000000000000000000000000000000000
+spec:
+  replicas: 2
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+  selector:
+    matchLabels: { app: ratsnest-agent-service }
+  template:
+    metadata:
+      labels:
+        app: ratsnest-agent-service
+        app.kubernetes.io/part-of: ratsnestpro
+        ratsnest.io/release-track: stable
+        ratsnest.io/harness-version: legacy-baseline
+      annotations:
+        ratsnest.io/runtime-image-digest: replace-me
+        ratsnest.io/harness-manifest-digest: 0000000000000000000000000000000000000000000000000000000000000000
+    spec:
+      serviceAccountName: ratsnest-runtime
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: api
+          image: ghcr.io/ratsnestteam/ratsnest-agent-service:replace-me
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: grpc, containerPort: 9090 }
+          envFrom:
+            - configMapRef: { name: ratsnest-runtime-config }
+            - secretRef: { name: ratsnest-runtime-secrets }
+          env:
+            - { name: RATSNEST_HARNESS_VERSION_ID, value: legacy-baseline }
+            - { name: RATSNEST_HARNESS_CHANNEL, value: stable }
+            - { name: RATSNEST_HARNESS_MANIFEST_DIGEST, value: 0000000000000000000000000000000000000000000000000000000000000000 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 15
+            timeoutSeconds: 3
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { cpu: "2", memory: 4Gi }
+          volumeMounts:
+            - { name: workspaces, mountPath: /data/ratsnestpro }
+      volumes:
+        - name: workspaces
+          persistentVolumeClaim: { claimName: ratsnest-workspaces }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratsnest-agent-service
+  namespace: ratsnest
+spec:
+  selector: { app: ratsnest-agent-service }
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+    - { name: grpc, port: 9090, targetPort: grpc }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratsnest-temporal-worker
+  namespace: ratsnest
+  labels:
+    app.kubernetes.io/part-of: ratsnestpro
+    ratsnest.io/release-track: stable
+  annotations:
+    ratsnest.io/harness-version: legacy-baseline
+    ratsnest.io/runtime-image-digest: replace-me
+    ratsnest.io/harness-manifest-digest: 0000000000000000000000000000000000000000000000000000000000000000
+spec:
+  replicas: 2
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+  selector:
+    matchLabels: { app: ratsnest-temporal-worker }
+  template:
+    metadata:
+      labels:
+        app: ratsnest-temporal-worker
+        app.kubernetes.io/part-of: ratsnestpro
+        ratsnest.io/release-track: stable
+        ratsnest.io/harness-version: legacy-baseline
+      annotations:
+        ratsnest.io/runtime-image-digest: replace-me
+        ratsnest.io/harness-manifest-digest: 0000000000000000000000000000000000000000000000000000000000000000
+    spec:
+      serviceAccountName: ratsnest-runtime
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: ghcr.io/ratsnestteam/ratsnest-agent-service:replace-me
+          command: [python, -m, agents.ratsnestpro.temporal.worker]
+          envFrom:
+            - configMapRef: { name: ratsnest-runtime-config }
+            - secretRef: { name: ratsnest-runtime-secrets }
+          env:
+            - { name: RATSNEST_HARNESS_VERSION_ID, value: legacy-baseline }
+            - { name: RATSNEST_HARNESS_CHANNEL, value: stable }
+            - { name: RATSNEST_HARNESS_MANIFEST_DIGEST, value: 0000000000000000000000000000000000000000000000000000000000000000 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: "2", memory: 4Gi }
+            limits: { cpu: "4", memory: 8Gi }
+          volumeMounts:
+            - { name: workspaces, mountPath: /data/ratsnestpro }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: workspaces
+          persistentVolumeClaim: { claimName: ratsnest-workspaces }
+        - name: tmp
+          emptyDir: { sizeLimit: 10Gi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratsnest-kafka-audit-relay
+  namespace: ratsnest
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: ratsnest-kafka-audit-relay }
+  template:
+    metadata:
+      labels: { app: ratsnest-kafka-audit-relay, app.kubernetes.io/part-of: ratsnestpro }
+    spec:
+      serviceAccountName: ratsnest-runtime
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: relay
+          image: ghcr.io/ratsnestteam/ratsnest-agent-service:replace-me
+          command: [python, -m, service.kafka_relay]
+          envFrom:
+            - configMapRef: { name: ratsnest-runtime-config }
+            - secretRef: { name: ratsnest-runtime-secrets }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: 500m, memory: 1Gi }

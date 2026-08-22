@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ratsnest.team/contracts/public/v1/user-profile-api.schema.json",
+  "title": "Authenticated user profile API v1",
+  "$defs": {
+    "updateProfileRequest": {
+      "type": "object",
+      "required": ["version", "displayName", "jobTitle", "bio", "locale", "timeZone"],
+      "properties": {
+        "version": { "type": "integer", "minimum": 0 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "jobTitle": { "type": "string", "maxLength": 120 },
+        "bio": { "type": "string", "maxLength": 1000 },
+        "locale": { "type": "string", "minLength": 1, "maxLength": 35 },
+        "timeZone": { "type": "string", "minLength": 1, "maxLength": 64 }
+      },
+      "additionalProperties": false
+    },
+    "profileResponse": {
+      "type": "object",
+      "required": [
+        "displayName", "username", "email", "jobTitle", "bio", "locale",
+        "timeZone", "hasAvatar", "version", "createdAt", "updatedAt"
+      ],
+      "properties": {
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "username": { "type": "string", "minLength": 1, "maxLength": 320 },
+        "email": { "type": ["string", "null"], "maxLength": 320 },
+        "jobTitle": { "type": "string", "maxLength": 120 },
+        "bio": { "type": "string", "maxLength": 1000 },
+        "locale": { "type": "string", "minLength": 1, "maxLength": 35 },
+        "timeZone": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "hasAvatar": { "type": "boolean" },
+        "version": { "type": "integer", "minimum": 0 },
+        "createdAt": { "type": ["string", "null"], "format": "date-time" },
+        "updatedAt": { "type": ["string", "null"], "format": "date-time" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

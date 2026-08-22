@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - telemetry.yaml
+patches:
+  - path: patch-control-plane.yaml
+  - path: patch-runtime.yaml
+  - path: patch-web.yaml

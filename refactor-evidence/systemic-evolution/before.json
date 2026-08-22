@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "scope": "systemic_ahe_governed_evolution_bridge",
+  "captured_at": "2026-08-20",
+  "source_modules": {
+    "src/ratsnestpro/orchestration/ahe.py": "f75778d9c3468a5e6279b4b74562310b14bb763feb06a304509da4c0413088a8",
+    "src/ratsnestpro/orchestration/pipeline.py": "9899ba5ce40da9242244bd1b9292dcab92be386df9f9e487063ff14db32ca5d3",
+    "src/ratsnestpro/orchestration/component_resolution.py": "28d713b66c874c48e592ed086f3dde098e90037a85cf06ebbdc13124196f1eca",
+    "src/ratsnestpro/orchestration/connection_synthesis.py": "b86960f18d6ddc6813e1d82eb3153e757fe3bb880a60b2fc7f35ae7179d75e71",
+    "src/agents/ratsnestpro/tools.py": "15a312d272207fe805db865a40ca929a791573280444a5932529fae26dde16ac",
+    "src/agents/ratsnestpro/ehe_memory.py": "596eaca1bb3a2700c8dd54aad7c0c6438070f487ea80d3c326e9d5274a790e59",
+    "src/agents/ratsnestpro/temporal/contracts.py": "bc699a70f45a95718737c597d0fa6113b7aec49d62e4a3236db4b9616d930b89",
+    "src/agents/ratsnestpro/temporal/client.py": "a63c53a879b28ce35cffda81fb914e279cc3c38c8974dd3f1e424b9ee8fb23ca",
+    "src/agents/ratsnestpro/temporal/step_runner.py": "989d20a9b0076fddbebd6da7d31c09460859a19f3cd6d43864789f3e66746efa",
+    "src/agents/ratsnestpro/ratsnestpro_agent.py": "473382318172e178d4d589082e3cb6eb7c9ae35e31e52b4cb86d616652b6443f",
+    "src/evolution/collector.py": "b39707f1f1c26a2f353000471305778788f308eb85ba82da8fbd5698a46574c2",
+    "src/evolution/contracts.py": "e99a080e3ff1007d7cd08284c82894b198c9e143a48da8a00b75329ca2a487f1",
+    "src/service/service.py": "4c6d373748a5532175175261db4b998baa2518e900d20c64b70620403c2ea63d",
+    "src/service/llm_output_stream.py": "12eecfc9d6d85c892d37fbe64d68ca36650689ff96aea076f38c5a3f43a5ca08",
+    "src/service/durable_event_stream.py": null,
+    "src/service/ahe_event.py": null
+  },
+  "existing_tests": [
+    "tests/test_harness_systemic_repairs.py",
+    "tests/evolution/test_evolution_core.py",
+    "tests/evolution/test_runtime_harness_identity.py",
+    "tests/evolution/test_sandbox.py"
+  ],
+  "required_missing_coverage": [
+    "wrong MCU aliases PB2 and PF0 fail closed",
+    "missing verified alias fails closed",
+    "boot pulldown connected to supply fails",
+    "fixed_exact component without evidence remains non-release",
+    "Temporal/subprocess AHE events survive without a LangGraph stream writer",
+    "record_id deduplicates replayed durable events",
+    "raw prompts are never persisted or forwarded",
+    "attribution maps design errors to revision/HITL, infrastructure transients to retry, and only cross-run reproducible harness defects to capability_gap"
+  ]
+}

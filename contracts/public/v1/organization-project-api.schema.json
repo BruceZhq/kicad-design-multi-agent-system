@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ratsnest.team/contracts/public/v1/organization-project-api.schema.json",
+  "title": "Organization and project API v1",
+  "$defs": {
+    "createOrganizationRequest": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 }
+      },
+      "additionalProperties": false
+    },
+    "organizationResponse": {
+      "type": "object",
+      "required": ["tenantId", "name", "createdAt", "updatedAt"],
+      "properties": {
+        "tenantId": { "type": "string", "format": "uuid" },
+        "name": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "organizationListResponse": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/organizationResponse" }
+    },
+    "putMembershipRequest": {
+      "type": "object",
+      "required": ["issuer", "subject", "role"],
+      "properties": {
+        "issuer": { "type": "string", "format": "uri", "maxLength": 2048 },
+        "subject": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "role": { "enum": ["owner", "admin", "engineer", "reviewer", "viewer"] }
+      },
+      "additionalProperties": false
+    },
+    "membershipResponse": {
+      "type": "object",
+      "required": ["issuer", "subject", "role", "createdAt", "updatedAt"],
+      "properties": {
+        "issuer": { "type": "string", "format": "uri", "maxLength": 2048 },
+        "subject": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "role": { "enum": ["owner", "admin", "engineer", "reviewer", "viewer"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "createProjectRequest": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": ["string", "null"], "maxLength": 2000 }
+      },
+      "additionalProperties": false
+    },
+    "updateProjectRequest": {
+      "$ref": "#/$defs/createProjectRequest"
+    },
+    "projectResponse": {
+      "type": "object",
+      "required": [
+        "tenantId", "projectId", "name", "description", "createdAt", "updatedAt"
+      ],
+      "properties": {
+        "tenantId": { "type": "string", "format": "uuid" },
+        "projectId": { "type": "string", "format": "uuid" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "projectListResponse": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/projectResponse" }
+    }
+  }
+}

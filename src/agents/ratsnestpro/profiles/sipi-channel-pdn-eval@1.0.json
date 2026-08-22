@@ -1,0 +1,23 @@
+{
+  "schema_version": "1",
+  "id": "sipi-channel-pdn-eval",
+  "version": "1.0",
+  "title": "SI/PI Channel and PDN Evaluation Board",
+  "description": "Designs bounded laboratory boards for passive channel characterization and power-distribution evaluation.",
+  "scope": {
+    "supported": ["passive interconnect evaluation", "power-distribution test structures", "measurement access and calibration structures"],
+    "excluded": ["mains-connected equipment", "certified safety instrumentation", "unbounded radio transmitters"]
+  },
+  "constraints": ["Preserve continuous return-current paths for controlled-impedance structures.", "Expose assumptions that depend on the selected fabricator stack-up.", "Separate measurement structures from auxiliary control and power circuitry."],
+  "evidence_requirements": ["Official connector and measurement-interface documentation.", "Fabricator stack-up and impedance information when available.", "Authoritative land-pattern and material constraints for selected physical interfaces."],
+  "toolchain": {
+    "required": ["KiCad schematic and PCB tools", "kicad-cli ERC and DRC", "manufacturing export"],
+    "optional": ["Freerouting for non-critical auxiliary routing", "external field or network simulation"]
+  },
+  "budget": {"max_wall_clock_minutes": 60, "max_llm_tokens": 1200000, "max_ahe_repairs": 6, "max_same_failure_retries": 2},
+  "acceptance": {
+    "required_artifacts": ["editable KiCad project", "BOM and placement data", "Gerber and drill outputs", "risk and evidence report"],
+    "verification": ["ERC and DRC findings are reported without concealment.", "Impedance assumptions are marked for fabricator review.", "Measurement topology and return paths receive independent review."],
+    "delivery_policy": "Deliver editable artifacts with explicit unresolved engineering risks unless an execution failure prevents valid KiCad files from being produced."
+  }
+}

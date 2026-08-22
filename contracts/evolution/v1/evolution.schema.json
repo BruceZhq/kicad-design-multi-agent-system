@@ -1,0 +1,742 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ratsnest.team/contracts/evolution/v1/evolution.schema.json",
+  "title": "KiCad Design Multi-Agent System governed evolution contracts v1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/HarnessManifest"
+    },
+    {
+      "$ref": "#/$defs/EvolutionObservation"
+    },
+    {
+      "$ref": "#/$defs/EvalCaseManifest"
+    },
+    {
+      "$ref": "#/$defs/EvolutionCandidate"
+    }
+  ],
+  "$defs": {
+    "HarnessManifest": {
+      "additionalProperties": false,
+      "description": "Immutable identity emitted by ``scripts/build_harness_manifest.ps1``.",
+      "properties": {
+        "schemaVersion": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "sourceCommit": {
+          "pattern": "^[0-9a-f]{40,64}$",
+          "title": "Sourcecommit",
+          "type": "string"
+        },
+        "sourceTreeDigest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sourcetreedigest",
+          "type": "string"
+        },
+        "dirty": {
+          "title": "Dirty",
+          "type": "boolean"
+        },
+        "bundleDigest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Bundledigest",
+          "type": "string"
+        },
+        "contractDigest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Contractdigest",
+          "type": "string"
+        },
+        "policyDigest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Policydigest",
+          "type": "string"
+        },
+        "runtimeImageDigest": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Runtimeimagedigest"
+        },
+        "toolchainDigest": {
+          "anyOf": [
+            {
+              "pattern": "^(?:sha256:)?[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Toolchaindigest"
+        },
+        "manifestDigest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Manifestdigest",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sourceCommit",
+        "sourceTreeDigest",
+        "dirty",
+        "bundleDigest",
+        "contractDigest",
+        "policyDigest",
+        "manifestDigest"
+      ],
+      "title": "HarnessManifest",
+      "type": "object"
+    },
+    "HarnessChannel": {
+      "enum": [
+        "stable",
+        "canary",
+        "previous_stable",
+        "evaluation",
+        "development"
+      ],
+      "title": "HarnessChannel",
+      "type": "string"
+    },
+    "ObservationOutcome": {
+      "enum": [
+        "observed",
+        "resolved",
+        "improved",
+        "verified",
+        "rejected",
+        "error",
+        "hard_conflict"
+      ],
+      "title": "ObservationOutcome",
+      "type": "string"
+    },
+    "EvolutionObservation": {
+      "additionalProperties": false,
+      "description": "Privacy-safe fact derived from one AHE event.",
+      "properties": {
+        "schemaVersion": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "observationId": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Observationid",
+          "type": "string"
+        },
+        "sourceEventSeq": {
+          "minimum": 0,
+          "title": "Sourceeventseq",
+          "type": "integer"
+        },
+        "harnessVersionId": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Harnessversionid",
+          "type": "string"
+        },
+        "harnessChannel": {
+          "$ref": "#/$defs/HarnessChannel"
+        },
+        "harnessManifestDigest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Harnessmanifestdigest",
+          "type": "string"
+        },
+        "profileReference": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Profilereference",
+          "type": "string"
+        },
+        "profileDigest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Profiledigest",
+          "type": "string"
+        },
+        "scopeFingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Scopefingerprint",
+          "type": "string"
+        },
+        "projectFingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Projectfingerprint",
+          "type": "string"
+        },
+        "eventType": {
+          "pattern": "^[a-z][a-z0-9_]{1,63}$",
+          "title": "Eventtype",
+          "type": "string"
+        },
+        "failureSignature": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failuresignature"
+        },
+        "step": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Step",
+          "type": "string"
+        },
+        "checkName": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkname"
+        },
+        "category": {
+          "anyOf": [
+            {
+              "maxLength": 80,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Category"
+        },
+        "recoverability": {
+          "anyOf": [
+            {
+              "maxLength": 80,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recoverability"
+        },
+        "strategy": {
+          "anyOf": [
+            {
+              "maxLength": 160,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Strategy"
+        },
+        "requiredCapability": {
+          "anyOf": [
+            {
+              "maxLength": 160,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requiredcapability"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ObservationOutcome"
+        },
+        "revision": {
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "evidenceDigest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Evidencedigest",
+          "type": "string"
+        },
+        "observedAt": {
+          "format": "date-time",
+          "title": "Observedat",
+          "type": "string"
+        }
+      },
+      "required": [
+        "observationId",
+        "sourceEventSeq",
+        "harnessVersionId",
+        "harnessChannel",
+        "harnessManifestDigest",
+        "profileReference",
+        "profileDigest",
+        "scopeFingerprint",
+        "projectFingerprint",
+        "eventType",
+        "step",
+        "outcome",
+        "revision",
+        "evidenceDigest"
+      ],
+      "title": "EvolutionObservation",
+      "type": "object"
+    },
+    "DeliveryOutcome": {
+      "enum": [
+        "execution_blocked",
+        "delivered_with_issues",
+        "release_ready"
+      ],
+      "title": "DeliveryOutcome",
+      "type": "string"
+    },
+    "EvalExpectation": {
+      "additionalProperties": false,
+      "properties": {
+        "allowedOutcomes": {
+          "items": {
+            "$ref": "#/$defs/DeliveryOutcome"
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "title": "Allowedoutcomes",
+          "type": "array"
+        },
+        "expectedIntent": {
+          "anyOf": [
+            {
+              "enum": [
+                "build",
+                "review",
+                "continue",
+                "irrelevant"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expectedintent"
+        },
+        "requiredArtifacts": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Requiredartifacts",
+          "type": "array"
+        },
+        "minCompletedSteps": {
+          "default": 0,
+          "maximum": 17,
+          "minimum": 0,
+          "title": "Mincompletedsteps",
+          "type": "integer"
+        },
+        "requireExecutionComplete": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requireexecutioncomplete"
+        },
+        "requireIndependentReview": {
+          "default": false,
+          "title": "Requireindependentreview",
+          "type": "boolean"
+        },
+        "requireAheRecovery": {
+          "default": false,
+          "title": "Requireaherecovery",
+          "type": "boolean"
+        },
+        "expectedRoleSequence": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "title": "Expectedrolesequence",
+          "type": "array"
+        },
+        "maxAheRepairs": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maxaherepairs"
+        },
+        "maxLlmTokens": {
+          "anyOf": [
+            {
+              "maximum": 10000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maxllmtokens"
+        },
+        "maxWallClockSeconds": {
+          "anyOf": [
+            {
+              "maximum": 604800,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maxwallclockseconds"
+        }
+      },
+      "required": [
+        "allowedOutcomes"
+      ],
+      "title": "EvalExpectation",
+      "type": "object"
+    },
+    "EvalSuite": {
+      "enum": [
+        "optimization",
+        "historical",
+        "holdout",
+        "adversarial"
+      ],
+      "title": "EvalSuite",
+      "type": "string"
+    },
+    "GraderId": {
+      "enum": [
+        "intent",
+        "trajectory",
+        "artifact",
+        "release_truth",
+        "recovery",
+        "security",
+        "cost"
+      ],
+      "title": "GraderId",
+      "type": "string"
+    },
+    "EvalCaseManifest": {
+      "additionalProperties": false,
+      "description": "One content-addressable, replayable harness evaluation case.",
+      "properties": {
+        "schemaVersion": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "caseId": {
+          "pattern": "^[a-z0-9][a-z0-9_.-]{2,119}$",
+          "title": "Caseid",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "suite": {
+          "$ref": "#/$defs/EvalSuite"
+        },
+        "inputRef": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Inputref",
+          "type": "string"
+        },
+        "profileReference": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Profilereference",
+          "type": "string"
+        },
+        "profileDigest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Profiledigest",
+          "type": "string"
+        },
+        "baselineHarnessDigest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Baselineharnessdigest",
+          "type": "string"
+        },
+        "sealed": {
+          "default": false,
+          "title": "Sealed",
+          "type": "boolean"
+        },
+        "invariants": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Invariants",
+          "type": "array"
+        },
+        "graderIds": {
+          "items": {
+            "$ref": "#/$defs/GraderId"
+          },
+          "maxItems": 7,
+          "minItems": 1,
+          "title": "Graderids",
+          "type": "array"
+        },
+        "expectation": {
+          "$ref": "#/$defs/EvalExpectation"
+        },
+        "faultInjection": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Faultinjection"
+        }
+      },
+      "required": [
+        "caseId",
+        "title",
+        "suite",
+        "inputRef",
+        "profileReference",
+        "profileDigest",
+        "baselineHarnessDigest",
+        "invariants",
+        "graderIds",
+        "expectation"
+      ],
+      "title": "EvalCaseManifest",
+      "type": "object"
+    },
+    "CandidateStatus": {
+      "enum": [
+        "observed",
+        "eligible",
+        "evaluating",
+        "awaiting_approval",
+        "approved",
+        "canary",
+        "promoted",
+        "rejected",
+        "rolled_back",
+        "stale"
+      ],
+      "title": "CandidateStatus",
+      "type": "string"
+    },
+    "EvolutionCandidate": {
+      "additionalProperties": false,
+      "description": "A cross-project problem candidate, never an executable patch.",
+      "properties": {
+        "schemaVersion": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "candidateId": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidateid",
+          "type": "string"
+        },
+        "baseHarnessVersionId": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Baseharnessversionid",
+          "type": "string"
+        },
+        "baseManifestDigest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Basemanifestdigest",
+          "type": "string"
+        },
+        "failureSignature": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Failuresignature",
+          "type": "string"
+        },
+        "step": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Step",
+          "type": "string"
+        },
+        "checkName": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkname"
+        },
+        "category": {
+          "anyOf": [
+            {
+              "maxLength": 80,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Category"
+        },
+        "requiredCapability": {
+          "anyOf": [
+            {
+              "maxLength": 160,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requiredcapability"
+        },
+        "profileReferences": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Profilereferences",
+          "type": "array"
+        },
+        "observationIds": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "title": "Observationids",
+          "type": "array"
+        },
+        "occurrenceCount": {
+          "minimum": 1,
+          "title": "Occurrencecount",
+          "type": "integer"
+        },
+        "projectCount": {
+          "minimum": 1,
+          "title": "Projectcount",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/CandidateStatus"
+        },
+        "riskTier": {
+          "default": "low",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "prohibited"
+          ],
+          "title": "Risktier",
+          "type": "string"
+        },
+        "changeKind": {
+          "default": "unclassified",
+          "enum": [
+            "unclassified",
+            "prompt",
+            "skill",
+            "tool_description",
+            "policy",
+            "router",
+            "parser",
+            "tool_adapter",
+            "recovery_strategy",
+            "validator",
+            "harness_code"
+          ],
+          "title": "Changekind",
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "date-time",
+          "title": "Createdat",
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidateId",
+        "baseHarnessVersionId",
+        "baseManifestDigest",
+        "failureSignature",
+        "step",
+        "profileReferences",
+        "observationIds",
+        "occurrenceCount",
+        "projectCount",
+        "status"
+      ],
+      "title": "EvolutionCandidate",
+      "type": "object"
+    }
+  }
+}

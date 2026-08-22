@@ -1,0 +1,31 @@
+repos:
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v2.3.0
+  hooks:
+    - id: check-yaml
+    - id: end-of-file-fixer
+    - id: trailing-whitespace
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.11.9
+  hooks:
+    - id: ruff
+      args: [ --fix ]
+    - id: ruff-format
+- repo: local
+  hooks:
+    - id: pyrefly
+      name: pyrefly
+      entry: uv run pyrefly check
+      language: system
+      types: [ python ]
+      pass_filenames: false
+- repo: https://github.com/jackdewinter/pymarkdown
+  rev: v0.9.38
+  hooks:
+    - id: pymarkdown
+      alias: pymarkdown-fix
+      args: [ fix ]
+      files: ^(README\.md|docs/.*\.md)$
+    - id: pymarkdown
+      args: [ scan ]
+      files: ^(README\.md|docs/.*\.md)$

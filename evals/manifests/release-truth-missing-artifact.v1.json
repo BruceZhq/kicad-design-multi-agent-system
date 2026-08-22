@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "1.0",
+  "caseId": "harness.release-truth-missing-artifact.v1",
+  "title": "A narrative cannot claim release_ready without real artifacts",
+  "suite": "historical",
+  "inputRef": "evals/fixtures/release-truth-missing-artifact.v1.json",
+  "profileReference": "sipi-channel-pdn-eval@1.0",
+  "profileDigest": "de4382568f3c7b3420d19405f09337817c500a7a14f5f65d4b03fb0d688ebb25",
+  "baselineHarnessDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "sealed": false,
+  "invariants": [
+    "release-truth",
+    "no-fabricated-eda-evidence"
+  ],
+  "graderIds": [
+    "intent",
+    "release_truth",
+    "security",
+    "cost"
+  ],
+  "expectation": {
+    "allowedOutcomes": ["execution_blocked"],
+    "expectedIntent": "build",
+    "requiredArtifacts": [],
+    "minCompletedSteps": 0,
+    "requireExecutionComplete": false,
+    "requireIndependentReview": false,
+    "requireAheRecovery": false,
+    "expectedRoleSequence": [],
+    "maxAheRepairs": 6,
+    "maxLlmTokens": 1200000,
+    "maxWallClockSeconds": 3600.0
+  },
+  "faultInjection": null
+}

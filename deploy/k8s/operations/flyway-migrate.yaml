@@ -1,0 +1,52 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ratsnest-flyway-migrate
+  namespace: ratsnest
+  labels:
+    app.kubernetes.io/name: ratsnest-flyway
+    app.kubernetes.io/part-of: ratsnestpro
+  annotations:
+    ratsnest.io/operation: schema-migration
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ratsnest-flyway
+        app.kubernetes.io/part-of: ratsnestpro
+    spec:
+      serviceAccountName: ratsnest-runtime
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: flyway
+          image: ghcr.io/ratsnestteam/ratsnest-control-plane:replace-me
+          command: [java]
+          args:
+            - -Dloader.main=team.ratsnest.controlplane.bootstrap.FlywayMigrationMain
+            - -cp
+            - /app/app.jar
+            - org.springframework.boot.loader.launch.PropertiesLauncher
+          env:
+            - name: RATSNEST_FLYWAY_URL
+              valueFrom:
+                configMapKeyRef: { name: ratsnest-runtime-config, key: RATSNEST_DB_URL }
+            - name: RATSNEST_FLYWAY_USER
+              valueFrom:
+                secretKeyRef: { name: ratsnest-flyway-secrets, key: RATSNEST_FLYWAY_USER }
+            - name: RATSNEST_FLYWAY_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: ratsnest-flyway-secrets, key: RATSNEST_FLYWAY_PASSWORD }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 1Gi }

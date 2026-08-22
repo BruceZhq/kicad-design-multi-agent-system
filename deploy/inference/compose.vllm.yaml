@@ -1,0 +1,61 @@
+x-vllm-common: &vllm-common
+  image: vllm/vllm-openai:v0.22.0
+  ipc: host
+  restart: unless-stopped
+  volumes:
+    - ../../data/huggingface:/root/.cache/huggingface
+    - ./start-vllm.sh:/opt/ratsnest/start-vllm.sh:ro
+  command: ["sh", "/opt/ratsnest/start-vllm.sh"]
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  inference_small:
+    <<: *vllm-common
+    ports:
+      - "127.0.0.1:${VLLM_SMALL_PORT:-8011}:8000"
+    environment:
+      VLLM_MODEL: ${VLLM_SMALL_MODEL:?Set VLLM_SMALL_MODEL}
+      VLLM_SERVED_MODEL: ${VLLM_SMALL_SERVED_MODEL:-ratsnest-small}
+      VLLM_PORT: "8000"
+      VLLM_QUANTIZATION: ${VLLM_SMALL_QUANTIZATION:-awq}
+      VLLM_KV_CACHE_DTYPE: ${VLLM_SMALL_KV_CACHE_DTYPE:-fp8}
+      VLLM_GPU_MEMORY_UTILIZATION: ${VLLM_SMALL_GPU_MEMORY_UTILIZATION:-0.42}
+      VLLM_MAX_MODEL_LEN: ${VLLM_SMALL_MAX_MODEL_LEN:-16384}
+      VLLM_MAX_NUM_SEQS: ${VLLM_SMALL_MAX_NUM_SEQS:-64}
+
+  inference_large:
+    <<: *vllm-common
+    ports:
+      - "127.0.0.1:${VLLM_LARGE_PORT:-8012}:8000"
+    environment:
+      VLLM_MODEL: ${VLLM_LARGE_MODEL:?Set VLLM_LARGE_MODEL}
+      VLLM_SERVED_MODEL: ${VLLM_LARGE_SERVED_MODEL:-ratsnest-large}
+      VLLM_PORT: "8000"
+      VLLM_QUANTIZATION: ${VLLM_LARGE_QUANTIZATION:-awq}
+      VLLM_KV_CACHE_DTYPE: ${VLLM_LARGE_KV_CACHE_DTYPE:-fp8}
+      VLLM_GPU_MEMORY_UTILIZATION: ${VLLM_LARGE_GPU_MEMORY_UTILIZATION:-0.50}
+      VLLM_MAX_MODEL_LEN: ${VLLM_LARGE_MAX_MODEL_LEN:-32768}
+      VLLM_MAX_NUM_SEQS: ${VLLM_LARGE_MAX_NUM_SEQS:-16}
+      VLLM_SPECULATIVE_MODEL: ${VLLM_SPECULATIVE_MODEL:-}
+      VLLM_SPECULATIVE_TOKENS: ${VLLM_SPECULATIVE_TOKENS:-5}
+
+  inference_embeddings:
+    <<: *vllm-common
+    ports:
+      - "127.0.0.1:${VLLM_EMBEDDING_PORT:-8013}:8000"
+    environment:
+      VLLM_MODEL: ${VLLM_EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
+      VLLM_SERVED_MODEL: ${VLLM_EMBEDDING_SERVED_MODEL:-ratsnest-embedding}
+      VLLM_RUNNER: pooling
+      VLLM_PORT: "8000"
+      VLLM_QUANTIZATION: ""
+      VLLM_KV_CACHE_DTYPE: auto
+      VLLM_GPU_MEMORY_UTILIZATION: ${VLLM_EMBEDDING_GPU_MEMORY_UTILIZATION:-0.20}
+      VLLM_MAX_MODEL_LEN: ${VLLM_EMBEDDING_MAX_MODEL_LEN:-4096}
+      VLLM_MAX_NUM_SEQS: ${VLLM_EMBEDDING_MAX_NUM_SEQS:-128}

@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ratsnest-evolution-git-mirror
+  namespace: ratsnest-evolution-sandbox
+  labels:
+    app.kubernetes.io/name: ratsnest-evolution-git-mirror
+    app.kubernetes.io/part-of: ratsnestpro
+    ratsnest.io/trust-domain: untrusted-candidate-evaluation
+spec:
+  # The release pipeline populates the mirror through a separate, audited
+  # mechanism. Candidate Jobs mount this claim read-only.
+  # Provisioning/audited staging mounts it writable; candidate Jobs mount the
+  # claim with readOnly=true and never receive staging credentials.
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi

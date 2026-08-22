@@ -1,0 +1,13 @@
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${RATSNEST_OIDC_ISSUER_URI:http://auth.localhost:8180/realms/ratsnest-dev}
+          jwk-set-uri: ${RATSNEST_OIDC_JWK_SET_URI:http://auth.localhost:8180/realms/ratsnest-dev/protocol/openid-connect/certs}
+          audiences:
+            - ${RATSNEST_OIDC_AUDIENCE:ratsnest-api}
+
+ratsnest:
+  agent-runtime:
+    base-url: ${RATSNEST_AGENT_RUNTIME_URL:http://localhost:8080}

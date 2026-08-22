@@ -1,0 +1,131 @@
+{
+  "realm": "ratsnest-dev",
+  "displayName": "KiCad Design Multi-Agent System Development",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "editUsernameAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "rememberMe": false,
+  "verifyEmail": false,
+  "defaultSignatureAlgorithm": "RS256",
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "roles": {
+    "realm": [
+      {
+        "name": "engineer",
+        "description": "KiCad Design Multi-Agent System development engineer"
+      },
+      {
+        "name": "ratsnest-platform-admin",
+        "description": "Development-only harness release administrator"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "ratsnest-api",
+      "name": "KiCad Design Multi-Agent System API",
+      "description": "Bearer-only audience for the Java control plane",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "bearerOnly": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "publicClient": false
+    },
+    {
+      "clientId": "ratsnest-web",
+      "name": "KiCad Design Multi-Agent System Web",
+      "description": "Development-only confidential client used by oauth2-proxy",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "clientAuthenticatorType": "client-secret",
+      "secret": "ratsnest-web-dev-only-not-a-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "publicClient": false,
+      "redirectUris": [
+        "http://localhost:8088/oauth2/callback"
+      ],
+      "webOrigins": [
+        "http://localhost:8088"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "http://localhost:8088/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "ratsnest-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "ratsnest-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "ratsnest-smoke",
+      "name": "KiCad Design Multi-Agent System Smoke Test",
+      "description": "Development-only public client for bounded automated token checks",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "publicClient": true,
+      "redirectUris": [],
+      "webOrigins": [],
+      "protocolMappers": [
+        {
+          "name": "ratsnest-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "ratsnest-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "ratsnest-dev-engineer",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "KiCad Design Multi-Agent System",
+      "lastName": "Developer",
+      "email": "ratsnest-dev-engineer@localhost.invalid",
+      "realmRoles": [
+        "engineer",
+        "ratsnest-platform-admin",
+        "default-roles-ratsnest-dev"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "ratsnest-dev-only",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

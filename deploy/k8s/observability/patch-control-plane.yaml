@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratsnest-control-plane
+  namespace: ratsnest
+spec:
+  template:
+    metadata:
+      annotations:
+        instrumentation.opentelemetry.io/inject-java: ratsnest-instrumentation
+    spec:
+      containers:
+        - name: api
+          env:
+            - { name: OTEL_SERVICE_NAME, value: ratsnest-control-plane }
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: http://ratsnest-otel-collector:4318 }
+            - { name: OTEL_EXPORTER_OTLP_PROTOCOL, value: http/protobuf }
+            - { name: OTEL_TRACES_EXPORTER, value: otlp }
+            - { name: OTEL_METRICS_EXPORTER, value: otlp }
+            - { name: OTEL_LOGS_EXPORTER, value: otlp }
+            - { name: OTEL_PROPAGATORS, value: tracecontext,baggage }
+            - { name: OTEL_RESOURCE_ATTRIBUTES, value: service.namespace=ratsnest,deployment.environment=production }
+            - { name: OTEL_TRACES_SAMPLER, value: parentbased_traceidratio }
+            - { name: OTEL_TRACES_SAMPLER_ARG, value: "0.10" }
+            - name: LOGGING_PATTERN_CONSOLE
+              value: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} level=%p service=ratsnest-control-plane trace_id=%X{trace_id:-} span_id=%X{span_id:-} logger=%logger{36} msg=%m%n"
+

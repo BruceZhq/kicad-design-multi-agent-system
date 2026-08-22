@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="KiCad Design Multi-Agent System static product demo" />
+    <title>KiCad Design Multi-Agent System · Demo</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="nav">
+      <a class="brand" href="#top" aria-label="KiCad Design Multi-Agent System">
+        <span>KDMAS</span>
+        <strong>KiCad Design Multi-Agent System</strong>
+      </a>
+      <a class="github" href="https://github.com/BruceZhq/kicad-design-multi-agent-system">GitHub · Source</a>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">AUDITABLE HARDWARE AGENT WORKFLOW</p>
+          <h1>从自然语言需求到<br />可审查的 KiCad 工程</h1>
+          <p class="lead">
+            LangGraph 负责多角色协作，Temporal 负责耐久执行，确定性工具和独立 Reviewer
+            共同约束器件证据、工程产物与交付状态。
+          </p>
+          <div class="actions">
+            <button id="run-demo" type="button">运行 60 秒流程演示</button>
+            <button id="reset-demo" class="secondary" type="button">重置</button>
+          </div>
+          <p class="disclosure">静态交互演示 · 使用模拟数据 · 不调用真实 LLM、KiCad 或内部服务</p>
+        </div>
+
+        <aside class="request-card">
+          <div class="card-label">示例需求</div>
+          <h2>工业边缘网关电源与通信板</h2>
+          <dl>
+            <div><dt>输入</dt><dd>24 V DC / 双 CAN / 以太网</dd></div>
+            <div><dt>约束</dt><dd>四层板、宽温、可制造</dd></div>
+            <div><dt>交付</dt><dd>KiCad、BOM、Gerber、风险报告</dd></div>
+          </dl>
+          <div class="status"><i></i><span id="run-status">等待执行</span></div>
+        </aside>
+      </section>
+
+      <section class="workspace" aria-live="polite">
+        <div class="panel agents">
+          <div class="panel-heading">
+            <span>Agent 团队</span>
+            <small>LangGraph shared state</small>
+          </div>
+          <ol id="agent-list">
+            <li data-step="1"><b>01</b><div><strong>Supervisor</strong><span>意图路由与任务编排</span></div></li>
+            <li data-step="2"><b>02</b><div><strong>Architect</strong><span>需求固化与设计依据</span></div></li>
+            <li data-step="3"><b>03</b><div><strong>Parts Specialist</strong><span>器件、符号与封装证据</span></div></li>
+            <li data-step="4"><b>04</b><div><strong>Hardware Engineer</strong><span>Temporal 耐久工程执行</span></div></li>
+            <li data-step="5"><b>05</b><div><strong>Reviewer</strong><span>ERC、DRC 与交付审查</span></div></li>
+          </ol>
+        </div>
+
+        <div class="panel console">
+          <div class="panel-heading">
+            <span>有序事件流</span>
+            <small>AG-UI over SSE</small>
+          </div>
+          <div id="event-stream" class="event-stream">
+            <p class="empty">点击“运行流程演示”查看模拟事件。</p>
+          </div>
+          <div id="approval" class="approval" hidden>
+            <div><strong>需要人工确认</strong><span>器件替代方案已附官方来源与封装差异。</span></div>
+            <button id="approve" type="button">批准替代并继续</button>
+          </div>
+        </div>
+
+        <div class="panel artifacts">
+          <div class="panel-heading">
+            <span>可审查产物</span>
+            <small>content-addressed manifest</small>
+          </div>
+          <ul id="artifact-list">
+            <li><span>project.kicad_sch</span><em>等待</em></li>
+            <li><span>project.kicad_pcb</span><em>等待</em></li>
+            <li><span>bom.csv</span><em>等待</em></li>
+            <li><span>gerber.zip</span><em>等待</em></li>
+            <li><span>review-report.md</span><em>等待</em></li>
+          </ul>
+          <div class="gate">
+            <span>Evidence Gate</span>
+            <strong id="gate-status">尚未执行</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="architecture">
+        <div class="section-copy">
+          <p class="eyebrow">SYSTEM BOUNDARIES</p>
+          <h2>推理、执行与业务状态分层</h2>
+          <p>浏览器只访问 Java 控制面；Python Agent 内核负责推理和工具编排；Temporal 与确定性 EDA 工具负责可恢复执行。</p>
+        </div>
+        <div class="architecture-flow">
+          <div><small>Browser</small><strong>Next.js</strong><span>OIDC · AG-UI</span></div>
+          <i>→</i>
+          <div><small>Control Plane</small><strong>Spring Boot</strong><span>Tenant · Run · Audit</span></div>
+          <i>→</i>
+          <div><small>Agent Kernel</small><strong>LangGraph</strong><span>State · Tools · HITL</span></div>
+          <i>→</i>
+          <div><small>Durable Execution</small><strong>Temporal</strong><span>KiCad · Freerouting</span></div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>KiCad Design Multi-Agent System</span>
+      <span>Derived from JoshuaC215/agent-service-toolkit under the MIT License.</span>
+    </footer>
+    <script src="app.js"></script>
+  </body>
+</html>

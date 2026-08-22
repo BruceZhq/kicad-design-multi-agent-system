@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: ratsnest-evolution-sandbox-coordinator, namespace: ratsnest-evolution-sandbox }
+automountServiceAccountToken: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratsnest-evolution-sandbox-coordinator
+  namespace: ratsnest-evolution-sandbox
+  labels: { app: ratsnest-evolution-sandbox-coordinator }
+spec:
+  replicas: 0
+  revisionHistoryLimit: 3
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: ratsnest-evolution-sandbox-coordinator } }
+  template:
+    metadata:
+      labels:
+        app: ratsnest-evolution-sandbox-coordinator
+        ratsnest.io/trust-domain: sandbox-coordinator
+    spec:
+      serviceAccountName: ratsnest-evolution-sandbox-coordinator
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: coordinator
+          image: ghcr.io/ratsnestteam/ratsnest-evolution-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command: [python, -m, evolution.temporal.worker]
+          env:
+            - { name: TEMPORAL_ADDRESS, value: temporal-frontend.ratsnest-data.svc.cluster.local:7233 }
+            - { name: TEMPORAL_NAMESPACE, value: ratsnest }
+            - { name: RATSNEST_EVOLUTION_WORKER_ROLE, value: sandbox-coordinator }
+            - { name: RATSNEST_EVOLUTION_SANDBOX_MODE, value: kubernetes_job }
+            - { name: RATSNEST_EVOLUTION_SANDBOX_NAMESPACE, value: ratsnest-evolution-sandbox }
+            - { name: RATSNEST_EVOLUTION_GIT_MIRROR_CLAIM, value: ratsnest-evolution-git-mirror }
+            - name: RATSNEST_EVOLUTION_SANDBOX_IMAGE
+              value: ghcr.io/ratsnestteam/ratsnest-evolution-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+            - { name: PYTHONDONTWRITEBYTECODE, value: "1" }
+            - { name: PYTHONUNBUFFERED, value: "1" }
+            - { name: HOME, value: /tmp/evolution-home }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi, ephemeral-storage: 128Mi }
+            limits: { cpu: 500m, memory: 1Gi, ephemeral-storage: 512Mi }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 512Mi }

@@ -1,0 +1,111 @@
+{
+  "scope": "Java control-plane backend staging only",
+  "completed_at": "2026-08-20",
+  "architecture": {
+    "shared": {
+      "web": ["ApiHeaders", "ApiException", "ApiErrorHandler"]
+    },
+    "modules": {
+      "run": ["api", "application", "domain/model", "domain/port", "infrastructure/persistence", "infrastructure/messaging", "infrastructure/scheduling"],
+      "artifact": ["api", "application", "domain/model", "domain/port", "infrastructure/persistence", "infrastructure/storage"],
+      "identity": ["api", "application", "application/model", "domain/model", "infrastructure/security"],
+      "tenancy": ["api", "application", "domain/model", "domain/port", "infrastructure/persistence"],
+      "organization": ["api", "application", "domain/model", "domain/port", "infrastructure/persistence"],
+      "project": ["api", "application", "domain/model", "domain/port", "infrastructure/persistence"],
+      "profile": ["api", "application", "application/model", "domain/model", "domain/port", "infrastructure/persistence", "infrastructure/storage"],
+      "agentgateway": ["domain/model", "domain/port", "infrastructure/http", "infrastructure/grpc", "infrastructure/security"]
+    },
+    "bootstrap": "audited and intentionally not split",
+    "agentgateway_protocol_rewrite": false
+  },
+  "run_use_cases": {
+    "root_revision_fork_submission": "RunSubmissionService",
+    "query_runtime_status_history": "RunQueryService",
+    "hitl_interaction_recovery": "RunInteractionService",
+    "events_lifecycle_manifest_outbox_reconciliation": "RunLifecycleService",
+    "browser_independent_runtime_event_ingestion": "RunEventIngestionService",
+    "durable_ingestion_scheduler": "RunEventIngestionWorker"
+  },
+  "api_contract": {
+    "route_annotations": 57,
+    "before_sha256": "5b362c951939cfae9f24a8d790242fe1217b06c6a5340c972e66567e1b14fe16",
+    "after_sha256": "5b362c951939cfae9f24a8d790242fe1217b06c6a5340c972e66567e1b14fe16",
+    "equal": true,
+    "controller_wire_records": 39,
+    "dto_before_sha256": "a7bf4759f997eec7c43c1724cefcc64201e2d52e27eacdd62c71f751d826ce12",
+    "dto_after_sha256": "a7bf4759f997eec7c43c1724cefcc64201e2d52e27eacdd62c71f751d826ce12",
+    "dto_equal": true,
+    "headers": {
+      "organization": "X-Organization-ID",
+      "shared_owner": "shared.web.ApiHeaders"
+    }
+  },
+  "persistence_contract": {
+    "unchanged_sql_pairs": [
+      {"before":"ArtifactRepository","after":"JdbcArtifactStore","sql_literal_sha256":"b2ed35d97d5372d5fb02de5f2c9429e6afc074434b7f090779b7f5daf762cc01"},
+      {"before":"OrganizationRepository","after":"JdbcOrganizationStore","sql_literal_sha256":"6d1e41b07d3735c200a112bbbd04da39d4bc79664da6f99d84f90a703497dbdb"},
+      {"before":"UserProfileRepository","after":"JdbcUserProfileStore","sql_literal_sha256":"90d4927619fe883a137519b9b6082c7f9fcef079504ef0867b88fc903df04fe2"},
+      {"before":"ProjectRepository","after":"JdbcProjectStore","sql_literal_sha256":"14917f9490c79b79986b36c5b8c3841839bf7bbde989214d6fded7295f797cdc"},
+      {"before":"RunInteractionRepository","after":"JdbcRunInteractionStore","sql_literal_sha256":"c43250e0dfa297597cb14ff5c436d39bdc11cfce46b727316c62ca8746b2051d"},
+      {"before":"RunOutboxRepository","after":"JdbcRunOutbox","sql_literal_sha256":"f240ea2c7afc40206782d150e8282db748d90694420e6ff488567bdf33aa1feb"},
+      {"before":"RunRepository","after":"JdbcRunStore","sql_literal_sha256":"b0d328c41f486ad94e969f4d60c37698e3490d5fd8708b552b9b200b289ae1ab"},
+      {"before":"DatabaseIsolationVerifier","after":"DatabaseIsolationVerifier","sql_literal_sha256":"6f194e6dcd2ef05fd25bb92bd2690c254e39bb4a3453d15ec37b971e44b9ba93"},
+      {"before":"MembershipRepository","after":"JdbcMembershipStore","sql_literal_sha256":"b6d06557570e916c74c1a7ce98c7d7fbac4e6c796c97ad8eebdbedd56921aeec"},
+      {"before":"TenantContext","after":"PostgresTenantContext","sql_literal_sha256":"4285b8970034dc9e5080f35a84b12623569b20350a3717521cc1f8a3d0f797d9"}
+    ],
+    "intentional_sql_changes": {
+      "evolution_before_sha256": "1b0c8a3ffaf174ddafb20fbe6f3f003de2649f2b5b219e2180709bba869ed065",
+      "evolution_after_sha256": "fa6248fa0cbbfc5033e6d4e8973337a6b8240e04067e3cc4d166b2bd20ea9322",
+      "reason": "count trusted harness_defect_observed plus capability_gap and require strictly attributed same-project resolution",
+      "run_event_ingestion": "new durable cursor, lease, CAS advance and cross-tenant claim functions"
+    },
+    "governance_partitioning": {
+      "candidate_identity": "tenant + harness version + manifest digest + failure signature + step/check",
+      "browser_wakeup": "browser events update only the monotonic Runtime high-water hint; the independent ingestion cursor advances only after durable replay"
+    },
+    "flyway_v1_v13_mismatches": 0,
+    "new_flyway": [
+      {"name":"V14__harden_evolution_observation_attribution.sql","sha256":"06235c843786622288886890083c3c137cdc75dd0f664e1c979454b971dfad3c"},
+      {"name":"V15__create_run_event_ingestion_cursor.sql","sha256":"c77feb94a5700c0cbacd7e048f7b3bb21da7de1ebf88ce273c754b6d6335f0f9"}
+    ]
+  },
+  "security_contract": {
+    "identity_string_literal_count": 39,
+    "before_sha256": "1899c4251657428edc4c663d50848873add9aaba066aa2952ab0a81a8905197c",
+    "after_sha256": "1899c4251657428edc4c663d50848873add9aaba066aa2952ab0a81a8905197c",
+    "equal": true,
+    "admin_role": "ratsnest-platform-admin",
+    "admin_scope": "ratsnest.harness.admin",
+    "claims_preserved": ["roles", "realm_access.roles", "scp", "scope"],
+    "domain_identity_framework_dependencies": 0
+  },
+  "bean_and_boundary_scan": {
+    "main_java_files": 136,
+    "component_beans": 64,
+    "duplicate_component_names": 0,
+    "old_flat_module_imports": 0,
+    "flat_files_in_migrated_module_roots": 0,
+    "application_or_domain_imports_api_or_infrastructure": 0,
+    "domain_java_files": 45,
+    "domain_framework_web_cloud_imports": 0,
+    "single_port_implementations": [
+      "RunStore", "RunInteractionStore", "RunOutbox", "RunEventIngestionStore",
+      "ArtifactStore", "ArtifactStorage", "MembershipStore", "TenantContext",
+      "OrganizationStore", "ProjectStore", "UserProfileStore", "ProfileAvatarStore",
+      "RuntimeCredentials", "EvolutionRepository"
+    ],
+    "agent_runtime_gateway": "HTTP adapter plus conditional @Primary gRPC adapter; existing transport selection preserved"
+  },
+  "verification": {
+    "java": "Microsoft OpenJDK 21.0.10",
+    "main_sources_compiled": 136,
+    "protobuf_generated_sources_compiled": 20,
+    "test_sources_compiled": 8,
+    "main_compile_exit_code": 0,
+    "test_compile_exit_code": 0,
+    "targeted_behavior_tests_executed": 12,
+    "targeted_behavior_tests_passed": 12,
+    "docker_used": false,
+    "network_used": false
+  }
+}

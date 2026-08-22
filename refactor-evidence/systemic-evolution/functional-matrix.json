@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "scope": "systemic_ahe_governed_evolution_bridge",
+  "capabilities": [
+    {
+      "capability": "trusted governance partition",
+      "implementation": [
+        "src/service/governance_scope.py",
+        "src/service/service.py",
+        "src/agents/ratsnestpro/temporal/workflow.py",
+        "src/agents/ratsnestpro/temporal/activities.py",
+        "src/agents/ratsnestpro/temporal/step_runner.py"
+      ],
+      "guarantee": "Authenticated opaque tenant/project/run and Harness identities are HMAC-bound end to end. The token stays out of LangGraph state, tool messages, and persisted Temporal manifests; missing, tampered, or mismatched authority disables governance without stopping ordinary design execution."
+    },
+    {
+      "capability": "single durable event transport and Runtime idempotency",
+      "implementation": [
+        "src/service/durable_event_stream.py",
+        "src/service/ahe_event.py",
+        "src/service/service.py",
+        "src/service/run_registry.py"
+      ],
+      "guarantee": "Strictly sanitized AHE records use stable record_id values; Runtime persists them with event_key ahe:<record_id>, so subprocess replay and recovery reuse the original event sequence independently of browser subscription."
+    },
+    {
+      "capability": "privacy boundary",
+      "implementation": [
+        "src/service/ahe_event.py",
+        "src/agents/ratsnestpro/ratsnestpro_agent.py"
+      ],
+      "guarantee": "Raw prompts, requirements, free-form evidence, authority tokens, and private scope claims are excluded from AHE records and LangGraph tool-call messages."
+    },
+    {
+      "capability": "deterministic attribution",
+      "implementation": [
+        "src/ratsnestpro/orchestration/ahe.py",
+        "src/ratsnestpro/orchestration/pipeline.py",
+        "src/ratsnestpro/orchestration/component_resolution.py"
+      ],
+      "guarantee": "Ordinary design errors route to revision/HITL, infrastructure transients route to retry, and only allowlisted deterministic contradictions carry Harness provenance and stable reason codes. Repair-capable real Selection and SchematicConnections steps preserve Harness observation recoverability after local repair is exhausted."
+    },
+    {
+      "capability": "governed cross-run promotion and resolution",
+      "implementation": [
+        "src/agents/ratsnestpro/ehe_memory.py",
+        "src/agents/ratsnestpro/tools.py"
+      ],
+      "guarantee": "Only scoped, allowlisted observations from at least two independent opaque runs and projects promote a capability gap. Global signatures exclude project-local reference designators; the tenant+Harness+project ledger stores and unions per-project affected_refs. It closes only after the same stable invariant is executed successfully for every recorded local subject, with bound signature, step, gap_id, and strict resolution attribution. Missing evidence, removed subjects, or a different alias function cannot close it."
+    },
+    {
+      "capability": "advisory-store failure isolation",
+      "implementation": [
+        "src/agents/ratsnestpro/tools.py",
+        "tests/test_ahe_event_bridge.py"
+      ],
+      "guarantee": "A scoped strict Harness observation is still appended to the per-workflow audit and Runtime bridge if cross-run EHE storage raises OSError; only promotion is skipped. Unscoped governed events never leave local diagnostics."
+    },
+    {
+      "capability": "ordinary design negative coverage",
+      "implementation": [
+        "tests/test_harness_systemic_repairs.py"
+      ],
+      "guarantee": "Wrong PB2/PF0, no verified alias, a pulldown tied to supply, and fixed_exact without evidence remain fail-closed design/evidence results rather than systemic Harness defects."
+    },
+    {
+      "capability": "scoped verified experience reuse",
+      "implementation": [
+        "src/agents/ratsnestpro/ratsnestpro_agent.py",
+        "src/agents/ratsnestpro/tools.py"
+      ],
+      "guarantee": "Internal knowledge lookup can reuse verified EHE strategies only after validating hidden configurable authority; those claims are removed before messages/UI output. Legacy unscoped lookup remains limited to ungoverned local/RAG evidence."
+    },
+    {
+      "capability": "recorded evaluation fixture",
+      "implementation": [
+        "evals/sealed/fixtures/systemic-grounding-and-evolution.v1.json",
+        "evals/sealed/manifests/systemic-grounding-and-evolution.v1.json",
+        "evals/suites/core.v1.json"
+      ],
+      "guarantee": "Recorded-only fixture and fault-injection metadata are retained for future grader integration. They were not executed by a deterministic grader in this increment and are not claimed as passing executable eval evidence."
+    }
+  ]
+}

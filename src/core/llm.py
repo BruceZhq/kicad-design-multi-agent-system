@@ -1,0 +1,235 @@
+from enum import StrEnum
+from functools import cache
+
+from langchain_anthropic import ChatAnthropic
+from langchain_aws import ChatBedrock
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_vertexai import ChatVertexAI
+from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
+from langchain_openai import AzureChatOpenAI, ChatOpenAI
+
+from core.settings import settings
+from schema.models import (
+    AllModelEnum,
+    AnthropicModelName,
+    AWSModelName,
+    AzureOpenAIModelName,
+    DeepseekModelName,
+    FakeModelName,
+    GoogleModelName,
+    GroqModelName,
+    OllamaModelName,
+    OpenAICompatibleName,
+    OpenAIModelName,
+    OpenRouterModelName,
+    VertexAIModelName,
+)
+
+_MODEL_TABLE = (
+    {m: m.value for m in OpenAIModelName}
+    | {m: m.value for m in OpenAICompatibleName}
+    | {m: m.value for m in AzureOpenAIModelName}
+    | {m: m.value for m in DeepseekModelName}
+    | {m: m.value for m in AnthropicModelName}
+    | {m: m.value for m in GoogleModelName}
+    | {m: m.value for m in VertexAIModelName}
+    | {m: m.value for m in GroqModelName}
+    | {m: m.value for m in AWSModelName}
+    | {m: m.value for m in OllamaModelName}
+    | {m: m.value for m in OpenRouterModelName}
+    | {m: m.value for m in FakeModelName}
+)
+
+
+class FakeToolModel(FakeListChatModel):
+    def __init__(self, responses: list[str]):
+        super().__init__(responses=responses)
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        return self
+
+
+type ModelT = (
+    AzureChatOpenAI
+    | ChatOpenAI
+    | ChatAnthropic
+    | ChatGoogleGenerativeAI
+    | ChatVertexAI
+    | ChatGroq
+    | ChatBedrock
+    | ChatOllama
+    | FakeToolModel
+)
+
+
+class InferencePurpose(StrEnum):
+    ROUTING = "routing"
+    SUMMARIZATION = "summarization"
+    CHAT = "chat"
+    REASONING = "reasoning"
+    REVIEW = "review"
+
+
+def _purpose_endpoint(purpose: InferencePurpose) -> tuple[str, str, str] | None:
+    small = purpose in {
+        InferencePurpose.ROUTING,
+        InferencePurpose.SUMMARIZATION,
+        InferencePurpose.CHAT,
+    }
+    base_url = settings.INFERENCE_SMALL_BASE_URL if small else settings.INFERENCE_LARGE_BASE_URL
+    model = settings.INFERENCE_SMALL_MODEL if small else settings.INFERENCE_LARGE_MODEL
+    secret = settings.INFERENCE_SMALL_API_KEY if small else settings.INFERENCE_LARGE_API_KEY
+    if not base_url or not model:
+        return None
+    return base_url.rstrip("/"), model, secret.get_secret_value() if secret else "local-vllm"
+
+
+@cache
+def get_model_for_purpose(
+    model_name: AllModelEnum | None,
+    /,
+    *,
+    purpose: InferencePurpose = InferencePurpose.REASONING,
+) -> ModelT:
+    endpoint = _purpose_endpoint(purpose)
+    if endpoint is None:
+        return get_model_for_plain_call(model_name)
+    base_url, model, api_key = endpoint
+    return ChatOpenAI(
+        model=model,
+        streaming=True,
+        base_url=base_url,
+        api_key=api_key,
+        timeout=60,
+        max_retries=3,
+    )
+
+
+@cache
+def get_model(model_name: AllModelEnum | None, /) -> ModelT:
+    # NOTE: models with streaming=True will send tokens as they are generated
+    # if the /stream endpoint is called with stream_tokens=True (the default)
+    if model_name is None:
+        raise ValueError(
+            "No LLM provider is configured. Configure a provider credential, "
+            "an Ollama model, or explicitly enable the fake model."
+        )
+    api_model_name = _MODEL_TABLE.get(model_name)
+    if not api_model_name:
+        raise ValueError(f"Unsupported model: {model_name}")
+
+    if model_name in OpenAIModelName:
+        return ChatOpenAI(model=api_model_name, streaming=True)
+    if model_name in OpenAICompatibleName:
+        if not settings.COMPATIBLE_BASE_URL or not settings.COMPATIBLE_MODEL:
+            raise ValueError("OpenAICompatible base url and endpoint must be configured")
+
+        return ChatOpenAI(
+            model=settings.COMPATIBLE_MODEL,
+            temperature=0.5,
+            streaming=True,
+            openai_api_base=settings.COMPATIBLE_BASE_URL,
+            openai_api_key=settings.COMPATIBLE_API_KEY,
+        )
+    if model_name in AzureOpenAIModelName:
+        if not settings.AZURE_OPENAI_API_KEY or not settings.AZURE_OPENAI_ENDPOINT:
+            raise ValueError("Azure OpenAI API key and endpoint must be configured")
+
+        # GPT-5 generation is reasoning-based and rejects temperature (400); omit it.
+        return AzureChatOpenAI(
+            azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+            deployment_name=api_model_name,
+            api_version=settings.AZURE_OPENAI_API_VERSION,
+            streaming=True,
+            timeout=60,
+            max_retries=3,
+        )
+    if model_name in DeepseekModelName:
+        if not settings.DEEPSEEK_API_KEY:
+            raise ValueError("DeepSeek API key must be configured")
+
+        return ChatOpenAI(
+            model=api_model_name,
+            temperature=0.5,
+            max_tokens=16_384,
+            streaming=True,
+            base_url=settings.DEEPSEEK_BASE_URL,
+            api_key=settings.DEEPSEEK_API_KEY,
+            timeout=60,
+            max_retries=3,
+            # DeepSeek V4 requires reasoning_content to be replayed between
+            # tool-call turns in thinking mode. ChatOpenAI does not currently
+            # preserve that provider-specific field, so use the supported
+            # non-thinking mode for reliable LangGraph agent tool loops.
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+    if model_name in AnthropicModelName:
+        if model_name == AnthropicModelName.SONNET_5:
+            # Claude Sonnet 5 rejects non-default sampling parameters (temperature,
+            # top_p, top_k) with a 400 error -- adaptive thinking is on by default
+            # instead. See https://docs.anthropic.com/en/docs/about-claude/models
+            return ChatAnthropic(model_name=api_model_name, streaming=True)
+        return ChatAnthropic(model_name=api_model_name, temperature=0.5, streaming=True)
+    if model_name in GoogleModelName:
+        return ChatGoogleGenerativeAI(model=api_model_name, temperature=0.5, streaming=True)
+    if model_name in VertexAIModelName:
+        return ChatVertexAI(model=api_model_name, temperature=0.5, streaming=True)
+    if model_name in GroqModelName:
+        if model_name == GroqModelName.GPT_OSS_SAFEGUARD_20B:
+            return ChatGroq(model=api_model_name, temperature=0.0)  # type: ignore[call-arg]
+        return ChatGroq(model=api_model_name, temperature=0.5)  # type: ignore[call-arg]
+    if model_name in AWSModelName:
+        if model_name == AWSModelName.BEDROCK_SONNET:
+            # Sonnet 5 rejects non-default sampling params (400); omit temperature.
+            return ChatBedrock(model=api_model_name)
+        return ChatBedrock(model=api_model_name, temperature=0.5)
+    if model_name in OllamaModelName:
+        if not settings.OLLAMA_MODEL:
+            raise ValueError("Ollama model must be configured")
+        if settings.OLLAMA_BASE_URL:
+            chat_ollama = ChatOllama(
+                model=settings.OLLAMA_MODEL, temperature=0.5, base_url=settings.OLLAMA_BASE_URL
+            )
+        else:
+            chat_ollama = ChatOllama(model=settings.OLLAMA_MODEL, temperature=0.5)
+        return chat_ollama
+    if model_name in OpenRouterModelName:
+        return ChatOpenAI(
+            model=api_model_name,
+            temperature=0.5,
+            streaming=True,
+            base_url="https://openrouter.ai/api/v1/",
+            api_key=settings.OPENROUTER_API_KEY,
+        )
+    if model_name in FakeModelName:
+        return FakeToolModel(responses=["This is a test response from the fake model."])
+
+    raise ValueError(f"Unsupported model: {model_name}")
+
+
+@cache
+def get_model_for_plain_call(model_name: AllModelEnum | None, /) -> ModelT:
+    """Return a reasoning-capable model for calls that never enter a tool loop.
+
+    DeepSeek thinking responses must be replayed on later tool-call turns.  The
+    regular model therefore stays in its reliable non-thinking mode, while
+    plain completion calls can safely request provider-visible reasoning.
+    """
+
+    if not isinstance(model_name, DeepseekModelName):
+        return get_model(model_name)
+    if not settings.DEEPSEEK_API_KEY:
+        raise ValueError("DeepSeek API key must be configured")
+    api_model_name = _MODEL_TABLE[model_name]
+    return ChatOpenAI(
+        model=api_model_name,
+        max_tokens=16_384,
+        streaming=True,
+        base_url=settings.DEEPSEEK_BASE_URL,
+        api_key=settings.DEEPSEEK_API_KEY,
+        timeout=60,
+        max_retries=3,
+        extra_body={"thinking": {"type": "enabled"}},
+    )

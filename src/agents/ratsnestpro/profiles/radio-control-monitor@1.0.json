@@ -1,0 +1,23 @@
+{
+  "schema_version": "1",
+  "id": "radio-control-monitor",
+  "version": "1.0",
+  "title": "Radio Control and Monitor",
+  "description": "Designs bounded low-power radio supervisory boards combining control, monitoring, and external interfaces.",
+  "scope": {
+    "supported": ["radio-module supervision", "low-speed monitoring and control", "protected power and wired service interfaces"],
+    "excluded": ["power-amplifier or antenna design", "spectrum-certification sign-off", "safety-critical radio control"]
+  },
+  "constraints": ["Keep radio-sensitive regions separated from switching power and noisy external interfaces.", "Honor module keep-out, grounding, thermal, and supply-transient guidance.", "Expose antenna, enclosure, and regulatory dependencies for human review."],
+  "evidence_requirements": ["Official host-interface and integration documentation for selected radio functions.", "Authoritative power, protection, timing, and external-interface documentation.", "Applicable module certification conditions and layout restrictions."],
+  "toolchain": {
+    "required": ["KiCad schematic and PCB tools", "kicad-cli ERC and DRC", "manufacturing export"],
+    "optional": ["Freerouting for non-RF routing", "RF coexistence and emissions analysis"]
+  },
+  "budget": {"max_wall_clock_minutes": 60, "max_llm_tokens": 1200000, "max_ahe_repairs": 6, "max_same_failure_retries": 2},
+  "acceptance": {
+    "required_artifacts": ["editable KiCad project", "BOM and placement data", "Gerber and drill outputs", "risk and evidence report"],
+    "verification": ["ERC and DRC findings are reported without concealment.", "Module integration, external ports, and power integrity receive independent review.", "RF and regulatory claims not proven by available tools remain open issues."],
+    "delivery_policy": "Provide complete editable artifacts and traceable integration risks; final RF, enclosure, and regulatory approval remains a human responsibility."
+  }
+}

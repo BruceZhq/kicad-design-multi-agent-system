@@ -1,0 +1,149 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratsnest-agent-service-canary
+  namespace: ratsnest
+  labels:
+    app.kubernetes.io/part-of: ratsnestpro
+    ratsnest.io/release-track: canary
+  annotations:
+    ratsnest.io/release-purpose: explicit-harness-canary
+    ratsnest.io/harness-version: canary-replace-me
+    ratsnest.io/runtime-image-digest: replace-me
+    ratsnest.io/harness-manifest-digest: replace-me
+spec:
+  replicas: 0
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+  selector:
+    matchLabels: { app: ratsnest-agent-service-canary }
+  template:
+    metadata:
+      labels:
+        app: ratsnest-agent-service-canary
+        app.kubernetes.io/part-of: ratsnestpro
+        ratsnest.io/release-track: canary
+        ratsnest.io/harness-version: canary-replace-me
+      annotations:
+        ratsnest.io/runtime-image-digest: replace-me
+        ratsnest.io/harness-manifest-digest: replace-me
+    spec:
+      serviceAccountName: ratsnest-runtime
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: api
+          image: ghcr.io/ratsnestteam/ratsnest-agent-service:canary-replace-me
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: grpc, containerPort: 9090 }
+          envFrom:
+            - configMapRef: { name: ratsnest-runtime-config }
+            - secretRef: { name: ratsnest-runtime-secrets }
+          env:
+            - { name: RATSNEST_HARNESS_VERSION_ID, value: canary-replace-me }
+            - { name: RATSNEST_HARNESS_CHANNEL, value: canary }
+            - { name: RATSNEST_HARNESS_MANIFEST_DIGEST, value: replace-me }
+            - { name: RATSNESTPRO_TEMPORAL_TASK_QUEUE, value: ratsnest-hardware-cell-01-canary }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 15
+            timeoutSeconds: 3
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { cpu: "2", memory: 4Gi }
+          volumeMounts:
+            - { name: workspaces, mountPath: /data/ratsnestpro }
+      volumes:
+        - name: workspaces
+          persistentVolumeClaim: { claimName: ratsnest-workspaces }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratsnest-agent-service-canary
+  namespace: ratsnest
+spec:
+  selector: { app: ratsnest-agent-service-canary }
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+    - { name: grpc, port: 9090, targetPort: grpc }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratsnest-temporal-worker-canary
+  namespace: ratsnest
+  labels:
+    app.kubernetes.io/part-of: ratsnestpro
+    ratsnest.io/release-track: canary
+  annotations:
+    ratsnest.io/release-purpose: explicit-harness-canary
+    ratsnest.io/harness-version: canary-replace-me
+    ratsnest.io/runtime-image-digest: replace-me
+    ratsnest.io/harness-manifest-digest: replace-me
+spec:
+  replicas: 0
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+  selector:
+    matchLabels: { app: ratsnest-temporal-worker-canary }
+  template:
+    metadata:
+      labels:
+        app: ratsnest-temporal-worker-canary
+        app.kubernetes.io/part-of: ratsnestpro
+        ratsnest.io/release-track: canary
+        ratsnest.io/harness-version: canary-replace-me
+      annotations:
+        ratsnest.io/runtime-image-digest: replace-me
+        ratsnest.io/harness-manifest-digest: replace-me
+    spec:
+      serviceAccountName: ratsnest-runtime
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: ghcr.io/ratsnestteam/ratsnest-agent-service:canary-replace-me
+          command: [python, -m, agents.ratsnestpro.temporal.worker]
+          envFrom:
+            - configMapRef: { name: ratsnest-runtime-config }
+            - secretRef: { name: ratsnest-runtime-secrets }
+          env:
+            - { name: RATSNEST_HARNESS_VERSION_ID, value: canary-replace-me }
+            - { name: RATSNEST_HARNESS_CHANNEL, value: canary }
+            - { name: RATSNEST_HARNESS_MANIFEST_DIGEST, value: replace-me }
+            - { name: RATSNESTPRO_TEMPORAL_TASK_QUEUE, value: ratsnest-hardware-cell-01-canary }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: "2", memory: 4Gi }
+            limits: { cpu: "4", memory: 8Gi }
+          volumeMounts:
+            - { name: workspaces, mountPath: /data/ratsnestpro }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: workspaces
+          persistentVolumeClaim: { claimName: ratsnest-workspaces }
+        - name: tmp
+          emptyDir: { sizeLimit: 10Gi }

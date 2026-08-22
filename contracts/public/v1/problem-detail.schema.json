@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ratsnest.team/contracts/public/v1/problem-detail.schema.json",
+  "title": "API problem",
+  "type": "object",
+  "required": ["type", "title", "status", "detail", "instance", "code", "traceId"],
+  "properties": {
+    "type": { "type": "string", "format": "uri-reference" },
+    "title": { "type": "string", "minLength": 1 },
+    "status": { "type": "integer", "minimum": 400, "maximum": 599 },
+    "detail": { "type": "string", "minLength": 1 },
+    "instance": { "type": "string", "format": "uri-reference" },
+    "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+    "traceId": { "type": "string", "minLength": 1, "maxLength": 128 }
+  },
+  "additionalProperties": true
+}

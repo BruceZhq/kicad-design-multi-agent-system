@@ -1,0 +1,173 @@
+{
+  "schema_version": "ratsnestpro.kernel-flatten-functionality-matrix.v1",
+  "status": "preserved",
+  "snapshot_scope": "The source copy was already physically flattened before the before snapshot; before.json captures the pre-cleanup flat tree and after.json captures the final flat tree.",
+  "comparison": {
+    "module_inventory_equal": true,
+    "module_count_before": 52,
+    "module_count_after": 52,
+    "module_paths_and_sha256_equal": true,
+    "resource_inventory_equal": true,
+    "resource_count_before": 17,
+    "resource_count_after": 17,
+    "package_data_tree_sha256_before": "e35df3689b6f03021ccfd42cd13f436bb8fc19177b5d986c1f18742b81a008f4",
+    "package_data_tree_sha256_after": "e35df3689b6f03021ccfd42cd13f436bb8fc19177b5d986c1f18742b81a008f4",
+    "key_public_symbols_equal": true,
+    "agent_and_tool_registries_equal": true,
+    "environment_keys_equal": true,
+    "entrypoints_equal": true,
+    "runtime_reference_count_before": 24,
+    "runtime_reference_count_after": 24
+  },
+  "capabilities": [
+    {
+      "capability": "flat Python import root",
+      "evidence": "PYTHONPATH=<staging>/src imported ratsnestpro, agents, core, evolution, memory, schema and service",
+      "result": "pass"
+    },
+    {
+      "capability": "LangGraph public Agent registry",
+      "evidence": {
+        "default_agent": "ratsnestpro-multi-agent",
+        "registered_agents": [
+          "ratsnestpro-multi-agent"
+        ],
+        "langgraph_target": "./src/agents/ratsnestpro/ratsnestpro_agent.py:ratsnestpro_multi_agent"
+      },
+      "result": "pass"
+    },
+    {
+      "capability": "typed Agent tools",
+      "evidence": [
+        "ratsnest_generate_local_kicad_library",
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_review_kicad_project",
+        "ratsnest_run_pcb_pipeline",
+        "ratsnest_run_pcb_pipeline_until",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_validate_kicad_binding"
+      ],
+      "result": "pass"
+    },
+    {
+      "capability": "canonical Temporal Hardware Engineer pipeline",
+      "evidence": {
+        "step_count": 17,
+        "steps": [
+          "requirements",
+          "topology",
+          "selection",
+          "schematic_connections",
+          "schematic_pinmap",
+          "schematic_layout",
+          "schematic_materialize",
+          "erc",
+          "layout_partition",
+          "layout_critical",
+          "layout_general",
+          "layout_write",
+          "route_plan",
+          "route_planes",
+          "route_signals",
+          "route_fab",
+          "manufacture"
+        ],
+        "worker_import": "agents.ratsnestpro.temporal.worker"
+      },
+      "result": "pass"
+    },
+    {
+      "capability": "governed Evolution worker entrypoint",
+      "evidence": "evolution.temporal.worker imported from PYTHONPATH=src",
+      "result": "pass"
+    },
+    {
+      "capability": "knowledge and package data",
+      "evidence": {
+        "knowledge_type": "KnowledgeBase",
+        "resource_count": 17,
+        "package_data_tree_sha256": "e35df3689b6f03021ccfd42cd13f436bb8fc19177b5d986c1f18742b81a008f4",
+        "default_process_capability": "src/ratsnestpro/data/process_capability.json"
+      },
+      "result": "pass"
+    },
+    {
+      "capability": "grounded parts selector",
+      "evidence": "ratsnestpro.parts.PartSelector imported successfully",
+      "result": "pass"
+    },
+    {
+      "capability": "FastAPI runtime entrypoint",
+      "evidence": "src/run_service.py -> service:app; imported object type FastAPI",
+      "result": "pass"
+    },
+    {
+      "capability": "Docker and Compose flattened paths",
+      "evidence": "docker/Dockerfile.service copies src/ratsnestpro to /app/ratsnestpro and compose.yaml watches src/ratsnestpro -> /app/ratsnestpro; no nested editable install exists",
+      "result": "pass"
+    }
+  ],
+  "validation": [
+    {
+      "check": "in-memory compile of every Python file under src plus scripts",
+      "result": "pass",
+      "files": 124
+    },
+    {
+      "check": "full entrypoint and registry import smoke with PYTHONDONTWRITEBYTECODE=1",
+      "result": "pass"
+    },
+    {
+      "check": "Ruff on refactor-owned Python audit code",
+      "command": "ruff check scripts/audit_kernel_flatten.py",
+      "result": "pass"
+    },
+    {
+      "check": "PowerShell parser on cleanup script",
+      "result": "pass"
+    },
+    {
+      "check": "old nested path scan",
+      "result": "pass",
+      "matches": 0
+    }
+  ],
+  "cleanup": {
+    "compiled_python_files_before": 180,
+    "compiled_python_files_after": 0,
+    "cache_directories_before": 24,
+    "cache_directories_after": 0,
+    "empty_directories_after": 0,
+    "removed_empty_directories": [
+      "docs/deploy",
+      "scripts/agui-client",
+      "src/agents/bg_task_agent",
+      "src/agents/github_mcp_agent",
+      "src/client",
+      "src/ratsnestpro/families",
+      "src/voice/providers",
+      "src/voice"
+    ],
+    "source_files_deleted": [],
+    "orphan_entrypoint": {
+      "path": "src/ratsnestpro/__main__.py",
+      "present_before": false,
+      "present_after": false,
+      "action": "none required"
+    }
+  },
+  "intentional_source_changes": [
+    {
+      "path": "scripts/cleanup_ratsnestpro.ps1",
+      "change": "remove now-empty directories bottom-up within verified project-root boundaries"
+    },
+    {
+      "path": "scripts/audit_kernel_flatten.py",
+      "change": "add deterministic, static before/after inventory generator"
+    }
+  ],
+  "known_unrelated_baseline": {
+    "kernel_wide_ruff": "Six pre-existing fixable import-order/unused-import findings remain in five unchanged runtime files; their paths and SHA-256 values are identical before and after this cleanup. They were not rewritten because this refactor preserves runtime import order."
+  }
+}

@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ratsnest-autoscaling-metric-contracts
+  namespace: ratsnest
+  annotations:
+    ratsnest.io/release-gate: metrics-emission-and-adapter-evidence-required
+data:
+  ratsnest_sse_active_connections: |
+    api: custom.metrics.k8s.io
+    type: per-pod gauge
+    producers: ratsnest-control-plane,ratsnest-web
+    source_series: OpenTelemetry http_server_active_requests restricted to the Java run-events and Next.js chat-stream routes
+    non_producer: oauth2-proxy scales on CPU because it does not emit a route-scoped active-request gauge
+    required_labels: namespace,pod,cell
+    adapter_rule: map the Prometheus series to each target pod; do not aggregate across pods
+    release_evidence: non-zero discovery response plus an HPA scale-up/scale-down exercise
+  ratsnest_temporal_hardware_task_queue_backlog: |
+    api: external.metrics.k8s.io
+    type: task-queue backlog gauge
+    producer: Temporal metrics exporter or a dedicated bounded scraper
+    required_labels: cell,task_queue
+    adapter_rule: preserve cell and task_queue selectors used by the worker HPA
+    release_evidence: discovery response plus a queued-work scale-up/scale-down exercise
+  status: |
+    Manifest references are contracts only. Application emission and a custom/external
+    metrics adapter are not installed by this Cell and remain production release gates.

@@ -1,0 +1,49 @@
+{
+  "scope": "team.ratsnest.controlplane.run",
+  "captured_from": "pre-refactor staging copy",
+  "api": [
+    {"method":"POST","path":"/api/v1/projects/{projectId}/runs","handler":"RunController.start","service":"RunService.start","status":"202","headers":["X-Organization-Id","Idempotency-Key"]},
+    {"method":"GET","path":"/api/v1/runs/{runId}","handler":"RunController.get","service":"RunService.get","headers":["X-Organization-Id"]},
+    {"method":"POST","path":"/api/v1/runs/{sourceRunId}/forks","handler":"RunController.fork","service":"RunService.fork","status":"202","headers":["X-Organization-Id","Idempotency-Key"]},
+    {"method":"GET","path":"/api/v1/runs/{runId}/runtime-status","handler":"RunController.runtimeStatus","service":"RunService.runtimeStatus","headers":["X-Organization-Id"]},
+    {"method":"POST","path":"/api/v1/runs/{runId}:recover","handler":"RunController.recover","service":"RunService.recover","status":"202","headers":["X-Organization-Id","Idempotency-Key"]},
+    {"method":"POST","path":"/api/v1/runs/{runId}:cancel","handler":"RunController.cancel","service":"RunService.cancel","headers":["X-Organization-Id"]},
+    {"method":"POST","path":"/api/v1/runs/{runId}/interactions/{interactionId}:respond","handler":"RunController.respond","service":"RunService.respond","status":"202","headers":["X-Organization-Id","Idempotency-Key"]},
+    {"method":"POST","path":"/api/v1/runs/{runId}/revisions","handler":"RunController.revise","service":"RunService.revise","status":"202","headers":["X-Organization-Id","Idempotency-Key"]},
+    {"method":"GET","path":"/api/v1/runs/{runId}/events","handler":"RunController.events","service":"RunService.events","produces":"text/event-stream","headers":["X-Organization-Id","Last-Event-ID"]},
+    {"method":"GET","path":"/api/v1/projects/{projectId}/threads/{threadId}/messages","handler":"RunController.history","service":"RunService.history","headers":["X-Organization-Id"]},
+    {"method":"GET","path":"/api/v1/projects/{projectId}/threads","handler":"RunController.conversations","service":"RunService.conversations","headers":["X-Organization-Id"]},
+    {"method":"DELETE","path":"/api/v1/projects/{projectId}/threads/{threadId}","handler":"RunController.removeConversation","service":"RunService.removeConversation","status":"204","headers":["X-Organization-Id"]},
+    {"method":"GET","path":"/api/v1/projects/{projectId}/runtime-info","handler":"RunController.info","service":"RunService.info","headers":["X-Organization-Id"]}
+  ],
+  "run_service_public_methods": [
+    "Run start(UUID,UUID,String,StartRequest,AuthenticatedActor)",
+    "Run get(UUID,UUID,AuthenticatedActor)",
+    "Run authorizeRead(UUID,UUID,AuthenticatedActor)",
+    "RunRuntimeStatus runtimeStatus(UUID,UUID,AuthenticatedActor)",
+    "RunRuntimeStatus recover(UUID,UUID,AuthenticatedActor)",
+    "Run revise(UUID,UUID,String,String,AuthenticatedActor)",
+    "Run fork(UUID,UUID,String,ForkRequest,AuthenticatedActor)",
+    "Run cancel(UUID,UUID,AuthenticatedActor)",
+    "Run respond(UUID,UUID,String,String,String,long,AuthenticatedActor)",
+    "Flow.Publisher<RuntimeEvent> events(UUID,UUID,long,AuthenticatedActor)",
+    "List<RuntimeMessage> history(UUID,UUID,String,AuthenticatedActor)",
+    "List<ConversationSummary> conversations(UUID,UUID,AuthenticatedActor)",
+    "void removeConversation(UUID,UUID,String,AuthenticatedActor)",
+    "RuntimeInfo info(UUID,UUID,AuthenticatedActor)"
+  ],
+  "persistence_contract": {
+    "tables": ["control_plane.runs","control_plane.conversation_deletions","control_plane.run_interactions"],
+    "functions": ["control_plane.append_run_outbox","control_plane.claim_run_outbox","control_plane.ack_run_outbox","control_plane.retry_run_outbox","control_plane.claim_runs_for_reconciliation","control_plane.release_run_reconciliation"],
+    "run_operations": ["insert","find","findForUpdate","findByIdempotency","nextRevisionNumber","findLatestRevision","findRevisionChainThrough","findLatestForThread","isConversationRemoved","removeConversation","listConversations","setDeliveryStatus","updateFromRuntime","markWaitingForInput","markFailed","claimForReconciliation","releaseReconciliation"],
+    "interaction_operations": ["register","findForUpdate","beginResponse","markResponded"],
+    "outbox_operations": ["append","appendSourceEvent","claim","acknowledge","retry"]
+  },
+  "invariants": [
+    "All existing endpoint paths, HTTP methods, response codes, validation, headers and DTO JSON shapes remain unchanged.",
+    "Run creation, revision, fork and interaction response remain idempotent.",
+    "Run state transitions, immutable delivery status, artifact manifest persistence and tenant authorization remain unchanged.",
+    "Outbox publication and bounded reconciliation remain independently configurable and operational.",
+    "Flyway SQL and database object names are not changed by this refactor."
+  ]
+}

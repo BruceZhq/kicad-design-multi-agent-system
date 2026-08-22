@@ -1,0 +1,8 @@
+{
+    "python_version": "3.12",
+    "dependencies": ["./src"],
+    "graphs": {
+        "ratsnestpro-multi-agent": "./src/agents/ratsnestpro/ratsnestpro_agent.py:ratsnestpro_multi_agent"
+    },
+    "env": "./.env"
+}

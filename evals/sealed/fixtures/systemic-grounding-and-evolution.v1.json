@@ -1,0 +1,45 @@
+{
+  "outcome": "delivered_with_issues",
+  "intentMode": "build",
+  "executionComplete": true,
+  "completedSteps": 17,
+  "totalSteps": 17,
+  "artifacts": [
+    {
+      "path": "recorded/systemic-controller.kicad_sch",
+      "exists": true,
+      "valid": true,
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    {
+      "path": "recorded/systemic-controller.kicad_pcb",
+      "exists": true,
+      "valid": true,
+      "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+    }
+  ],
+  "releaseBlockers": [
+    "recorded fixed-exact identity remains blocked until grounded evidence is supplied"
+  ],
+  "independentReview": "passed",
+  "roleSequence": [
+    "Supervisor",
+    "Architect",
+    "Parts Specialist",
+    "Hardware Engineer",
+    "Reviewer",
+    "Supervisor"
+  ],
+  "aheRepairCount": 1,
+  "recoveredFromFault": true,
+  "llmTokens": 14000,
+  "wallClockSeconds": 140.0,
+  "invariantResults": {
+    "generic-symbol-does-not-prove-fixed-identity": true,
+    "verified-pin-alias-required": true,
+    "boot-pulldown-grounded": true,
+    "ahe-events-prompt-redacted": true,
+    "capability-gap-cross-project-only": true,
+    "release-truth": true
+  }
+}

@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratsnest-agent-service
+  namespace: ratsnest
+spec:
+  template:
+    metadata:
+      annotations:
+        instrumentation.opentelemetry.io/inject-python: ratsnest-instrumentation
+    spec:
+      containers:
+        - name: api
+          env:
+            - { name: OTEL_SERVICE_NAME, value: ratsnest-agent-service }
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: http://ratsnest-otel-collector:4318 }
+            - { name: OTEL_EXPORTER_OTLP_PROTOCOL, value: http/protobuf }
+            - { name: OTEL_TRACES_EXPORTER, value: otlp }
+            - { name: OTEL_METRICS_EXPORTER, value: otlp }
+            - { name: OTEL_LOGS_EXPORTER, value: otlp }
+            - { name: OTEL_PROPAGATORS, value: tracecontext,baggage }
+            - { name: OTEL_RESOURCE_ATTRIBUTES, value: service.namespace=ratsnest,deployment.environment=production }
+            - { name: OTEL_TRACES_SAMPLER, value: parentbased_traceidratio }
+            - { name: OTEL_TRACES_SAMPLER_ARG, value: "0.10" }
+            - { name: OTEL_PYTHON_LOG_CORRELATION, value: "true" }
+            - name: OTEL_PYTHON_LOG_FORMAT
+              value: "%(asctime)s level=%(levelname)s service=%(otelServiceName)s trace_id=%(otelTraceID)s span_id=%(otelSpanID)s logger=%(name)s msg=%(message)s"
+            - { name: LANGSMITH_TRACING, value: "false" }
+            - { name: LANGSMITH_HIDE_INPUTS, value: "true" }
+            - { name: LANGSMITH_HIDE_OUTPUTS, value: "true" }
+            - { name: LANGSMITH_HIDE_METADATA, value: "true" }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratsnest-temporal-worker
+  namespace: ratsnest
+spec:
+  template:
+    metadata:
+      annotations:
+        instrumentation.opentelemetry.io/inject-python: ratsnest-instrumentation
+    spec:
+      containers:
+        - name: worker
+          env:
+            - { name: OTEL_SERVICE_NAME, value: ratsnest-temporal-worker }
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: http://ratsnest-otel-collector:4318 }
+            - { name: OTEL_EXPORTER_OTLP_PROTOCOL, value: http/protobuf }
+            - { name: OTEL_TRACES_EXPORTER, value: otlp }
+            - { name: OTEL_METRICS_EXPORTER, value: otlp }
+            - { name: OTEL_LOGS_EXPORTER, value: otlp }
+            - { name: OTEL_PROPAGATORS, value: tracecontext,baggage }
+            - { name: OTEL_RESOURCE_ATTRIBUTES, value: service.namespace=ratsnest,deployment.environment=production }
+            - { name: OTEL_TRACES_SAMPLER, value: parentbased_traceidratio }
+            - { name: OTEL_TRACES_SAMPLER_ARG, value: "0.10" }
+            - { name: OTEL_PYTHON_LOG_CORRELATION, value: "true" }
+            - name: OTEL_PYTHON_LOG_FORMAT
+              value: "%(asctime)s level=%(levelname)s service=%(otelServiceName)s trace_id=%(otelTraceID)s span_id=%(otelSpanID)s logger=%(name)s msg=%(message)s"
+            - { name: LANGSMITH_TRACING, value: "false" }
+            - { name: LANGSMITH_HIDE_INPUTS, value: "true" }
+            - { name: LANGSMITH_HIDE_OUTPUTS, value: "true" }
+            - { name: LANGSMITH_HIDE_METADATA, value: "true" }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratsnest-kafka-audit-relay
+  namespace: ratsnest
+spec:
+  template:
+    metadata:
+      annotations:
+        instrumentation.opentelemetry.io/inject-python: ratsnest-instrumentation
+    spec:
+      containers:
+        - name: relay
+          env:
+            - { name: OTEL_SERVICE_NAME, value: ratsnest-kafka-audit-relay }
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: http://ratsnest-otel-collector:4318 }
+            - { name: OTEL_EXPORTER_OTLP_PROTOCOL, value: http/protobuf }
+            - { name: OTEL_TRACES_EXPORTER, value: otlp }
+            - { name: OTEL_METRICS_EXPORTER, value: otlp }
+            - { name: OTEL_LOGS_EXPORTER, value: otlp }
+            - { name: OTEL_PROPAGATORS, value: tracecontext,baggage }
+            - { name: OTEL_RESOURCE_ATTRIBUTES, value: service.namespace=ratsnest,deployment.environment=production }
+            - { name: OTEL_TRACES_SAMPLER, value: parentbased_traceidratio }
+            - { name: OTEL_TRACES_SAMPLER_ARG, value: "0.10" }
+            - { name: OTEL_PYTHON_LOG_CORRELATION, value: "true" }
+            - name: OTEL_PYTHON_LOG_FORMAT
+              value: "%(asctime)s level=%(levelname)s service=%(otelServiceName)s trace_id=%(otelTraceID)s span_id=%(otelSpanID)s logger=%(name)s msg=%(message)s"
+
