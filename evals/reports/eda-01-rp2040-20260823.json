@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "1.0",
+  "scope": "live_http_sse_agent_evaluation_not_manufacturing_approval",
+  "planId": "ratsnest-five-case-20260730-20260823-p2",
+  "planDigest": "e5b9939a1bad0726dfa2db5f63324f51af9dfc3d22a8a9b79d27359c6379fa52",
+  "sourceCommit": "b90710f83acf6693e032bcbb9f55b0e209a7f195",
+  "sourceDirty": false,
+  "createdAt": "2026-08-23T11:46:36.979856+00:00",
+  "cases": [
+    {
+      "caseId": "eda.01-rp2040-env-logger",
+      "category": "eda_pipeline",
+      "expectedTerminal": "completed",
+      "requestFingerprint": "f7721e4851d214c2a9eea019c3447ffe68f949ba60c16f1cfffdddbad7dd1753",
+      "observed": {
+        "httpStatus": 200,
+        "durationSeconds": 0.251,
+        "done": false,
+        "humanInput": true,
+        "errors": [],
+        "intent": "build",
+        "phases": [
+          "intent-router"
+        ],
+        "tools": [],
+        "completedSteps": 0,
+        "llmTokens": 0,
+        "deliveryStatus": null,
+        "artifacts": [],
+        "artifactsValid": true,
+        "eventDigest": "6581047c0a9a9d93461e7767ad6028c6250e6adbba8117dfc57ed274245bc296"
+      },
+      "replay": null,
+      "checks": {
+        "intent": true,
+        "requiredPhases": false,
+        "forbiddenPhases": true,
+        "requiredTools": true,
+        "forbiddenTools": true,
+        "terminal": false,
+        "artifacts": true,
+        "releaseGate": true,
+        "replay": true
+      },
+      "passed": false
+    }
+  ],
+  "metrics": {
+    "caseCount": 1,
+    "passedCases": 0,
+    "passRate": 0.0,
+    "intentAccuracy": 1.0,
+    "toolContractAccuracy": 1.0,
+    "gateAccuracy": 1.0,
+    "falseReleaseCount": 0,
+    "totalLlmTokens": 0,
+    "totalWallClockSeconds": 0.251
+  }
+}

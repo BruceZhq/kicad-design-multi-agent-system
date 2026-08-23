@@ -1,0 +1,111 @@
+{
+  "schemaVersion": "1.0",
+  "planId": "ratsnest-five-case-20260730-20260823-p2v2",
+  "cases": [
+    {
+      "caseId": "eda.01-rp2040-env-logger",
+      "category": "eda_pipeline",
+      "prompt": "请新建设计一块便携式环境数据记录板。\n\nproject_name：01-rp2040-env-logger-20260823-p2v2\nrun_name：01-rp2040-env-logger-20260823-p2v2-run\n\n这是新建设计任务，不是审查已有工程。请执行 Supervisor → Architect → Parts Specialist → Hardware Engineer → Reviewer → Supervisor 完整链路。Architect 先并行查询内部知识库、已验证 EHE 经验、KiCad 官方文档与容器中真实安装的符号/封装库，再查器件厂商官方数据手册。KiCad 文档用于库、文件、ERC/DRC 与 CLI；电气参数以厂商资料为准。\n\n主控必须是 RP2040，QFN-56。最小系统包含 12 MHz 晶振、外部 QSPI Flash（不少于 64 Mbit）、SWD、BOOTSEL、RESET、所有电源/VREG/去耦和官方推荐启动连接。\n\nUSB-C 作为 USB 2.0 Device、供电与下载接口：CC1/CC2 各自正确 Rd，D+/D− 串联电阻，真实双通道 ESD，VBUS 限流或保险，差分对目标 90 Ω。\n\n使用单节锂电池：JST-PH 接口、带 power-path 的充电管理、USB 与电池防反灌、稳定 3.3 V 系统电源、电池电压采样；给出充电电流、峰值功耗和续航估算，并控制静态漏电。\n\n数据与传感：microSD 使用 SPI；温湿度/气压传感器（BME280 或等效真实器件）；三轴加速度计（LIS3DH 或等效）；外部 I²C 接口；完整上拉、去耦和接口 ESD；QSPI、SD、传感器不得产生引脚冲突。包含电源、充电和用户 LED（均有限流）以及非悬空用户按键。\n\n优先双层板，最大 70 mm × 45 mm；USB、电池和 microSD 靠近板边；ESD 靠近接口；晶振、QSPI 与去耦靠近 RP2040；传感器远离充电器、稳压电感和热源；USB 保持连续参考面；提供安装孔；最小线宽/间距 0.15 mm，普通信号不小于 0.20 mm。\n\n必须使用真实 KiCad 符号和匹配封装。安装库没有专用条目时，可依据官方数据手册创建项目本地符号/封装并记录来源，禁止改值冒充器件。采购数据库不可用时如实标记，不得编造料号，也不得仅因此停止。\n\n完成完整 17 步并真实生成原理图、PCB、BOM、CPL、Gerber、钻孔、DSN、SES、ERC/DRC 和独立审查报告，真实执行 Freerouting。普通设计/ERC/DRC/布局风险不应提前阻止可继续的机械步骤，应产出可编辑草案并返回 completed_with_issues；只有执行环境、文件、工具或状态恢复有限重试后仍无法继续时才返回 execution_blocked；所有发布检查都通过才可返回 release_ready。\n\n固定评测决策：board outline 70 x 45 mm；每个用户按键使用外部 10 kOhm 上拉。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "supervisor"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": null,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 7200,
+      "agentConfig": {
+        "project_name": "01-rp2040-env-logger-20260823-p2v2",
+        "run_name": "01-rp2040-env-logger-20260823-p2v2-run"
+      }
+    },
+    {
+      "caseId": "eda.02-stm32g431-bldc",
+      "category": "eda_pipeline",
+      "prompt": "请新建设计一块 24 V 三相无刷直流电机控制板。\n\nproject_name：02-stm32g431-bldc-20260823-p2v2\nrun_name：02-stm32g431-bldc-20260823-p2v2-run\n\n执行完整多智能体链路。Architect 先查询内部知识、已验证经验、KiCad 官方文档与真实安装库，再查询 ST、栅极驱动器、CAN 收发器、MOSFET 和电源芯片的官方资料与参考设计。\n\n主控必须为 STM32G431CBT6、LQFP-48。输入 18–30 V（24 V 标称），连续相电流目标 5 A、短时峰值 10 A；三相半桥驱动 BLDC，本任务不要求固件。\n\n输入包括保险、反接保护、适合 24 V 工业输入并留裕量的 TVS、EMI 滤波、低 ESR bulk capacitor；说明额定值、浪涌裕量和纹波依据。电源为 24 V→5 V 开关电源和 5 V→3.3 V，给出栅极驱动、MCU、CAN 与逻辑功耗预算，电感、电容、反馈与补偿按数据手册实现。\n\n三相功率级采用适合 24 V 的真实三相栅极驱动器（DRV8353RS 或经验证等效器件）、六颗有耐压/电流裕量的 N-MOS；每桥臂包含栅极电阻、下拉和 bootstrap。包含三路低侧分流电阻与电流采样、Kelvin 连接、母线电压采样和 NTC 温度采样；给出分流功耗及采样满量程计算。\n\nMCU 包含外部晶振、NRST、BOOT0、Cortex SWD、独立去耦；ADC、PWM 定时器、SPI 栅极驱动和故障输入不得冲突。通信采用 3.3 V 兼容 CAN FD 收发器（MCP2562FD 或等效），CANH/L 双通道保护、可选共模扼流圈、跳线选择 120 Ω；另有编码器、三路 Hall、外部 ENABLE、速度/PWM 命令与故障输出。\n\n四层板，最大 80 mm × 60 mm，L2 连续 GND；连接器靠板边；高电流回路最小；驱动与 bootstrap 靠近 MOSFET；Kelvin 采样避开开关节点；MCU/晶振/模拟远离相节点；高电流铜宽、温升、过孔阵列和散热铜/热过孔需有依据；普通信号 ≥0.20 mm，最小间距 ≥0.15 mm。Freerouting 不能替代高电流铜区与热设计人工复核。\n\n所有器件必须有真实或项目本地可追溯的符号/封装且引脚焊盘兼容，不得改值冒充。完整执行 17 步，生成 KiCad、BOM/CPL、Gerber/钻孔、DSN/SES、ERC/DRC 和 Reviewer 报告。无法精确验证的热与大电流内容列为人工复核，不虚假通过；普通问题继续生成 completed_with_issues 草案；AHE/EHE 仅处理 Harness、工具与状态恢复缺陷并遵守有限预算。\n\n固定评测决策：board outline 80 x 60 mm；使用四个非电镀 M3 安装孔。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "supervisor"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": null,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 7200,
+      "agentConfig": {
+        "project_name": "02-stm32g431-bldc-20260823-p2v2",
+        "run_name": "02-stm32g431-bldc-20260823-p2v2-run"
+      }
+    },
+    {
+      "caseId": "eda.03-esp32c3-isolated-gateway",
+      "category": "eda_pipeline",
+      "prompt": "请新建设计一块 Wi-Fi 与隔离 Modbus/RS485 工业网关。\n\nproject_name：03-esp32c3-isolated-gateway-20260823-p2v2\nrun_name：03-esp32c3-isolated-gateway-20260823-p2v2-run\n\n执行完整多智能体链路。Architect 同时查内部知识库、已验证经验、KiCad 官方资料和实际符号/封装库，再查 Espressif、隔离收发器、电源、保护和接口器件官方资料。\n\n主控模块必须使用 ESP32-C3-WROOM-02U（外接天线版本），不得以其他 ESP32 改名替代。板卡输入为 9–24 V DC，包含保险、反接保护、TVS、EMI 滤波，转换为 5 V 和 3.3 V；USB-C VBUS 也可调试供电，外部电源优先且两路不得反灌；给出 Wi-Fi 峰值、隔离 RS485、继电器和传感器同时工作功耗预算。\n\nUSB-C 用于 USB 2.0 Device/调试：CC1/CC2 独立 Rd、D+/D− 串联电阻、双通道 ESD、BOOT/RESET 和可靠下载连接，差分对目标 90 Ω。\n\n提供两路相互独立的半双工隔离 RS485，每路逻辑侧 3.3 V，隔离耐压目标不少于 1 kVrms；若收发器不含隔离电源，配置独立隔离 DC/DC。每一路总线地与逻辑 GND 分离，A/B 有真实保护、跳线终端和偏置，提供 A/B/隔离地端子；两路隔离域不得互相或与系统 GND 意外合并，PCB 标出隔离带及爬电间距。\n\n增加两个 24 V 继电器/高边开关输出，MCU 通过晶体管或驱动器控制，包含线圈/感性负载钳位并保证 GPIO 不承受 24 V。增加一颗 I²C 温湿度传感器、外部 I²C 接口和 SPI NOR Flash（至少 64 Mbit）；所有上拉、去耦、片选与中断完整，无启动绑带冲突。\n\n四层板，最大 90 mm × 60 mm；电源、RS485、USB 和输出端子靠板边；ESP32 天线使用 U.FL，不得在射频馈线/连接器附近布置噪声源；两个隔离区不可被铜、走线、孔或丝印跨越；开关电源远离 RF 和隔离边界；ESD 靠近连接器；四个安装孔；普通信号 ≥0.20 mm、最小间距 ≥0.15 mm。阻抗与爬电距离无法由工具充分验证时明确列为板厂/安规复核。\n\n使用真实库条目；缺少专用隔离器件时允许依据官方资料创建项目本地条目并记录来源，禁止改名冒充。采购不可用不应单独阻止制图。完整跑 17 步并生成原理图、PCB、BOM/CPL、Gerber/钻孔、DSN/SES、ERC/DRC 和独立 Reviewer。可恢复的设计问题应继续产出 completed_with_issues；只有真实执行障碍才是 execution_blocked。\n\n固定评测决策：board outline 90 x 60 mm。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "supervisor"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": null,
+      "profileReference": "radio-control-monitor@1.0",
+      "timeoutSeconds": 7200,
+      "agentConfig": {
+        "project_name": "03-esp32c3-isolated-gateway-20260823-p2v2",
+        "run_name": "03-esp32c3-isolated-gateway-20260823-p2v2-run"
+      }
+    },
+    {
+      "caseId": "eda.04-nrf52840-motion-beacon",
+      "category": "eda_pipeline",
+      "prompt": "请新建设计一块低功耗 BLE 运动与环境信标。\n\nproject_name：04-nrf52840-motion-beacon-20260823-p2v2\nrun_name：04-nrf52840-motion-beacon-20260823-p2v2-run\n\n执行完整多智能体链路。Architect 并行查内部知识库、验证经验、KiCad 官方文档与容器真实库，再查 Nordic nRF52840 官方参考设计、USB、射频匹配、充电器、传感器和电量计资料。\n\n主控必须为 nRF52840-QIAA、QFN-73，不得换成模块或其他 nRF52 后改名。若官方 KiCad 安装库没有精确条目，应根据 Nordic 官方引脚表与推荐 land pattern 建立项目本地符号和封装，保留来源、引脚/焊盘映射与校验记录，而不是立即放弃。\n\n最小系统包含 32 MHz HFXO、32.768 kHz LFXO、SWD、RESET、用户按键，所有 DEC、电源、USB、DC/DC 支持元件和独立去耦按 Nordic 参考设计连接。\n\n使用单节 LiPo、USB-C 5 V 充电和 USB 2.0 Device，包含输入保护、电池保护策略、合理充电器、低功耗系统电源及 MAX17048 或真实等效电量计；给出广播、采样、USB 三状态功耗估算；D+/D−、CC、ESD 完整。\n\n传感器包括低功耗六轴 IMU（优先 SPI）、低功耗温湿度传感器（I²C）、传感器中断和外部 I²C；上拉值兼顾速度与功耗。射频采用真实 2.4 GHz 芯片天线或 Nordic 参考 PCB 天线，预留 π 匹配、50 Ω 馈线、天线 keepout 和参考地；可有 U.FL 测试选项但不能同时连接两副天线。无法精确验证阻抗时列入叠层/VNA 人工复核。\n\n包含可由 MCU 关闭的充电/用户 LED，以及小型振动马达接口、晶体管/MOSFET 驱动和感性浪涌处理。\n\n四层板，最大 45 mm × 35 mm，L2 连续地；天线位于板边且 keepout 无铜/线/器件/孔；IMU 靠近板中心并远离振动马达和开关电源；晶振、匹配、去耦紧邻引脚；USB/电池靠板边；两个安装孔；普通信号 ≥0.15 mm。\n\n完整执行 17 步并生成 KiCad、BOM/CPL、Gerber/钻孔、DSN/SES、ERC/DRC 和独立审查。射频、天线调谐和机械风险必须诚实标注，但不应阻止生成可编辑 PCB；普通问题返回 completed_with_issues；只有 Harness/工具执行有限重试后仍无法继续才返回 execution_blocked。\n\n固定评测决策：board outline 45 x 35 mm；用户按键使用外部 10 kOhm 上拉。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "supervisor"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": null,
+      "profileReference": "radio-control-monitor@1.0",
+      "timeoutSeconds": 7200,
+      "agentConfig": {
+        "project_name": "04-nrf52840-motion-beacon-20260823-p2v2",
+        "run_name": "04-nrf52840-motion-beacon-20260823-p2v2-run"
+      }
+    },
+    {
+      "caseId": "eda.05-stm32f072-usb-midi",
+      "category": "eda_pipeline",
+      "prompt": "请新建设计一块桌面 USB-MIDI 与 DIN-MIDI 控制面板主板。\n\nproject_name：05-stm32f072-usb-midi-20260823-p2v2\nrun_name：05-stm32f072-usb-midi-20260823-p2v2-run\n\n执行 Supervisor → Architect → Parts Specialist → Hardware Engineer → Reviewer → Supervisor 完整链路。Architect 先查询内部知识、验证经验、KiCad 官方资料和真实安装库，再查询 ST、USB Type-C、MIDI 官方电气规范及相关器件资料。\n\n主控必须是 STM32F072CBT6、LQFP-48。USB 5 V 供电，经低噪声 3.3 V 稳压；包含 USB 输入保护、bulk 与独立去耦、8 MHz 晶振、NRST、BOOT0、Cortex SWD，VDDA 正确滤波。\n\nUSB-C 为 USB 2.0 Device/USB MIDI：CC1/CC2 独立 Rd、D+/D− 串联电阻和双通道 ESD，PCB 目标 90 Ω 差分阻抗。\n\n控制输入包括 16 个独立按键组成 4×4 扫描矩阵，每键有隔离二极管避免 ghosting；4 个旋转编码器（A/B 两相）；4 路外部 10 kΩ 线性推子接口，每路具有 ADC 限流、RC 滤波和过压保护，并计算截止频率与最大 ADC 电压；所有数字输入明确上拉/下拉。\n\n提供标准 DIN-5 MIDI IN，使用 6N137 或验证等效高速光耦，输入限流/保护和输出上拉符合 MIDI 电气规范；提供一路 DIN-5 MIDI OUT，依据 3.3 V 驱动计算输出电流与限流；IN/OUT 不得错误互连。另有 I²C OLED 接口及上拉，电源/USB/用户 LED 均有限流。\n\nUSB、SWD、晶振、矩阵、4 个编码器、4 ADC、MIDI UART 和 I²C 不得冲突；输出可审查的 MCU 引脚分配表，不得删除功能解决冲突。\n\n双层板，最大 160 mm × 70 mm；DIN、USB、推子接口靠相应板边；16 按键按 4×4 网格布局，编码器位于操作区；矩阵线避免长距离平行经过 ADC；ESD 靠近 USB；晶振与去耦靠近 MCU；模拟和 USB 回流连续；四个安装孔；最小线宽/间距 0.15 mm，普通线 ≥0.20 mm。\n\n器件使用真实 KiCad 条目或官方资料建立的项目本地条目，禁止无关器件改名。库存不可用时如实记录。完整执行 17 步并生成原理图、PCB、BOM、CPL、Gerber、钻孔、DSN、SES、ERC/DRC 和 Reviewer 报告。普通连接/布局/DRC 问题应在尽可能完成产物后标记 completed_with_issues，不能在第 3/4 步提前停止；只有真实执行障碍才返回 execution_blocked。\n\n固定评测决策：board outline 160 x 70 mm；按键矩阵输入行使用外部 10 kOhm 上拉。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "supervisor"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": null,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 7200,
+      "agentConfig": {
+        "project_name": "05-stm32f072-usb-midi-20260823-p2v2",
+        "run_name": "05-stm32f072-usb-midi-20260823-p2v2-run"
+      }
+    }
+  ]
+}

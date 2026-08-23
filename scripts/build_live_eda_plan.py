@@ -14,6 +14,22 @@ _PROFILES = {
     "05-stm32f072-usb-midi": "site-control-telemetry@1.1",
 }
 
+_FIXED_DECISIONS = {
+    "01-rp2040-env-logger": (
+        "固定评测决策：board outline 70 x 45 mm；每个用户按键使用外部 10 kOhm 上拉。"
+    ),
+    "02-stm32g431-bldc": (
+        "固定评测决策：board outline 80 x 60 mm；使用四个非电镀 M3 安装孔。"
+    ),
+    "03-esp32c3-isolated-gateway": "固定评测决策：board outline 90 x 60 mm。",
+    "04-nrf52840-motion-beacon": (
+        "固定评测决策：board outline 45 x 35 mm；用户按键使用外部 10 kOhm 上拉。"
+    ),
+    "05-stm32f072-usb-midi": (
+        "固定评测决策：board outline 160 x 70 mm；按键矩阵输入行使用外部 10 kOhm 上拉。"
+    ),
+}
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -34,6 +50,7 @@ def main() -> int:
         run_name = f"{project_name}-run"
         prompt = raw["prompt"].replace(raw["run_name"], run_name)
         prompt = prompt.replace(raw["project_name"], project_name)
+        prompt = f"{prompt}\n\n{_FIXED_DECISIONS[case_id]}"
         cases.append(
             {
                 "caseId": f"eda.{case_id}",
