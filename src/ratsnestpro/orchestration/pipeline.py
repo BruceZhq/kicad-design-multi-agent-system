@@ -15204,6 +15204,7 @@ def restore_pipeline_state(
         if (
             saved_errors is not None
             and saved_errors != _current_error_signatures(current_checks)
+            and (not artifact_first or execution_invalid)
         ):
             state.artifacts.pop(expected, None)
             state.resume_candidates[expected] = (

@@ -98,6 +98,26 @@ _AHE_RECORD_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 RunRecordLike = RunRecord | RunHandle
 
 
+def _effective_run_timeout_seconds(
+    requested_timeout: float | None,
+    agent_id: str,
+) -> float | None:
+    """Keep the HTTP run owner alive for the full durable workflow lifetime."""
+
+    if agent_id != "ratsnestpro-multi-agent" or not settings.RATSNESTPRO_TEMPORAL_ENABLED:
+        return requested_timeout
+    temporal_deadline = (
+        settings.RATSNESTPRO_TEMPORAL_WORKFLOW_TIMEOUT_SECONDS
+        + 300
+        + settings.RATSNESTPRO_TEMPORAL_GRACEFUL_SHUTDOWN_SECONDS
+    )
+    return max(
+        float(requested_timeout or 0),
+        float(settings.RUN_TIMEOUT_SECONDS),
+        float(temporal_deadline),
+    )
+
+
 def _create_run_registry() -> RunRegistry | RedisRunRegistry:
     common: dict[str, Any] = {
         "max_concurrent": settings.MAX_CONCURRENT_RUNS,
@@ -655,7 +675,10 @@ async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMe
             agent_id=agent_id,
             thread_id=thread_id,
             user_id=owner_id,
-            timeout_seconds=user_input.timeout_seconds,
+            timeout_seconds=_effective_run_timeout_seconds(
+                user_input.timeout_seconds,
+                agent_id,
+            ),
             producer=producer,
         )
     except (RunConflictError, RunOverloadedError, RunAccessError) as exc:
@@ -930,7 +953,10 @@ async def stream(user_input: StreamInput, agent_id: str = DEFAULT_AGENT) -> Stre
             agent_id=agent_id,
             thread_id=thread_id,
             user_id=owner_id,
-            timeout_seconds=user_input.timeout_seconds,
+            timeout_seconds=_effective_run_timeout_seconds(
+                user_input.timeout_seconds,
+                agent_id,
+            ),
             producer=producer,
         )
     except (RunConflictError, RunOverloadedError, RunAccessError) as exc:

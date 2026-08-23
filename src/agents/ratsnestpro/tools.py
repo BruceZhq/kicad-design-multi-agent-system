@@ -323,6 +323,34 @@ def _pipeline_steps(state: PipelineState) -> list[dict[str, Any]]:
     ]
 
 
+class PipelineCheckpointRegressionError(RuntimeError):
+    """Raised when a stale Activity tries to overwrite newer committed work."""
+
+
+def _reject_same_revision_checkpoint_regression(
+    path: Path,
+    payload: dict[str, Any],
+) -> None:
+    if not path.is_file():
+        return
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return
+    same_revision = (
+        current.get("project_name") == payload.get("project_name")
+        and current.get("requirement_contract") == payload.get("requirement_contract")
+        and int(current.get("revision", 0)) == int(payload.get("revision", 0))
+    )
+    current_steps = int(current.get("completed_steps", 0))
+    next_steps = int(payload.get("completed_steps", 0))
+    if same_revision and next_steps < current_steps:
+        raise PipelineCheckpointRegressionError(
+            "refusing to move pipeline checkpoint backwards from "
+            f"{current_steps} to {next_steps} in revision {payload.get('revision', 0)}"
+        )
+
+
 def _write_pipeline_state(
     path: Path,
     requirement: str,
@@ -370,6 +398,7 @@ def _write_pipeline_state(
             else None
         ),
     }
+    _reject_same_revision_checkpoint_regression(path, payload)
     temporary = path.with_suffix(f"{path.suffix}.tmp")
     temporary.write_text(_json(payload), encoding="utf-8")
     temporary.replace(path)

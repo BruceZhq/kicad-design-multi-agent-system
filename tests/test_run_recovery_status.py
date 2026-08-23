@@ -9,6 +9,7 @@ from service.grpc_runtime import _run_message
 from service.redis_run_registry import RedisRunRegistry, _done_delivery_action
 from service.run_registry import RunRegistry
 from service.run_ui_snapshot import build_ui_snapshot
+from service.service import _effective_run_timeout_seconds
 
 
 class _RedisStatusFake:
@@ -135,6 +136,28 @@ def test_memory_execution_is_live_but_never_durable_recoverable() -> None:
     assert status.recoverable is False
     assert status.lease_expires_at is None
     assert status.checked_at <= datetime.now(UTC)
+
+
+def test_temporal_hardware_run_outlives_the_workflow_deadline(monkeypatch) -> None:
+    from core import settings
+
+    monkeypatch.setattr(settings, "RATSNESTPRO_TEMPORAL_ENABLED", True)
+    monkeypatch.setattr(settings, "RATSNESTPRO_TEMPORAL_WORKFLOW_TIMEOUT_SECONDS", 36_000)
+    monkeypatch.setattr(settings, "RATSNESTPRO_TEMPORAL_GRACEFUL_SHUTDOWN_SECONDS", 30)
+
+    assert _effective_run_timeout_seconds(
+        7_200,
+        "ratsnestpro-multi-agent",
+    ) == 36_330
+
+
+def test_non_temporal_run_preserves_requested_timeout(monkeypatch) -> None:
+    from core import settings
+
+    monkeypatch.setattr(settings, "RATSNESTPRO_TEMPORAL_ENABLED", False)
+
+    assert _effective_run_timeout_seconds(7_200, "ratsnestpro-multi-agent") == 7_200
+    assert _effective_run_timeout_seconds(90, "another-agent") == 90
 
 
 def test_recovered_segment_skips_historical_done_and_delivers_later_events() -> None:
