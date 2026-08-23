@@ -54,6 +54,41 @@ The dashboard JSON is a checked-in query contract, not proof that a cluster has
 emitted data. Release evidence still requires a real trace, metric discovery,
 collector restart recovery, and backend reachability in the target environment.
 
+For local verification, reuse the existing Compose project and add the opt-in
+Collector profile:
+
+```bash
+RATSNEST_OBSERVABILITY_ENABLED=true docker compose \
+  --profile control-plane --profile identity --profile artifact-store \
+  --profile observability up -d --build
+```
+
+The Collector exposes Prometheus metrics only on `127.0.0.1:9464`; traces remain
+in the Collector debug exporter so a local run does not require a second backend
+or a new persistent volume.
+
+## Live HTTP/SSE evaluation
+
+The versioned plan in `evals/live/cases.v1.json` contains 30 synthetic cases in
+six categories: intent routing, RAG grounding, tool orchestration, release gates,
+recovery/idempotency, and prompt injection. It calls the deployed Agent rather
+than replaying fixtures:
+
+```bash
+PYTHONPATH=src uv run --frozen python -m evolution.live_runner \
+  --output evals/reports/live-agent-eval.json \
+  --min-pass-rate 0.85 \
+  --max-false-release-count 0
+```
+
+Run one case during diagnosis with `--case intent.unsupported`. The JSON and
+Markdown reports contain only bounded facts such as intent, phase and tool names,
+terminal state, duration, token count, artifact name/hash/validity, and a digest
+of sanitized events. They do not retain prompts, model responses, reasoning,
+credentials, user identities, or local paths. Each report binds the plan digest
+and Git commit; `sourceDirty: true` means it is diagnostic rather than release
+evidence.
+
 ## Offline deterministic evaluation
 
 Each evaluation suite hashes its case manifests. Each manifest now also hashes
@@ -91,7 +126,7 @@ therefore fails the Python job rather than becoming a README-only claim.
 
 ## Evidence scope
 
-The committed public report replays three sanitized holdout/adversarial cases.
+The committed public recorded report replays three sanitized holdout/adversarial cases.
 It proves the evaluator, content-addressing, tool contract, and fail-closed gate
 against those fixtures. It does not prove live LLM quality, latency, Kubernetes
 availability, KiCad correctness, or manufacturability. The separate five-case E2E

@@ -1,4 +1,14 @@
 services:
+  otel-collector:
+    profiles: [observability]
+    image: otel/opentelemetry-collector-contrib:0.123.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    ports:
+      - "127.0.0.1:9464:9464"
+    volumes:
+      - ./deploy/compose/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    restart: unless-stopped
+
   postgres:
     image: pgvector/pgvector:pg16
     ports:
@@ -274,6 +284,10 @@ services:
           - agent-service
     environment:
       - MODE=${MODE:-development}
+      - RATSNEST_OBSERVABILITY_ENABLED=${RATSNEST_OBSERVABILITY_ENABLED:-false}
+      - OTEL_SERVICE_NAME=ratsnest-agent-service
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      - OTEL_METRIC_EXPORT_INTERVAL=${OTEL_METRIC_EXPORT_INTERVAL:-5000}
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
       - POSTGRES_HOST=postgres
@@ -396,6 +410,10 @@ services:
       - ./privatecredentials:/privatecredentials
       - ./data/ratsnestpro:/data/ratsnestpro
     environment:
+      - RATSNEST_OBSERVABILITY_ENABLED=${RATSNEST_OBSERVABILITY_ENABLED:-false}
+      - OTEL_SERVICE_NAME=ratsnest-temporal-worker
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      - OTEL_METRIC_EXPORT_INTERVAL=${OTEL_METRIC_EXPORT_INTERVAL:-5000}
       - REDIS_URL=redis://:${REDIS_PASSWORD:-ratsnest-local-redis}@redis:6379/0
       - REDIS_KEY_PREFIX=${REDIS_KEY_PREFIX:-ratsnest}
       - RATSNESTPRO_LLM_STREAM_ENABLED=${RATSNESTPRO_LLM_STREAM_ENABLED:-true}

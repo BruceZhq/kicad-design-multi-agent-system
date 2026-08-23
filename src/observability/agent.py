@@ -15,6 +15,10 @@ from typing import Any
 from opentelemetry import metrics, trace
 from opentelemetry.trace import Status, StatusCode
 
+from observability.bootstrap import configure_local_sdk
+
+configure_local_sdk()
+
 _INSTRUMENTATION_NAME = "kicad-design-multi-agent-system"
 _TRACER = trace.get_tracer(_INSTRUMENTATION_NAME)
 _METER = metrics.get_meter(_INSTRUMENTATION_NAME)

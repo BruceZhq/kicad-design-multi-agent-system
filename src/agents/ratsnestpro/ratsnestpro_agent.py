@@ -604,6 +604,16 @@ async def _call_json_with_retry(
             attempts=attempts_used,
             duration_seconds=monotonic() - started,
         )
+        _workflow_event(
+            phase,
+            "tool_completed",
+            attempt=attempts_used,
+            attributes={
+                "event_type": "tool_call",
+                "tool": tool,
+                "outcome": outcome,
+            },
+        )
 
 
 def _message_text(message: Any) -> str:
@@ -1674,6 +1684,11 @@ async def initialize(
         "intent-router",
         "completed",
         detail=f"{intent.primary_intent} ({intent.confidence:.2f})",
+        attributes={
+            "event_type": "intent_decision",
+            "intent": intent.primary_intent,
+            "needs_clarification": intent.needs_clarification,
+        },
     )
     if team_members:
         _workflow_event(
