@@ -66,6 +66,35 @@ def test_release_gate_can_be_observed_without_preassigned_outcome() -> None:
     }
 
     assert _grade(case, observed, None)["releaseGate"] is True
+    assert _grade(case, observed, None)["edaPipeline"] is False
+
+
+def test_eda_pipeline_requires_full_steps_and_core_artifacts() -> None:
+    case = _case(
+        caseId="eda.full-pipeline",
+        category="eda_pipeline",
+        expectedIntents=["build"],
+        expectReleaseReady=None,
+    )
+    observed = {
+        "httpStatus": 200,
+        "done": True,
+        "humanInput": False,
+        "errors": [],
+        "intent": "build",
+        "phases": [],
+        "tools": [],
+        "completedSteps": 17,
+        "deliveryStatus": "completed_with_issues",
+        "artifacts": [
+            {"name": "pipeline_result.json"},
+            {"name": "board.kicad_sch"},
+            {"name": "board.kicad_pcb"},
+        ],
+        "artifactsValid": True,
+    }
+
+    assert _grade(case, observed, None)["edaPipeline"] is True
 
 
 def test_local_artifact_digest_is_recomputed(tmp_path: Path) -> None:

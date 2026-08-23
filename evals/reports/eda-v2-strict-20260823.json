@@ -1,0 +1,158 @@
+{
+  "schemaVersion": "1.0",
+  "scope": "strict_17_step_eda_regrade",
+  "createdAt": "2026-08-23T14:42:19.018175+00:00",
+  "planId": "ratsnest-five-case-20260730-20260823-p2v2",
+  "criteria": {
+    "completedSteps": 17,
+    "acceptedDeliveryStatuses": [
+      "completed_with_issues",
+      "delivered_with_issues",
+      "release_ready"
+    ],
+    "requiredArtifacts": [
+      "pipeline_result.json",
+      ".kicad_sch",
+      ".kicad_pcb"
+    ]
+  },
+  "metrics": {
+    "caseCount": 5,
+    "strictPassedCases": 0,
+    "strictPassRate": 0.0,
+    "rawFalsePassCount": 3
+  },
+  "cases": [
+    {
+      "caseId": "eda.01-rp2040-env-logger",
+      "sourceReport": "evals/reports/eda-v2-01-rp2040-20260823.json",
+      "rawPassed": false,
+      "strictPassed": false,
+      "checks": {
+        "intent": true,
+        "requiredPhases": false,
+        "forbiddenPhases": true,
+        "requiredTools": true,
+        "forbiddenTools": true,
+        "terminal": false,
+        "artifacts": true,
+        "releaseGate": true,
+        "edaPipeline": false,
+        "replay": true
+      },
+      "observed": {
+        "completedSteps": 8,
+        "deliveryStatus": null,
+        "durationSeconds": 7199.77,
+        "artifactNames": [],
+        "artifactsValid": true
+      }
+    },
+    {
+      "caseId": "eda.02-stm32g431-bldc",
+      "sourceReport": "evals/reports/eda-v2-02-stm32g431-20260823.json",
+      "rawPassed": false,
+      "strictPassed": false,
+      "checks": {
+        "intent": true,
+        "requiredPhases": false,
+        "forbiddenPhases": true,
+        "requiredTools": true,
+        "forbiddenTools": true,
+        "terminal": false,
+        "artifacts": true,
+        "releaseGate": true,
+        "edaPipeline": false,
+        "replay": true
+      },
+      "observed": {
+        "completedSteps": 6,
+        "deliveryStatus": null,
+        "durationSeconds": 7204.879,
+        "artifactNames": [],
+        "artifactsValid": true
+      }
+    },
+    {
+      "caseId": "eda.03-esp32c3-isolated-gateway",
+      "sourceReport": "evals/reports/eda-v2-03-esp32c3-20260823.json",
+      "rawPassed": true,
+      "strictPassed": false,
+      "checks": {
+        "intent": true,
+        "requiredPhases": true,
+        "forbiddenPhases": true,
+        "requiredTools": true,
+        "forbiddenTools": true,
+        "terminal": true,
+        "artifacts": true,
+        "releaseGate": true,
+        "edaPipeline": false,
+        "replay": true
+      },
+      "observed": {
+        "completedSteps": 3,
+        "deliveryStatus": "execution_blocked",
+        "durationSeconds": 3777.21,
+        "artifactNames": [
+          "pipeline_state.json"
+        ],
+        "artifactsValid": true
+      }
+    },
+    {
+      "caseId": "eda.04-nrf52840-motion-beacon",
+      "sourceReport": "evals/reports/eda-v2-04-nrf52840-20260823.json",
+      "rawPassed": true,
+      "strictPassed": false,
+      "checks": {
+        "intent": true,
+        "requiredPhases": true,
+        "forbiddenPhases": true,
+        "requiredTools": true,
+        "forbiddenTools": true,
+        "terminal": true,
+        "artifacts": true,
+        "releaseGate": true,
+        "edaPipeline": false,
+        "replay": true
+      },
+      "observed": {
+        "completedSteps": 3,
+        "deliveryStatus": "execution_blocked",
+        "durationSeconds": 3747.294,
+        "artifactNames": [
+          "pipeline_state.json"
+        ],
+        "artifactsValid": true
+      }
+    },
+    {
+      "caseId": "eda.05-stm32f072-usb-midi",
+      "sourceReport": "evals/reports/eda-v2-05-stm32f072-20260823.json",
+      "rawPassed": true,
+      "strictPassed": false,
+      "checks": {
+        "intent": true,
+        "requiredPhases": true,
+        "forbiddenPhases": true,
+        "requiredTools": true,
+        "forbiddenTools": true,
+        "terminal": true,
+        "artifacts": true,
+        "releaseGate": true,
+        "edaPipeline": false,
+        "replay": true
+      },
+      "observed": {
+        "completedSteps": 5,
+        "deliveryStatus": "execution_blocked",
+        "durationSeconds": 7640.374,
+        "artifactNames": [
+          "pipeline_state.json"
+        ],
+        "artifactsValid": true
+      }
+    }
+  ]
+}

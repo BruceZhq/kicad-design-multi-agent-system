@@ -1,0 +1,80 @@
+{
+  "schemaVersion": "1.0",
+  "scope": "live_http_sse_agent_evaluation_not_manufacturing_approval",
+  "planId": "ratsnest-five-case-20260730-20260823-p2v2",
+  "planDigest": "559a7b736ca8a73cd9cc53ffe217ed77e9be618169a6abd63e3292992d83d31f",
+  "sourceCommit": "f3a1646d0fffb0e13f24d81cb598310403ee4d6d",
+  "sourceDirty": false,
+  "createdAt": "2026-08-23T13:11:26.779704+00:00",
+  "cases": [
+    {
+      "caseId": "eda.03-esp32c3-isolated-gateway",
+      "category": "eda_pipeline",
+      "expectedTerminal": "completed",
+      "requestFingerprint": "f848050399eef9a7971ce1fef5771b2a5ab6dd89c92d97ef1c4ecfaa6882bcbc",
+      "observed": {
+        "httpStatus": 200,
+        "durationSeconds": 3777.21,
+        "done": true,
+        "humanInput": false,
+        "errors": [],
+        "intent": "build",
+        "phases": [
+          "intent-router",
+          "architect",
+          "parts-specialist",
+          "hardware-engineer:dispatch",
+          "hardware-engineer:wait",
+          "hardware-engineer:temporal",
+          "hardware-engineer",
+          "supervisor"
+        ],
+        "tools": [
+          "fetch_datasheet",
+          "ratsnest_lookup_kicad_symbol",
+          "ratsnest_search_internal_knowledge",
+          "ratsnest_search_parts",
+          "ratsnest_temporal_hardware_workflow",
+          "web_search",
+          "web_search_kicad_official_docs"
+        ],
+        "completedSteps": 3,
+        "llmTokens": 242290,
+        "deliveryStatus": "execution_blocked",
+        "artifacts": [
+          {
+            "name": "pipeline_state.json",
+            "sha256": "fd29dbafe531ca79ca788a308e438f6644b48e8be8005d9ceebaefd3942852b7",
+            "valid": true
+          }
+        ],
+        "artifactsValid": true,
+        "eventDigest": "bbb82f5512363f49074fa5e0301f7386b8b56b1efd4c26ebf52ce9d976737233"
+      },
+      "replay": null,
+      "checks": {
+        "intent": true,
+        "requiredPhases": true,
+        "forbiddenPhases": true,
+        "requiredTools": true,
+        "forbiddenTools": true,
+        "terminal": true,
+        "artifacts": true,
+        "releaseGate": true,
+        "replay": true
+      },
+      "passed": true
+    }
+  ],
+  "metrics": {
+    "caseCount": 1,
+    "passedCases": 1,
+    "passRate": 1.0,
+    "intentAccuracy": 1.0,
+    "toolContractAccuracy": 1.0,
+    "gateAccuracy": 1.0,
+    "falseReleaseCount": 0,
+    "totalLlmTokens": 242290,
+    "totalWallClockSeconds": 3777.21
+  }
+}

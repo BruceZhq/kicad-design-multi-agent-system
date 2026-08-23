@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "1.0",
+  "scope": "live_http_sse_agent_evaluation_not_manufacturing_approval",
+  "planId": "ratsnest-five-case-20260730-20260823-p2v2",
+  "planDigest": "559a7b736ca8a73cd9cc53ffe217ed77e9be618169a6abd63e3292992d83d31f",
+  "sourceCommit": "f3a1646d0fffb0e13f24d81cb598310403ee4d6d",
+  "sourceDirty": false,
+  "createdAt": "2026-08-23T13:50:06.540610+00:00",
+  "cases": [
+    {
+      "caseId": "eda.02-stm32g431-bldc",
+      "category": "eda_pipeline",
+      "expectedTerminal": "completed",
+      "requestFingerprint": "ed4d9c7834cb978d2aa66a64006255242f0fc1903482a81487607596c0541346",
+      "observed": {
+        "httpStatus": 200,
+        "durationSeconds": 7204.879,
+        "done": false,
+        "humanInput": false,
+        "errors": [
+          "agent_stream_error"
+        ],
+        "intent": "build",
+        "phases": [
+          "intent-router",
+          "architect",
+          "parts-specialist",
+          "hardware-engineer:dispatch",
+          "hardware-engineer:wait",
+          "hardware-engineer:temporal"
+        ],
+        "tools": [
+          "fetch_datasheet",
+          "ratsnest_lookup_kicad_symbol",
+          "ratsnest_search_internal_knowledge",
+          "ratsnest_search_parts",
+          "web_search",
+          "web_search_kicad_official_docs"
+        ],
+        "completedSteps": 6,
+        "llmTokens": 685011,
+        "deliveryStatus": null,
+        "artifacts": [],
+        "artifactsValid": true,
+        "eventDigest": "d9aa2ba1582fe07c5e1ec4517ac5004288a00fdccb1af66cf2406f16a6e3dca8"
+      },
+      "replay": null,
+      "checks": {
+        "intent": true,
+        "requiredPhases": false,
+        "forbiddenPhases": true,
+        "requiredTools": true,
+        "forbiddenTools": true,
+        "terminal": false,
+        "artifacts": true,
+        "releaseGate": true,
+        "replay": true
+      },
+      "passed": false
+    }
+  ],
+  "metrics": {
+    "caseCount": 1,
+    "passedCases": 0,
+    "passRate": 0.0,
+    "intentAccuracy": 1.0,
+    "toolContractAccuracy": 1.0,
+    "gateAccuracy": 1.0,
+    "falseReleaseCount": 0,
+    "totalLlmTokens": 685011,
+    "totalWallClockSeconds": 7204.879
+  }
+}

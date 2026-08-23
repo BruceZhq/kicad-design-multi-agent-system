@@ -323,6 +323,25 @@ def _grade(
     )
     if release_ready:
         release_ok = release_ok and bool(observed["artifacts"]) and observed["artifactsValid"]
+    eda_pipeline_ok = True
+    if case.category == "eda_pipeline":
+        required_eda_artifacts = (
+            "pipeline_result.json",
+            ".kicad_sch",
+            ".kicad_pcb",
+        )
+        completed_steps = observed.get("completedSteps", 0)
+        eda_pipeline_ok = (
+            isinstance(completed_steps, int)
+            and completed_steps >= 17
+            and observed.get("deliveryStatus")
+            in {"completed_with_issues", "delivered_with_issues", "release_ready"}
+            and all(
+                any(name.endswith(required) for name in artifact_names)
+                for required in required_eda_artifacts
+            )
+            and observed["artifactsValid"]
+        )
     replay_ok = True
     if case.replay == "same":
         replay_ok = bool(
@@ -341,6 +360,7 @@ def _grade(
         "terminal": terminal_ok,
         "artifacts": artifact_ok,
         "releaseGate": release_ok,
+        "edaPipeline": eda_pipeline_ok,
         "replay": replay_ok,
     }
 
@@ -500,6 +520,7 @@ def _report(
                 (check_rate("requiredTools") + check_rate("forbiddenTools")) / 2
             ),
             "gateAccuracy": check_rate("releaseGate"),
+            "edaPipelineAccuracy": check_rate("edaPipeline"),
             "falseReleaseCount": false_releases,
             "totalLlmTokens": sum(item["observed"]["llmTokens"] for item in results),
             "totalWallClockSeconds": sum(item["observed"]["durationSeconds"] for item in results),
