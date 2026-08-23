@@ -30,6 +30,13 @@
     "Reviewer",
     "Supervisor"
   ],
+  "toolCalls": [
+    "temporal.execute_pipeline_step",
+    "ahe.recover",
+    "governance.observe",
+    "reviewer.evaluate",
+    "artifact.persist"
+  ],
   "aheRepairCount": 1,
   "recoveredFromFault": true,
   "llmTokens": 14000,

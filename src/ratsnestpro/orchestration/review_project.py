@@ -13,7 +13,9 @@ import csv
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 
+from observability import operation_span, record_release_gate
 from ratsnestpro.agents import LLMClient, LlmMode, Reviewer, ReviewResult
 from ratsnestpro.domain.contracts import (
     Finding,
@@ -534,7 +536,7 @@ def _component_release_gate(
     )
 
 
-def review_project(
+def _review_project(
     project_path: str | Path,
     mode: str | LlmMode = LlmMode.OFFLINE,
     client: LLMClient | None = None,
@@ -592,6 +594,40 @@ def review_project(
     return ProjectReview(
         project_path=path, schematic_path=sch_path, pcb_path=pcb_path, result=result
     )
+
+
+def review_project(
+    project_path: str | Path,
+    mode: str | LlmMode = LlmMode.OFFLINE,
+    client: LLMClient | None = None,
+    kb: object | None = None,
+    decoupling_radius: float = 10.0,
+) -> ProjectReview:
+    """Run deterministic review with release-gate telemetry and no project path."""
+
+    started = monotonic()
+    decision = "error"
+    blocker_count = 0
+    try:
+        with operation_span("agent.release_gate.evaluate") as span:
+            review = _review_project(
+                project_path,
+                mode=mode,
+                client=client,
+                kb=kb,
+                decoupling_radius=decoupling_radius,
+            )
+            blocker_count = sum(
+                finding.severity == Severity.ERROR
+                for finding in review.result.report.findings
+            )
+            decision = "blocked" if review.blocked else "passed"
+            span.set_attribute("agent.release_gate.decision", decision)
+            span.set_attribute("agent.release_gate.blocker_count", blocker_count)
+            span.set_attribute("agent.release_gate.duration_seconds", monotonic() - started)
+            return review
+    finally:
+        record_release_gate(decision=decision, blocker_count=blocker_count)
 
 
 def _safe(fn, *args) -> list[dict]:

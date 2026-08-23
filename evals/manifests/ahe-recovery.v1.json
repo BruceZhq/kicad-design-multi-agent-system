@@ -4,6 +4,7 @@
   "title": "A bounded AHE repair preserves a complete editable delivery",
   "suite": "optimization",
   "inputRef": "evals/fixtures/ahe-recovery.v1.json",
+  "inputDigest": "79a2e8fcea3a416dce2d33cc5c4777a7a30e25cb742c3e157cb9258721de5682",
   "profileReference": "sipi-channel-pdn-eval@1.0",
   "profileDigest": "de4382568f3c7b3420d19405f09337817c500a7a14f5f65d4b03fb0d688ebb25",
   "baselineHarnessDigest": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -14,6 +15,7 @@
   ],
   "graderIds": [
     "trajectory",
+    "tool_call",
     "artifact",
     "release_truth",
     "recovery",
@@ -36,6 +38,13 @@
       "Reviewer",
       "Supervisor"
     ],
+    "requiredTools": [
+      "temporal.execute_pipeline_step",
+      "ahe.recover",
+      "reviewer.evaluate",
+      "artifact.persist"
+    ],
+    "forbiddenTools": ["artifact.publish"],
     "maxAheRepairs": 6,
     "maxLlmTokens": 1200000,
     "maxWallClockSeconds": 3600.0

@@ -269,6 +269,7 @@ class DeliveryOutcome(StrEnum):
 
 class GraderId(StrEnum):
     INTENT = "intent"
+    TOOL_CALL = "tool_call"
     TRAJECTORY = "trajectory"
     ARTIFACT = "artifact"
     RELEASE_TRUTH = "release_truth"
@@ -286,9 +287,18 @@ class EvalExpectation(EvolutionModel):
     require_independent_review: bool = False
     require_ahe_recovery: bool = False
     expected_role_sequence: list[str] = Field(default_factory=list, max_length=16)
+    required_tools: list[str] = Field(default_factory=list, max_length=64)
+    forbidden_tools: list[str] = Field(default_factory=list, max_length=64)
     max_ahe_repairs: int | None = Field(default=None, ge=0, le=100)
     max_llm_tokens: int | None = Field(default=None, ge=0, le=10_000_000)
     max_wall_clock_seconds: float | None = Field(default=None, ge=0, le=604_800)
+
+    @model_validator(mode="after")
+    def validate_tool_contract(self) -> EvalExpectation:
+        overlap = set(self.required_tools) & set(self.forbidden_tools)
+        if overlap:
+            raise ValueError(f"tools cannot be both required and forbidden: {sorted(overlap)}")
+        return self
 
 
 class EvalCaseManifest(EvolutionModel):
@@ -299,12 +309,13 @@ class EvalCaseManifest(EvolutionModel):
     title: str = Field(min_length=1, max_length=200)
     suite: EvalSuite
     input_ref: str = Field(min_length=1, max_length=500)
+    input_digest: str = Field(pattern=_DIGEST_PATTERN)
     profile_reference: str = Field(min_length=1, max_length=120)
     profile_digest: str = Field(pattern=_DIGEST_PATTERN)
     baseline_harness_digest: str = Field(pattern=_DIGEST_PATTERN)
     sealed: bool = False
     invariants: list[str] = Field(min_length=1, max_length=32)
-    grader_ids: list[GraderId] = Field(min_length=1, max_length=7)
+    grader_ids: list[GraderId] = Field(min_length=1, max_length=8)
     expectation: EvalExpectation
     fault_injection: dict[str, Any] | None = None
 
@@ -334,6 +345,7 @@ class RunEvidence(EvolutionModel):
     release_blockers: list[str] = Field(default_factory=list, max_length=128)
     independent_review: Literal["passed", "failed", "not_run"] = "not_run"
     role_sequence: list[str] = Field(default_factory=list, max_length=32)
+    tool_calls: list[str] = Field(default_factory=list, max_length=256)
     ahe_repair_count: int = Field(default=0, ge=0, le=1_000)
     recovered_from_fault: bool = False
     llm_tokens: int = Field(default=0, ge=0)
@@ -362,6 +374,14 @@ class EvalMetrics(EvolutionModel):
     pass_rate: float = Field(ge=0, le=1)
     total_llm_tokens: int = Field(ge=0)
     total_wall_clock_seconds: float = Field(ge=0)
+    grader_pass_rates: dict[str, float] = Field(default_factory=dict)
+    tool_call_accuracy: float = Field(ge=0, le=1)
+    state_transition_accuracy: float = Field(ge=0, le=1)
+    goal_completion_rate: float = Field(ge=0, le=1)
+    gate_accuracy: float = Field(ge=0, le=1)
+    recovery_success_rate: float = Field(ge=0, le=1)
+    false_release_count: int = Field(ge=0)
+    false_release_rate: float = Field(ge=0, le=1)
 
 
 class EvalReport(EvolutionModel):

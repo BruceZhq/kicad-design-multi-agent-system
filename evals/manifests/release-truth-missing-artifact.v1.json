@@ -4,6 +4,7 @@
   "title": "A narrative cannot claim release_ready without real artifacts",
   "suite": "historical",
   "inputRef": "evals/fixtures/release-truth-missing-artifact.v1.json",
+  "inputDigest": "149fdff380d6352ddd6011a4912c7cee3f3f0e194ea49f3663ce048f08c2c6f0",
   "profileReference": "sipi-channel-pdn-eval@1.0",
   "profileDigest": "de4382568f3c7b3420d19405f09337817c500a7a14f5f65d4b03fb0d688ebb25",
   "baselineHarnessDigest": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -14,6 +15,7 @@
   ],
   "graderIds": [
     "intent",
+    "tool_call",
     "release_truth",
     "security",
     "cost"
@@ -27,6 +29,8 @@
     "requireIndependentReview": false,
     "requireAheRecovery": false,
     "expectedRoleSequence": [],
+    "requiredTools": ["reviewer.evaluate"],
+    "forbiddenTools": ["artifact.publish"],
     "maxAheRepairs": 6,
     "maxLlmTokens": 1200000,
     "maxWallClockSeconds": 3600.0

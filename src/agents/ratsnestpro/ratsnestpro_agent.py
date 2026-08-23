@@ -9,6 +9,7 @@ import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import Any, Literal, TypedDict
 from uuid import uuid4
 
@@ -85,6 +86,11 @@ from core import (
     get_model,
     get_model_for_purpose,
     settings,
+)
+from observability import (
+    operation_span,
+    record_intent_decision,
+    record_tool_call,
 )
 from ratsnestpro.eda import footprints, grounding
 from ratsnestpro.eda.local_library import (
@@ -512,7 +518,7 @@ def _llm_output_event(
     writer(stream_llm_output_record(record))
 
 
-async def _call_json_with_retry(
+async def _call_json_with_retry_impl(
     operation: Callable[[], str],
     *,
     phase: str,
@@ -561,6 +567,45 @@ async def _call_json_with_retry(
     return last_raw, last_result, bounded_attempts
 
 
+async def _call_json_with_retry(
+    operation: Callable[[], str],
+    *,
+    phase: str,
+    tool: str,
+    attempts: int = 2,
+    require_nonempty: str | None = None,
+) -> tuple[str, dict[str, Any], int]:
+    """Trace one logical tool call, including its bounded retry attempts."""
+
+    started = monotonic()
+    outcome = "error"
+    attempts_used = 1
+    try:
+        with operation_span(
+            "agent.tool.call",
+            {"agent.phase": phase, "agent.tool.name": tool},
+        ) as span:
+            raw, result, attempts_used = await _call_json_with_retry_impl(
+                operation,
+                phase=phase,
+                tool=tool,
+                attempts=attempts,
+                require_nonempty=require_nonempty,
+            )
+            outcome = str(result.get("status", "unknown"))[:96]
+            span.set_attribute("agent.tool.outcome", outcome)
+            span.set_attribute("agent.tool.attempts", attempts_used)
+            return raw, result, attempts_used
+    finally:
+        record_tool_call(
+            phase=phase,
+            tool=tool,
+            outcome=outcome,
+            attempts=attempts_used,
+            duration_seconds=monotonic() - started,
+        )
+
+
 def _message_text(message: Any) -> str:
     content = getattr(message, "content", "")
     if isinstance(content, str):
@@ -583,7 +628,7 @@ def _classify(requirement: str) -> WorkflowMode:
     return classify_intent(requirement).primary_intent
 
 
-async def _resolve_intent(
+async def _resolve_intent_impl(
     requirement: str,
     config: RunnableConfig,
     *,
@@ -649,6 +694,33 @@ async def _resolve_intent(
     if not parsed.in_scope:
         return decision
     return parsed
+
+
+async def _resolve_intent(
+    requirement: str,
+    config: RunnableConfig,
+    *,
+    prior_intent: str | None = None,
+    has_active_context: bool = False,
+) -> IntentDecision:
+    """Trace the hybrid router without exporting the request text."""
+
+    with operation_span(
+        "agent.intent.route",
+        {"agent.intent.source": "deterministic_or_llm"},
+    ) as span:
+        decision = await _resolve_intent_impl(
+            requirement,
+            config,
+            prior_intent=prior_intent,
+            has_active_context=has_active_context,
+        )
+        source = "hybrid"
+        span.set_attribute("agent.intent", decision.primary_intent)
+        span.set_attribute("agent.intent.source", source)
+        span.set_attribute("agent.intent.confidence", decision.confidence)
+        record_intent_decision(intent=decision.primary_intent, source=source)
+        return decision
 
 
 def _safe_name(value: str, fallback: str) -> str:

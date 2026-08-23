@@ -4,6 +4,8 @@
 
 [在线 Demo](https://brucezhq.github.io/kicad-design-multi-agent-system/) · [GitHub 源码](https://github.com/BruceZhq/kicad-design-multi-agent-system) · [五案例审计报告](docs/ratsnestpro/test-results/five-case-e2e-general-fixes-2026-07-30.md)
 
+[Agent 可观测与自动评测](docs/observability-and-evaluation.md) · [公开 recorded eval 报告](evals/reports/public-recorded-eval.md)
+
 > Demo 使用模拟数据展示需求提交、Agent 协作、人工确认和产物交付，不调用真实 LLM、KiCad 或任何私有服务。
 
 ## 项目一览

@@ -8,6 +8,7 @@
   "releaseBlockers": ["untrusted instruction attempted to override release evidence"],
   "independentReview": "not_run",
   "roleSequence": ["Supervisor"],
+  "toolCalls": ["reviewer.evaluate"],
   "aheRepairCount": 0,
   "recoveredFromFault": false,
   "llmTokens": 800,

@@ -391,6 +391,22 @@
           "title": "Expectedrolesequence",
           "type": "array"
         },
+        "requiredTools": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Requiredtools",
+          "type": "array"
+        },
+        "forbiddenTools": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Forbiddentools",
+          "type": "array"
+        },
         "maxAheRepairs": {
           "anyOf": [
             {
@@ -453,6 +469,7 @@
     "GraderId": {
       "enum": [
         "intent",
+        "tool_call",
         "trajectory",
         "artifact",
         "release_truth",
@@ -493,6 +510,11 @@
           "title": "Inputref",
           "type": "string"
         },
+        "inputDigest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Inputdigest",
+          "type": "string"
+        },
         "profileReference": {
           "maxLength": 120,
           "minLength": 1,
@@ -527,7 +549,7 @@
           "items": {
             "$ref": "#/$defs/GraderId"
           },
-          "maxItems": 7,
+          "maxItems": 8,
           "minItems": 1,
           "title": "Graderids",
           "type": "array"
@@ -554,6 +576,7 @@
         "title",
         "suite",
         "inputRef",
+        "inputDigest",
         "profileReference",
         "profileDigest",
         "baselineHarnessDigest",

@@ -13,6 +13,7 @@ import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from temporalio import activity
@@ -26,6 +27,7 @@ from agents.ratsnestpro.temporal.contracts import (
     safe_name,
 )
 from core import settings
+from observability import operation_span, record_pipeline_step
 from service.governance_scope import (
     TrustedGovernanceScope,
     verify_governance_scope_token,
@@ -330,8 +332,7 @@ def _transient_error(payload: dict[str, Any]) -> bool:
     )
 
 
-@activity.defn(name=EXECUTE_STEP_ACTIVITY)
-async def execute_pipeline_step(command: dict[str, Any]) -> dict[str, Any]:
+async def _execute_pipeline_step(command: dict[str, Any]) -> dict[str, Any]:
     try:
         step = str(command["step"])
         manifest_path, manifest = _manifest(command)
@@ -387,6 +388,35 @@ async def execute_pipeline_step(command: dict[str, Any]) -> dict[str, Any]:
     summary["manifest_path"] = str(manifest_path)
     summary["activity_attempt"] = activity.info().attempt
     return summary
+
+
+@activity.defn(name=EXECUTE_STEP_ACTIVITY)
+async def execute_pipeline_step(command: dict[str, Any]) -> dict[str, Any]:
+    """Execute one durable step with explicit Agent/Temporal telemetry."""
+
+    step = str(command.get("step", "unknown"))[:96]
+    try:
+        attempt = activity.info().attempt
+    except RuntimeError:
+        attempt = 1
+    started = monotonic()
+    outcome = "error"
+    try:
+        with operation_span(
+            "agent.pipeline.step",
+            {"workflow.step": step, "workflow.step.attempt": attempt},
+        ) as span:
+            result = await _execute_pipeline_step(command)
+            outcome = str(result.get("status", "unknown"))[:96]
+            span.set_attribute("workflow.step.outcome", outcome)
+            return result
+    finally:
+        record_pipeline_step(
+            step=step,
+            outcome=outcome,
+            attempt=attempt,
+            duration_seconds=monotonic() - started,
+        )
 
 
 @activity.defn(name=READ_RESULT_ACTIVITY)

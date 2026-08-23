@@ -13,6 +13,7 @@ from typing import Any
 
 from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+from temporalio.contrib.opentelemetry import TracingInterceptor
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -64,6 +65,7 @@ async def connect_temporal() -> Client:
                 namespace=settings.TEMPORAL_NAMESPACE,
                 api_key=api_key,
                 tls=settings.TEMPORAL_TLS,
+                interceptors=[TracingInterceptor()],
             )
         return _temporal_client
 

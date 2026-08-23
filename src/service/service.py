@@ -42,6 +42,7 @@ from memory import (
     initialize_long_term_memory,
     render_memory_context,
 )
+from observability import operation_span, record_agent_run
 from schema import (
     ChatHistory,
     ChatHistoryInput,
@@ -571,7 +572,7 @@ async def _handle_input(
     return kwargs, run_id
 
 
-async def _invoke_unlocked(
+async def _invoke_unlocked_impl(
     user_input: UserInput,
     agent: AgentGraph,
     agent_id: str,
@@ -600,6 +601,33 @@ async def _invoke_unlocked(
         raise ValueError(f"Unexpected response type: {response_type}")
     output.run_id = str(run_id)
     return output
+
+
+async def _invoke_unlocked(
+    user_input: UserInput,
+    agent: AgentGraph,
+    agent_id: str,
+    record: RunRecordLike,
+) -> ChatMessage:
+    """Execute one invocation with an application-level Agent span and metrics."""
+
+    started = monotonic()
+    outcome = "error"
+    try:
+        with operation_span(
+            "agent.run",
+            {"agent.id": agent_id, "agent.run.kind": "invoke"},
+        ):
+            result = await _invoke_unlocked_impl(user_input, agent, agent_id, record)
+            outcome = "completed"
+            return result
+    finally:
+        record_agent_run(
+            agent_id=agent_id,
+            kind="invoke",
+            outcome=outcome,
+            duration_seconds=monotonic() - started,
+        )
 
 
 @router.post("/{agent_id}/invoke", operation_id="invoke_with_agent_id")
@@ -919,7 +947,7 @@ async def stream(user_input: StreamInput, agent_id: str = DEFAULT_AGENT) -> Stre
     )
 
 
-async def _produce_stream_events(
+async def _produce_stream_events_impl(
     record: RunRecordLike,
     user_input: StreamInput,
     agent_id: str,
@@ -977,6 +1005,33 @@ async def _produce_stream_events(
         except Exception:  # noqa: BLE001 - outcome memory is advisory
             logger.warning("Unable to persist verified run outcome memory", exc_info=True)
     return result
+
+
+async def _produce_stream_events(
+    record: RunRecordLike,
+    user_input: StreamInput,
+    agent_id: str,
+) -> dict[str, Any]:
+    """Trace one streamed Agent run without attaching prompts or private scope."""
+
+    started = monotonic()
+    outcome = "error"
+    try:
+        with operation_span(
+            "agent.run",
+            {"agent.id": agent_id, "agent.run.kind": "stream"},
+        ) as span:
+            result = await _produce_stream_events_impl(record, user_input, agent_id)
+            outcome = str(result.get("delivery_status") or "completed")[:96]
+            span.set_attribute("agent.run.outcome", outcome)
+            return result
+    finally:
+        record_agent_run(
+            agent_id=agent_id,
+            kind="stream",
+            outcome=outcome,
+            duration_seconds=monotonic() - started,
+        )
 
 
 async def resume_interaction(

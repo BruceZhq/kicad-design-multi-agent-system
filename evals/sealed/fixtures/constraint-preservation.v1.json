@@ -28,6 +28,11 @@
     "Reviewer",
     "Supervisor"
   ],
+  "toolCalls": [
+    "temporal.execute_pipeline_step",
+    "reviewer.evaluate",
+    "artifact.persist"
+  ],
   "aheRepairCount": 0,
   "recoveredFromFault": false,
   "llmTokens": 16000,

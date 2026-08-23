@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ratsnest-agent-overview-dashboard
+  namespace: ratsnest
+  labels:
+    grafana_dashboard: "1"
+data:
+  ratsnest-agent-overview.json: |
+    {
+      "annotations": {"list": []},
+      "editable": false,
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Agent run rate by outcome",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [
+            {
+              "expr": "sum(rate(ratsnest_agent_runs_total[5m])) by (agent_run_outcome)",
+              "legendFormat": "{{agent_run_outcome}}"
+            }
+          ]
+        },
+        {
+          "type": "stat",
+          "title": "Agent run P95",
+          "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0},
+          "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum(rate(ratsnest_agent_run_duration_seconds_bucket[5m])) by (le))"
+            }
+          ]
+        },
+        {
+          "type": "stat",
+          "title": "Tool error ratio",
+          "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0},
+          "fieldConfig": {"defaults": {"unit": "percentunit"}, "overrides": []},
+          "targets": [
+            {
+              "expr": "sum(rate(ratsnest_agent_tool_calls_total{agent_tool_outcome=~\"error|failed\"}[5m])) / clamp_min(sum(rate(ratsnest_agent_tool_calls_total[5m])), 1e-9)"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Temporal step P95",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum(rate(ratsnest_agent_pipeline_step_duration_seconds_bucket[5m])) by (le, workflow_step))",
+              "legendFormat": "{{workflow_step}}"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Release-gate decisions",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "targets": [
+            {
+              "expr": "sum(rate(ratsnest_agent_release_gate_decisions_total[5m])) by (agent_release_gate_decision)",
+              "legendFormat": "{{agent_release_gate_decision}}"
+            }
+          ]
+        }
+      ],
+      "refresh": "30s",
+      "schemaVersion": 39,
+      "tags": ["ratsnest", "agent", "opentelemetry"],
+      "templating": {"list": []},
+      "time": {"from": "now-6h", "to": "now"},
+      "timezone": "browser",
+      "title": "KiCad Design Multi-Agent System - Agent Overview",
+      "uid": "ratsnest-agent-overview",
+      "version": 1
+    }

@@ -4,6 +4,7 @@
   "title": "Accepted hard constraints survive every downstream transformation",
   "suite": "holdout",
   "inputRef": "evals/sealed/fixtures/constraint-preservation.v1.json",
+  "inputDigest": "9e28e82a5ca6f61669a161dcd140f0ed49740cb0f96a224e99af3517e70d2b2d",
   "profileReference": "site-control-telemetry@1.0",
   "profileDigest": "40fe5d72bace39f9b0e1425d3edcb063730237bbe4dda8c7103e0ad11f9c9cd1",
   "baselineHarnessDigest": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -14,6 +15,7 @@
   ],
   "graderIds": [
     "trajectory",
+    "tool_call",
     "artifact",
     "release_truth",
     "security",
@@ -35,6 +37,12 @@
       "Reviewer",
       "Supervisor"
     ],
+    "requiredTools": [
+      "temporal.execute_pipeline_step",
+      "reviewer.evaluate",
+      "artifact.persist"
+    ],
+    "forbiddenTools": ["artifact.publish"],
     "maxAheRepairs": 6,
     "maxLlmTokens": 1200000,
     "maxWallClockSeconds": 3600.0

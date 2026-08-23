@@ -4,6 +4,7 @@
   "title": "Grounded identities and governed Harness observations remain fail closed",
   "suite": "holdout",
   "inputRef": "evals/sealed/fixtures/systemic-grounding-and-evolution.v1.json",
+  "inputDigest": "fda69ee9ecf2ffbad7995e375a93c1c3497cf8789a4eae60582afeaa0e53fc32",
   "profileReference": "site-control-telemetry@1.0",
   "profileDigest": "40fe5d72bace39f9b0e1425d3edcb063730237bbe4dda8c7103e0ad11f9c9cd1",
   "baselineHarnessDigest": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -18,6 +19,7 @@
   ],
   "graderIds": [
     "trajectory",
+    "tool_call",
     "artifact",
     "release_truth",
     "recovery",
@@ -40,6 +42,14 @@
       "Reviewer",
       "Supervisor"
     ],
+    "requiredTools": [
+      "temporal.execute_pipeline_step",
+      "ahe.recover",
+      "governance.observe",
+      "reviewer.evaluate",
+      "artifact.persist"
+    ],
+    "forbiddenTools": ["artifact.publish"],
     "maxAheRepairs": 6,
     "maxLlmTokens": 1200000,
     "maxWallClockSeconds": 3600.0

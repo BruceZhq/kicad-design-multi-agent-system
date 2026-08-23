@@ -29,11 +29,16 @@ def load_run_evidence(path: Path) -> RunEvidence:
     return RunEvidence.model_validate_json(path.read_text(encoding="utf-8"))
 
 
-def _result(grader: GraderId, details: list[str]) -> GraderResult:
+def _result(
+    grader: GraderId,
+    details: list[str],
+    *,
+    score: float | None = None,
+) -> GraderResult:
     return GraderResult(
         grader_id=grader,
         passed=not details,
-        score=1.0 if not details else 0.0,
+        score=(1.0 if not details else 0.0) if score is None else score,
         details=details,
     )
 
@@ -64,6 +69,20 @@ def _intent_grader(case: EvalCaseManifest, evidence: RunEvidence) -> GraderResul
         else [f"intent {evidence.intent_mode!r} != expected {expected!r}"]
     )
     return _result(GraderId.INTENT, details)
+
+
+def _tool_call_grader(case: EvalCaseManifest, evidence: RunEvidence) -> GraderResult:
+    required = set(case.expectation.required_tools)
+    forbidden = set(case.expectation.forbidden_tools)
+    actual = set(evidence.tool_calls)
+    missing = sorted(required - actual)
+    disallowed = sorted(forbidden & actual)
+    checks = len(required) + len(forbidden)
+    satisfied = len(required & actual) + len(forbidden - actual)
+    score = satisfied / checks if checks else 1.0
+    details = [f"required tool not called: {item}" for item in missing]
+    details.extend(f"forbidden tool called: {item}" for item in disallowed)
+    return _result(GraderId.TOOL_CALL, details, score=score)
 
 
 def _trajectory_grader(case: EvalCaseManifest, evidence: RunEvidence) -> GraderResult:
@@ -144,6 +163,7 @@ def _cost_grader(case: EvalCaseManifest, evidence: RunEvidence) -> GraderResult:
 
 _GRADERS = {
     GraderId.INTENT: _intent_grader,
+    GraderId.TOOL_CALL: _tool_call_grader,
     GraderId.TRAJECTORY: _trajectory_grader,
     GraderId.ARTIFACT: _artifact_grader,
     GraderId.RELEASE_TRUTH: _release_truth_grader,
@@ -182,6 +202,47 @@ def evaluate_suite(
     grader_count = sum(len(item.grader_results) for item in evaluations)
     passed_graders = sum(result.passed for item in evaluations for result in item.grader_results)
     passed_cases = sum(item.passed for item in evaluations)
+
+    def grader_scores(grader: GraderId) -> list[float]:
+        return [
+            result.score
+            for item in evaluations
+            for result in item.grader_results
+            if result.grader_id == grader
+        ]
+
+    def average(values: Sequence[float]) -> float:
+        return sum(values) / len(values) if values else 0.0
+
+    grader_pass_rates = {
+        grader.value: average(
+            [
+                float(result.passed)
+                for item in evaluations
+                for result in item.grader_results
+                if result.grader_id == grader
+            ]
+        )
+        for grader in GraderId
+        if any(result.grader_id == grader for item in evaluations for result in item.grader_results)
+    }
+    gate_scores: list[float] = []
+    false_release_count = 0
+    for case, evaluation in zip(cases, evaluations, strict=True):
+        gate_results = [
+            result
+            for result in evaluation.grader_results
+            if result.grader_id
+            in {GraderId.ARTIFACT, GraderId.RELEASE_TRUTH, GraderId.SECURITY}
+        ]
+        if gate_results:
+            gate_scores.append(float(all(result.passed for result in gate_results)))
+        evidence = evidence_by_case[case.case_id]
+        if evidence.outcome == DeliveryOutcome.RELEASE_READY and (
+            DeliveryOutcome.RELEASE_READY not in case.expectation.allowed_outcomes
+            or not all(result.passed for result in gate_results)
+        ):
+            false_release_count += 1
     return EvalReport(
         harness=harness,
         cases=evaluations,
@@ -193,6 +254,16 @@ def evaluate_suite(
             pass_rate=(passed_cases / len(evaluations) if evaluations else 0.0),
             total_llm_tokens=total_tokens,
             total_wall_clock_seconds=total_seconds,
+            grader_pass_rates=grader_pass_rates,
+            tool_call_accuracy=average(grader_scores(GraderId.TOOL_CALL)),
+            state_transition_accuracy=average(grader_scores(GraderId.TRAJECTORY)),
+            goal_completion_rate=average(grader_scores(GraderId.ARTIFACT)),
+            gate_accuracy=average(gate_scores),
+            recovery_success_rate=average(grader_scores(GraderId.RECOVERY)),
+            false_release_count=false_release_count,
+            false_release_rate=(
+                false_release_count / len(evaluations) if evaluations else 0.0
+            ),
         ),
     )
 

@@ -36,6 +36,13 @@ remain hidden if tracing is explicitly enabled later. Keep `LANGSMITH_API_KEY` o
 the cluster secret manager; never move it to a ConfigMap. This is a hard privacy
 default, not a claim that arbitrary application log messages are automatically safe.
 
+The Python Agent runtime also emits manual semantic spans for `agent.run`,
+`agent.intent.route`, `agent.tool.call`, `agent.pipeline.step`, and
+`agent.release_gate.evaluate`. Their low-cardinality metrics feed the checked-in
+`ratsnest-agent-overview-dashboard` ConfigMap. See
+[`docs/observability-and-evaluation.md`](../../../docs/observability-and-evaluation.md)
+for metric definitions, the privacy boundary, and the deterministic eval gate.
+
 Render locally after installing a `kubectl`/Kustomize version that supports the base:
 
 ```bash

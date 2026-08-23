@@ -8,6 +8,7 @@
   "releaseBlockers": [],
   "independentReview": "not_run",
   "roleSequence": ["Supervisor", "Architect"],
+  "toolCalls": ["agent.respond"],
   "aheRepairCount": 0,
   "recoveredFromFault": false,
   "llmTokens": 2000,

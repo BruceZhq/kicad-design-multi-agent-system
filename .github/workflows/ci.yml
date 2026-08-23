@@ -45,6 +45,24 @@ jobs:
             tests/test_run_recovery_status.py \
             tests/test_runtime_ahe_event_idempotency.py
 
+      - name: Generate the content-addressed Agent evaluation report
+        run: |
+          mkdir -p evals/reports/ci
+          uv run --frozen python -m evolution.runner \
+            --suite evals/suites/holdout.v1.json \
+            --suite evals/suites/adversarial.v1.json \
+            --json evals/reports/ci/agent-eval-report.json \
+            --markdown evals/reports/ci/agent-eval-report.md \
+            --min-pass-rate 1.0 \
+            --max-false-release-count 0
+
+      - name: Upload the Agent evaluation evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-evaluation-report
+          path: evals/reports/ci/
+          if-no-files-found: error
+
   frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 10

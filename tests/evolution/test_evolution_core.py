@@ -214,12 +214,13 @@ def test_recorded_manifests_grade_without_llm_or_eda() -> None:
     candidate_evidence = bad_evidence.model_copy(
         update={
             "outcome": DeliveryOutcome.EXECUTION_BLOCKED,
-            "invariant_results": {
-                "release-truth": True,
-                "no-fabricated-eda-evidence": True,
-            },
-        }
-    )
+                "invariant_results": {
+                    "release-truth": True,
+                    "no-fabricated-eda-evidence": True,
+                },
+                "tool_calls": ["reviewer.evaluate"],
+            }
+        )
     candidate = evaluate_suite(
         [bad_case, good_case],
         {bad_case.case_id: candidate_evidence, good_case.case_id: good_evidence},
@@ -280,8 +281,12 @@ def test_eval_suite_index_is_content_addressed() -> None:
         index = json.loads((ROOT / "evals" / "suites" / suite_name).read_text())
         entries = []
         for item in index["cases"]:
-            digest = hashlib.sha256((ROOT / item["ref"]).read_bytes()).hexdigest()
+            manifest_path = ROOT / item["ref"]
+            digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
             assert digest == item["sha256"]
+            manifest = load_eval_case(manifest_path)
+            evidence_digest = hashlib.sha256((ROOT / manifest.input_ref).read_bytes()).hexdigest()
+            assert evidence_digest == manifest.input_digest
             entries.append(f"{item['ref']}|{digest}")
         assert hashlib.sha256("\n".join(entries).encode()).hexdigest() == index["suiteDigest"]
 
