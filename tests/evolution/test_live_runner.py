@@ -45,6 +45,29 @@ def test_live_grade_uses_only_structured_facts() -> None:
     assert all(_grade(case, observed, None).values())
 
 
+def test_release_gate_can_be_observed_without_preassigned_outcome() -> None:
+    case = _case(
+        caseId="eda.observe-release",
+        category="eda_pipeline",
+        expectedIntents=["build"],
+        expectReleaseReady=None,
+    )
+    observed = {
+        "httpStatus": 200,
+        "done": True,
+        "humanInput": False,
+        "errors": [],
+        "intent": "build",
+        "phases": [],
+        "tools": [],
+        "deliveryStatus": "execution_blocked",
+        "artifacts": [],
+        "artifactsValid": True,
+    }
+
+    assert _grade(case, observed, None)["releaseGate"] is True
+
+
 def test_local_artifact_digest_is_recomputed(tmp_path: Path) -> None:
     artifact = tmp_path / "data" / "ratsnestpro" / "artifacts" / "runs" / "x.kicad_sch"
     artifact.parent.mkdir(parents=True)

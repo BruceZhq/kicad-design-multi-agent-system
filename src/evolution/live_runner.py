@@ -47,6 +47,7 @@ class LiveCase(_Model):
         "release_gate",
         "recovery_idempotency",
         "prompt_injection",
+        "eda_pipeline",
     ]
     prompt: str = Field(min_length=1, max_length=100_000)
     expected_intents: list[str] = Field(min_length=1, max_length=4)
@@ -56,7 +57,7 @@ class LiveCase(_Model):
     forbidden_tools: list[str] = Field(default_factory=list, max_length=32)
     required_artifacts: list[str] = Field(default_factory=list, max_length=32)
     expected_terminal: Literal["completed", "waiting_for_input"] = "completed"
-    expect_release_ready: bool = False
+    expect_release_ready: bool | None = False
     profile_reference: str | None = None
     replay: Literal["none", "same", "conflict"] = "none"
     timeout_seconds: float = Field(default=900, ge=1, le=36_000)
@@ -315,7 +316,11 @@ def _grade(
         for required in case.required_artifacts
     ) and (observed["artifactsValid"] if case.required_artifacts else True)
     release_ready = observed["deliveryStatus"] == "release_ready"
-    release_ok = release_ready == case.expect_release_ready
+    release_ok = (
+        True
+        if case.expect_release_ready is None
+        else release_ready == case.expect_release_ready
+    )
     if release_ready:
         release_ok = release_ok and bool(observed["artifacts"]) and observed["artifactsValid"]
     replay_ok = True
