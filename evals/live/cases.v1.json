@@ -39,7 +39,7 @@
     {
       "caseId": "intent.unsupported",
       "category": "intent_routing",
-      "prompt": "请写一首唐诗；这不是硬件、器件、KiCad、研究或审查任务。",
+      "prompt": "请写一首描写春天的七言绝句。",
       "expectedIntents": ["unsupported"],
       "requiredPhases": ["intent-router"],
       "forbiddenPhases": ["architect", "parts-specialist", "hardware-engineer", "reviewer"]
