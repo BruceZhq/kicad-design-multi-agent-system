@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "1.0",
+  "scope": "live_http_sse_agent_evaluation_not_manufacturing_approval",
+  "planId": "p2-live-agent-eval-v1",
+  "planDigest": "12843b45afce7ce1a7217a60fcb60debc715d2ae97afaa18ea948e63ef013136",
+  "sourceCommit": "e1745d5949f29bc9819060204cf6791029e0ced6",
+  "sourceDirty": false,
+  "createdAt": "2026-08-23T10:55:58.717533+00:00",
+  "cases": [
+    {
+      "caseId": "intent.unsupported",
+      "category": "intent_routing",
+      "expectedTerminal": "completed",
+      "requestFingerprint": "0d4cfcd3e25212618cbba770eb55307ac4bf07c0fdaf4b7d7e784422576299ae",
+      "observed": {
+        "httpStatus": 200,
+        "durationSeconds": 4.936,
+        "done": true,
+        "humanInput": false,
+        "errors": [],
+        "intent": "unsupported",
+        "phases": [
+          "intent-router"
+        ],
+        "tools": [],
+        "completedSteps": 0,
+        "llmTokens": 448,
+        "deliveryStatus": null,
+        "artifacts": [],
+        "artifactsValid": true,
+        "eventDigest": "a08ddfffe2137dd82865b7b80d828375bfae434df37738a82ed1158cb6387509"
+      },
+      "replay": null,
+      "checks": {
+        "intent": true,
+        "requiredPhases": true,
+        "forbiddenPhases": true,
+        "requiredTools": true,
+        "forbiddenTools": true,
+        "terminal": true,
+        "artifacts": true,
+        "releaseGate": true,
+        "replay": true
+      },
+      "passed": true
+    }
+  ],
+  "metrics": {
+    "caseCount": 1,
+    "passedCases": 1,
+    "passRate": 1.0,
+    "intentAccuracy": 1.0,
+    "toolContractAccuracy": 1.0,
+    "gateAccuracy": 1.0,
+    "falseReleaseCount": 0,
+    "totalLlmTokens": 448,
+    "totalWallClockSeconds": 4.936
+  }
+}
