@@ -1,1 +1,2 @@
 evals/**/*.json text eol=lf
+backend/mvnw text eol=lf
