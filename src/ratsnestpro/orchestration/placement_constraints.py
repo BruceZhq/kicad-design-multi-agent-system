@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -17,6 +18,115 @@ from ratsnestpro.orchestration.pipeline_contracts import (
 )
 
 _EDGE_EPSILON_MM = 1e-6
+
+
+def _natural_key(value: str) -> tuple[object, ...]:
+    return tuple(
+        int(token) if token.isdigit() else token.casefold()
+        for token in re.split(r"(\d+)", value)
+    )
+
+
+def _placement_group(value: str) -> str:
+    text = value.casefold().replace("-", "_")
+    if "mounting" in text and "hole" in text or "mechanical_mounting" in text:
+        return "mounting_hole"
+    if any(token in text for token in ("connector", "header", "socket", "receptacle")):
+        return "connector"
+    if "timer" in text:
+        return "timer"
+    if any(token in text for token in ("mcu", "controller", "digital")):
+        return "digital"
+    if any(token in text for token in ("analog", "adc", "timing_rc")):
+        return "analog"
+    if any(token in text for token in ("led", "button", "interface", "user")):
+        return "interface"
+    if any(token in text for token in ("power", "regulator", "buck", "ldo")):
+        return "power"
+    if any(token in text for token in ("sensor", "i2c")):
+        return "sensor"
+    if any(token in text for token in ("storage", "flash", "sdio", "microsd")):
+        return "storage"
+    return ""
+
+
+def bind_zone_targets(
+    partition: BoardPartition,
+    roles: Mapping[str, str],
+) -> BoardPartition:
+    """Bind repeated functional zones to stable component identities.
+
+    An LLM may describe four identical mounting zones without knowing that the
+    downstream placement contract needs H1/H2/H3/H4 identities.  Equal-cardinality
+    groups are paired deterministically by natural reference order and geometric
+    top-to-bottom/left-to-right order.  Ambiguous unequal groups remain unbound.
+    """
+
+    zones = [zone.model_copy(deep=True) for zone in partition.zones]
+    refs = set(roles)
+    assigned_refs: set[str] = set()
+    assigned_zone_indexes: set[int] = set()
+
+    for index, zone in enumerate(zones):
+        target = zone.target_ref.strip()
+        if target in refs and target not in assigned_refs:
+            assigned_refs.add(target)
+            assigned_zone_indexes.add(index)
+            continue
+        zone.target_ref = ""
+
+    for index, zone in enumerate(zones):
+        if index in assigned_zone_indexes:
+            continue
+        matches = [
+            ref
+            for ref in refs - assigned_refs
+            if zone.name.strip().casefold() == ref.casefold()
+            or re.search(
+                rf"(?<![A-Za-z0-9]){re.escape(ref)}(?![A-Za-z0-9])",
+                zone.name,
+                re.IGNORECASE,
+            )
+        ]
+        if len(matches) == 1:
+            zone.target_ref = matches[0]
+            assigned_refs.add(matches[0])
+            assigned_zone_indexes.add(index)
+
+    ref_groups: dict[str, list[str]] = {}
+    for ref, role in roles.items():
+        if ref in assigned_refs:
+            continue
+        group = _placement_group(role)
+        if group:
+            ref_groups.setdefault(group, []).append(ref)
+    zone_groups: dict[str, list[int]] = {}
+    for index, zone in enumerate(zones):
+        if index in assigned_zone_indexes:
+            continue
+        group = _placement_group(f"{zone.kind} {zone.name}")
+        if group:
+            zone_groups.setdefault(group, []).append(index)
+
+    for group, grouped_refs in ref_groups.items():
+        grouped_zones = zone_groups.get(group, [])
+        if len(grouped_refs) < 2 or len(grouped_refs) != len(grouped_zones):
+            continue
+        ordered_refs = sorted(grouped_refs, key=_natural_key)
+        ordered_zones = sorted(
+            grouped_zones,
+            key=lambda index: (
+                (zones[index].y1 + zones[index].y2) / 2,
+                (zones[index].x1 + zones[index].x2) / 2,
+                zones[index].name.casefold(),
+            ),
+        )
+        for ref, index in zip(ordered_refs, ordered_zones, strict=True):
+            zones[index].target_ref = ref
+            assigned_refs.add(ref)
+            assigned_zone_indexes.add(index)
+
+    return partition.model_copy(update={"zones": zones})
 
 
 def _constraint_digest(constraints: list[PlacementConstraint]) -> str:
@@ -35,13 +145,22 @@ def _exact_zones(
     partition: BoardPartition,
     refs: set[str],
 ) -> dict[str, BoardZone]:
+    by_target: dict[str, list[BoardZone]] = {}
+    for zone in partition.zones:
+        if zone.target_ref:
+            by_target.setdefault(zone.target_ref.casefold(), []).append(zone)
     by_name: dict[str, list[BoardZone]] = {}
     for zone in partition.zones:
         by_name.setdefault(zone.name.strip().casefold(), []).append(zone)
     return {
         ref: matches[0]
         for ref in refs
-        if len(matches := by_name.get(ref.strip().casefold(), [])) == 1
+        if len(
+            matches := (
+                by_target.get(ref.strip().casefold(), [])
+                or by_name.get(ref.strip().casefold(), [])
+            )
+        ) == 1
     }
 
 
@@ -101,6 +220,7 @@ def compile_placement_constraints(
     derives them from the validated partition and selected references.
     """
 
+    partition = bind_zone_targets(partition, roles)
     exact = _exact_zones(partition, set(roles))
     constraints: list[PlacementConstraint] = []
     edge_by_ref: dict[str, str] = {}

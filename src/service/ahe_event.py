@@ -75,6 +75,26 @@ _DETAIL_FIELDS: dict[str, tuple[str, ...]] = {
         "independent_project_count",
         "independent_run_count",
     ),
+    "recovery": (
+        "turn_id",
+        "step",
+        "attempt",
+        "revision",
+        "failure_ids",
+        "status",
+        "before_score",
+        "after_score",
+        "baseline_fingerprint",
+        "used_llm",
+        "skill_name",
+        "skill_digest",
+        "action",
+        "origin",
+        "target_step",
+        "strategy",
+        "tool_name",
+        "confidence",
+    ),
 }
 _STRUCTURAL_IDENTIFIER_FIELDS = {
     "failure_id",
@@ -96,6 +116,11 @@ _STRUCTURAL_IDENTIFIER_FIELDS = {
     "trigger_step",
     "rollback_to",
     "action",
+    "turn_id",
+    "skill_name",
+    "skill_digest",
+    "target_step",
+    "tool_name",
 }
 _STRUCTURAL_IDENTIFIER_LIST_FIELDS = {"affected_refs", "failure_ids"}
 
@@ -115,7 +140,7 @@ def _bounded_value(value: Any) -> Any:
 def _safe_detail_value(field: str, value: Any) -> Any:
     bounded = _bounded_value(value)
     if field in _STRUCTURAL_IDENTIFIER_FIELDS:
-        if bounded == "":
+        if bounded is None or bounded == "":
             return None
         if not isinstance(bounded, str) or not _IDENTIFIER_RE.fullmatch(bounded):
             raise ValueError(f"AHE field {field} is not a structural identifier")

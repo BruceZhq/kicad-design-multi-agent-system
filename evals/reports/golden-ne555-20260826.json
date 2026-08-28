@@ -1,0 +1,784 @@
+{
+  "schemaVersion": "1.0",
+  "scope": "live_http_sse_agent_evaluation_not_manufacturing_approval",
+  "planId": "ratsnest-supported-golden-boards-v1",
+  "planDigest": "85fdbca5afe0b686c7ed8664fa238a8ebd1e9c9738b299c3d893eeb4c7a3bedc",
+  "sourceCommit": "f66ee1f0e233ff11b2f357de57d4ec07f0808c53",
+  "sourceDirty": true,
+  "frozenExecution": null,
+  "createdAt": "2026-08-26T07:23:47.617433+00:00",
+  "cases": [
+    {
+      "caseId": "golden.01-ne555-led-blinker",
+      "category": "eda_pipeline",
+      "arm": null,
+      "pairId": null,
+      "expectedTerminal": "completed",
+      "requestFingerprint": "5a5641640c3836b7e465c5e26b44b968c7ec4e1aab1ed8eff455c327d64aa99e",
+      "observed": {
+        "httpStatus": 200,
+        "durationSeconds": 1426.466,
+        "done": true,
+        "humanInput": false,
+        "errors": [],
+        "intent": "build",
+        "phases": [
+          "intent-router",
+          "supervisor->sub-agent-ratsnest-architect",
+          "architect",
+          "architect->sub-agent-ratsnest-parts-specialist",
+          "parts-specialist",
+          "parts-specialist->sub-agent-ratsnest-hardware-engineer",
+          "hardware-engineer:dispatch",
+          "hardware-engineer:wait",
+          "hardware-engineer:temporal",
+          "hardware-engineer",
+          "hardware-engineer->sub-agent-ratsnest-reviewer",
+          "reviewer",
+          "reviewer->supervisor",
+          "supervisor"
+        ],
+        "tools": [
+          "fetch_datasheet",
+          "ratsnest_lookup_kicad_symbol",
+          "ratsnest_review_kicad_project",
+          "ratsnest_review_kicad_project_advisory",
+          "ratsnest_search_internal_knowledge",
+          "ratsnest_search_parts",
+          "ratsnest_temporal_hardware_workflow",
+          "ratsnest_validate_kicad_binding",
+          "web_search",
+          "web_search_kicad_official_docs",
+          "web_search_kicad_remediation",
+          "web_search_official_manufacturer"
+        ],
+        "toolCalls": [
+          {
+            "sequence": 1,
+            "tool": "ratsnest_lookup_kicad_symbol",
+            "callIdDigest": "c3a37105fa71ba173a78f5df5a6d1412d62ba0c1c167ab409c6eeffc441e400b",
+            "argumentKeys": [
+              "limit",
+              "query"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 2,
+            "tool": "ratsnest_validate_kicad_binding",
+            "callIdDigest": "92eeb74c96116aa3f0564d1bf7008e40cc7742a9970eae971e54c5c458654fff",
+            "argumentKeys": [
+              "footprint_lib_id",
+              "symbol_lib_id"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 3,
+            "tool": "ratsnest_lookup_kicad_symbol",
+            "callIdDigest": "f3ced64abe9a64365325d2d3cdb2b342e8006e404d3f077fae9490312c31e905",
+            "argumentKeys": [
+              "limit",
+              "query"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 4,
+            "tool": "ratsnest_validate_kicad_binding",
+            "callIdDigest": "26f9963cc157e6d345a99b5b77bbababafc3f2636f242ac98509183aea8a8d7f",
+            "argumentKeys": [
+              "footprint_lib_id",
+              "symbol_lib_id"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 5,
+            "tool": "ratsnest_search_internal_knowledge",
+            "callIdDigest": "abd78956504769bffb37d6f9d2471a6c5204ebe03bda0a8d3629380e757fb6fa",
+            "argumentKeys": [
+              "evidence_types",
+              "limit",
+              "query",
+              "role"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 6,
+            "tool": "web_search_kicad_official_docs",
+            "callIdDigest": "8006c9bb828a125285069c3f51a51e329594fcd2c16fb84cfb7bbaef4758b1a2",
+            "argumentKeys": [
+              "query"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 7,
+            "tool": "web_search",
+            "callIdDigest": "4c54004d6aa04aa9fdf6051fa6b6a59fe3b7cca6ef8094f254db90ee7968b547",
+            "argumentKeys": [
+              "query"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 8,
+            "tool": "fetch_datasheet",
+            "callIdDigest": "5ae9c886a65a1e4592f820e0cbfb2bd2aded4def2e37beb39de7f9f3aca7163e",
+            "argumentKeys": [
+              "max_pages",
+              "query",
+              "url"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 9,
+            "tool": "ratsnest_search_internal_knowledge",
+            "callIdDigest": "6354a203ab1c230c5bee6bfc64495aa55989149c49e3eff5d5dae42281616955",
+            "argumentKeys": [
+              "evidence_types",
+              "limit",
+              "query",
+              "role"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 10,
+            "tool": "ratsnest_search_parts",
+            "callIdDigest": "f46f8a1a347146de65dc1ee61798208377f67ac1600d8e91c18a4578a4103dd1",
+            "argumentKeys": [
+              "limit",
+              "query"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "unavailable",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 11,
+            "tool": "web_search_official_manufacturer",
+            "callIdDigest": "e7ddab3c1ec846938e791adf20e7446b1a9392f6d5a52832e1b1f1137dfe9b8b",
+            "argumentKeys": [
+              "query"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 12,
+            "tool": "ratsnest_search_internal_knowledge",
+            "callIdDigest": "0dcf6b6591042b7f5fd63db6624fb6b5e737c15442671fd1fbd03b0dc102ee1d",
+            "argumentKeys": [
+              "evidence_types",
+              "limit",
+              "query",
+              "role"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 13,
+            "tool": "ratsnest_search_parts",
+            "callIdDigest": "0cff80a6b7e134a4cef19340820eec087d8b4bcd318ec87f58833ad63b765a2d",
+            "argumentKeys": [
+              "limit",
+              "query"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "unavailable",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 14,
+            "tool": "web_search_official_manufacturer",
+            "callIdDigest": "44e17454c0a81b7c03bef754df4a1db24a0d6f55a0d28145475c14ec5a7ed424",
+            "argumentKeys": [
+              "query"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 15,
+            "tool": "fetch_datasheet",
+            "callIdDigest": "062a85d6e722571f3729597d9642f8a73bc29c91d61b3d766d8d54edabdf7355",
+            "argumentKeys": [
+              "max_pages",
+              "query",
+              "url"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 16,
+            "tool": "ratsnest_search_internal_knowledge",
+            "callIdDigest": "93d00fa6a2e6feba2eb57e14f84bb0030e4b9ec51d6c9927c909799f0a674505",
+            "argumentKeys": [
+              "evidence_types",
+              "limit",
+              "query",
+              "role"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 17,
+            "tool": "ratsnest_search_parts",
+            "callIdDigest": "0bd77ef0e81adb8a627c97540df5bfd19b37a48b3497b487a9fcc2a9bc4e6f34",
+            "argumentKeys": [
+              "limit",
+              "query"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "unavailable",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 18,
+            "tool": "web_search_official_manufacturer",
+            "callIdDigest": "41ee8b610668a49740992caa50e1246484c18b074943b449ed32d607973646c7",
+            "argumentKeys": [
+              "query"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 19,
+            "tool": "fetch_datasheet",
+            "callIdDigest": "a3871f30ba847bd07e7118ff6c3c233939765bc00daad60d6bdf0cac1528596f",
+            "argumentKeys": [
+              "max_pages",
+              "query",
+              "url"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "no_matches",
+            "postconditionSatisfied": false,
+            "customEvidence": true
+          },
+          {
+            "sequence": 20,
+            "tool": "ratsnest_search_internal_knowledge",
+            "callIdDigest": "a435367791c2e3bf9703c6890afafa4e3081199d24cf3b9c1575e4bb60f42896",
+            "argumentKeys": [
+              "evidence_types",
+              "limit",
+              "query",
+              "role"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 21,
+            "tool": "ratsnest_search_parts",
+            "callIdDigest": "821388977a5d95db0388cea8385af1f931067c7dca0844253214a472fc74940d",
+            "argumentKeys": [
+              "limit",
+              "query"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "unavailable",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 22,
+            "tool": "web_search_official_manufacturer",
+            "callIdDigest": "8625f7872eb4b48361fc9f3a603c30855d47264c57d10843444c8d31a6cca6c6",
+            "argumentKeys": [
+              "query"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 23,
+            "tool": "fetch_datasheet",
+            "callIdDigest": "a579e4ab5b092e7f483154dadeac109e64fedff10e75c4dde4d9e562e969adfa",
+            "argumentKeys": [
+              "max_pages",
+              "query",
+              "url"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "no_matches",
+            "postconditionSatisfied": false,
+            "customEvidence": true
+          },
+          {
+            "sequence": 24,
+            "tool": "ratsnest_temporal_hardware_workflow",
+            "resultStatus": "delivered_with_issues",
+            "postconditionSatisfied": null,
+            "customEvidence": false,
+            "callIdDigest": "03d04287a0c51df94df65d8c073e229a4a147a900b736fc23e530b76a8dd31f9",
+            "argumentKeys": [
+              "run_ref"
+            ],
+            "argumentsSchemaValid": true
+          },
+          {
+            "sequence": 25,
+            "tool": "ratsnest_review_kicad_project",
+            "callIdDigest": "243d004c7ab6c4310c26c87e7d73f0dd6cff3625da16c08cb71e10e3a0904097",
+            "argumentKeys": [
+              "llm_mode",
+              "model_name",
+              "model_type",
+              "project_path",
+              "report_name",
+              "upstream_release_blockers",
+              "upstream_release_identity",
+              "upstream_release_ready"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "blocked",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 26,
+            "tool": "ratsnest_review_kicad_project_advisory",
+            "callIdDigest": "f95b7fbf20972cef4c88a7b509a0e59a86823e014bf53d74748d52b9c99cbdf0",
+            "argumentKeys": [
+              "llm_mode",
+              "model_name",
+              "model_type",
+              "project_path",
+              "report_name",
+              "upstream_release_blockers",
+              "upstream_release_identity",
+              "upstream_release_ready"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "blocked",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 27,
+            "tool": "ratsnest_search_internal_knowledge",
+            "callIdDigest": "baf895e5dd35dc8bcd4a34a45417d747bc4921c63bd32409a40d0ae9fefe72d2",
+            "argumentKeys": [
+              "evidence_types",
+              "limit",
+              "query",
+              "role"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "no_results",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 28,
+            "tool": "web_search_kicad_remediation",
+            "callIdDigest": "6888799ec0e780f8d2b851d35f4db7f89b7c679df09963f61a3392cc33eeeabc",
+            "argumentKeys": [
+              "query"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 29,
+            "tool": "ratsnest_search_internal_knowledge",
+            "callIdDigest": "d06d675d3a23b448a4691f3b53c916dc613a10b0be6ab4a7b877ca425301845c",
+            "argumentKeys": [
+              "evidence_types",
+              "limit",
+              "query",
+              "role"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "no_results",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 30,
+            "tool": "web_search_kicad_remediation",
+            "callIdDigest": "6bd09dba641dae8bb8f78c269626909c0b518bc44da392990f7849f42e8402df",
+            "argumentKeys": [
+              "query"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 31,
+            "tool": "ratsnest_search_internal_knowledge",
+            "callIdDigest": "09b911f0663ed830ef1a440c9a6cd387f5a82dee1d05bc227151103874f40080",
+            "argumentKeys": [
+              "evidence_types",
+              "limit",
+              "query",
+              "role"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          },
+          {
+            "sequence": 32,
+            "tool": "web_search_kicad_remediation",
+            "callIdDigest": "9d09cd51f179e172ae6af823ac72df8f26fd68e1bddb378e23556241237e2304",
+            "argumentKeys": [
+              "query"
+            ],
+            "argumentsSchemaValid": true,
+            "resultStatus": "ok",
+            "postconditionSatisfied": true,
+            "customEvidence": true
+          }
+        ],
+        "handoffs": [
+          {
+            "handoffId": "supervisor->sub-agent-ratsnest-architect",
+            "producer": "supervisor",
+            "consumer": "sub-agent-ratsnest-architect",
+            "status": "accepted",
+            "payloadDigest": "96170c1cc2ac57752470546ec366ae00c320760aebaaf9024c7ccdd6a412f6d0"
+          },
+          {
+            "handoffId": "architect->sub-agent-ratsnest-parts-specialist",
+            "producer": "architect",
+            "consumer": "sub-agent-ratsnest-parts-specialist",
+            "status": "accepted",
+            "payloadDigest": "6a9738b3db51899b5bbc5f74a655e17d45d4d4434177755fa8785d4866842cbf"
+          },
+          {
+            "handoffId": "parts-specialist->sub-agent-ratsnest-hardware-engineer",
+            "producer": "parts-specialist",
+            "consumer": "sub-agent-ratsnest-hardware-engineer",
+            "status": "accepted",
+            "payloadDigest": "49d1d6959d7895eab0a40e7856f86f09358bd19b7bbb7d1f3d3ea66748a38a75"
+          },
+          {
+            "handoffId": "hardware-engineer->sub-agent-ratsnest-reviewer",
+            "producer": "hardware-engineer",
+            "consumer": "sub-agent-ratsnest-reviewer",
+            "status": "accepted",
+            "payloadDigest": "755ea6356359a9a2650e45a7b05e7158bbce6973a6adeab0dd18668ff0ecff63"
+          },
+          {
+            "handoffId": "reviewer->supervisor",
+            "producer": "reviewer",
+            "consumer": "supervisor",
+            "status": "accepted",
+            "payloadDigest": "8b399746fe449a188b29ddfef32b66e242fc066cc8ab77fb5be1fda25565e5af"
+          }
+        ],
+        "handoffErrorCount": 0,
+        "hitl": {
+          "requestCount": 0,
+          "responseCount": null,
+          "responseLatencySeconds": null
+        },
+        "completedSteps": 17,
+        "llmTokens": 185927,
+        "deliveryStatus": "delivered_with_issues",
+        "artifacts": [
+          {
+            "name": "p2-golden.01-ne555-led-blinker-B_Fab.gbr",
+            "sha256": "a270a71d736d8fd5e2cb9296c98331248d68328e9d348860bf3b5181ac66566d",
+            "valid": true
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker.release_invariants.json",
+            "sha256": "91943e8aeedaf4507a35cd745603cc56bc30f73923c9e3e28105ff1ee9624247",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-F_Mask.gts",
+            "sha256": "0dc0d5c789b2df21aa0cf651454ae21a811ff0df77bde739c0c4380cfbdcf923",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker.placement_constraints.json",
+            "sha256": "5b555858b447fdce2fead19f02c9618442005d0bb10104a57a2f26e880beb6eb",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-B_Paste.gbp",
+            "sha256": "585e335d440a5ba29962b1400bb3c132edc89e504474aa523d37887219a7b8e5",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker.erc.json",
+            "sha256": "6394a459485bb9d3c2b0cee87f3b24632245cb29507278bb5d2c1b78ab0f294b",
+            "valid": true
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-User_Comments.gbr",
+            "sha256": "82ba12ee640222ff3e0162ba84741eb398022017ad963d134df41b9ab44aa323",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-B_Courtyard.gbr",
+            "sha256": "b1513fbdc16e7ea86107b7a8656df3a42c07f4f6ac943b6f6db8ff989cd467f1",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-B_Mask.gbs",
+            "sha256": "65a6795fd35d54b5299f88f28df76bf17b5c1710c697957c46bc23243f9461dd",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-F_Fab.gbr",
+            "sha256": "97b13006304bff923d867108f9cecfc22425f27e299f6ba6efb51e6ae93fd05f",
+            "valid": true
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker_bom.csv",
+            "sha256": "2601476505e059e557395049a244df1bcded015fb84727313165ad1279d6af4f",
+            "valid": true
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-Edge_Cuts.gm1",
+            "sha256": "49de0dbb238ae4af25dc5024d673fef3d2247b8171f075667fa58b9836588e4b",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-PTH-drl_map.gbr",
+            "sha256": "6c3dea9ce204f4272f7e87d86b3565a6c1bdfa05385d969ed027e7f4bba7f5bc",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-F_Silkscreen.gto",
+            "sha256": "45c245cf2af1d853dd5ce2b8fedd49020aa835fd24717e81b2be75c249dc3377",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker.kicad_pro",
+            "sha256": "5e2516c236479c49a5f655df6548b494669be935336a927105e1eb47466c3e4d",
+            "valid": true
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-F_Courtyard.gbr",
+            "sha256": "c1b83c22b66b4b5788a7a7f0b878ff46a5a9072f0a97974eaeeaf7f928f5d2b6",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-B_Adhesive.gba",
+            "sha256": "9af886e529bdb370ab34cb8ca85b047b136ee8934298dd20d5dd65e5ca404840",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-job.gbrjob",
+            "sha256": "588839fe94576212c020901b6b6fe24817c134a2c0a719e41a24a6903089d06d",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-Margin.gbr",
+            "sha256": "b1513fbdc16e7ea86107b7a8656df3a42c07f4f6ac943b6f6db8ff989cd467f1",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker_unresolved_components.json",
+            "sha256": "fbcd7ab590b0ae119762d39f2b5b23ef96b2358cada874d74433e67ba8c41ec7",
+            "valid": false
+          },
+          {
+            "name": "pipeline_state.json",
+            "sha256": "5df018857082de91b711d3948893edc79f5c386e0e94e3a85e7006ef111aa5b9",
+            "valid": true
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-NPTH-drl_map.gbr",
+            "sha256": "aa38102070efaa15b4ce1ea521c736024f859f2afedb55d65b871a3c4b46e32e",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-B_Cu.gbl",
+            "sha256": "bcc3d956d0ee690c2914fcc732fe5913315724fb54b1ac54f01668540ff14635",
+            "valid": true
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-F_Paste.gtp",
+            "sha256": "d26ef332799c8261f548bd35b656e8a99e3a8d4497bf34c35659a2db0629c58d",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker_cpl.csv",
+            "sha256": "b1a1456d33196756e3fea5484ddd1d62c2265f2dc85eff1751680b0ac25a072f",
+            "valid": true
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-User_Drawings.gbr",
+            "sha256": "6e880f6715bdc077cb993e4de60779bd0bbaa40b4c51d93db366d43e23a5bfb6",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-F_Adhesive.gta",
+            "sha256": "29ab1ca63b282b3eeca2d2b3201a90a4521348540ca5f74e7be1f6c844284dc2",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker.kicad_pcb",
+            "sha256": "8ec7a1a436782e3c1a8bb80effc3fb9d8c61b6887cf5db846d862b9dd27beb7e",
+            "valid": true
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker.kicad_sch",
+            "sha256": "44b04f335b39ed352dc428abc384c14f3d60abc44ce8fa279194522a145fdd7e",
+            "valid": true
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker.dsn",
+            "sha256": "c11780fce6b418a1022f3e59bc0c486021236c31aaecda21920d2e3447746465",
+            "valid": true
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker.unrouted.kicad_pcb",
+            "sha256": "d7be7f21885dc7951c8324a042f8762566dec81218dea4b79b70db4544edf88b",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-B_Silkscreen.gbo",
+            "sha256": "18ca7cb6f5fc9e4ce61826b583cde9cadfe19f960158e17b2306a65d0ac5b7eb",
+            "valid": false
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker.drc.json",
+            "sha256": "eda14cd3e6079ad39087a76ef9af81f30d3ac72bba2e5d5b09cbfbea1251cdeb",
+            "valid": true
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker.ses",
+            "sha256": "e9858034f1c80aae86f313ec6360bdca3f97e9f31c1769ff90abc57ffadaa460",
+            "valid": true
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-F_Cu.gtl",
+            "sha256": "d1762bbb7e5367b1804961fb9bf1e705aa7b99dee4786329409d7ce5d31634ca",
+            "valid": true
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-PTH.drl",
+            "sha256": "b062484343422c3c5de70a55a5564f5469dbb423ce2c4a81f9255b9540b0f310",
+            "valid": true
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-NPTH.drl",
+            "sha256": "20a3f087b73e99c0e3a875818b53f386a6363c419a08f64cc30d50599085da59",
+            "valid": true
+          },
+          {
+            "name": "p2-golden.01-ne555-led-blinker-88a2744c-review.md",
+            "sha256": "79a5f10f814fd9e613acf91fd820c8eb8169b10085d1a75fd65297b373147a3e",
+            "valid": false
+          }
+        ],
+        "artifactsValid": false,
+        "eventDigest": "1e761c204c28dc9f1d48c1ca856331dc0acbf84cb33a2ffb7858b54c97994b2f"
+      },
+      "replay": null,
+      "checks": {
+        "intent": true,
+        "requiredPhases": true,
+        "forbiddenPhases": true,
+        "requiredTools": true,
+        "forbiddenTools": true,
+        "terminal": true,
+        "artifacts": false,
+        "releaseGate": false,
+        "edaPipeline": false,
+        "replay": true,
+        "toolEvidence": null,
+        "handoffEvidence": null
+      },
+      "humanAcceptance": null,
+      "passed": false
+    }
+  ],
+  "metrics": {
+    "caseCount": 1,
+    "passedCases": 0,
+    "passRate": 0.0,
+    "transportCompletionRate": 1.0,
+    "protocolCompletionRate": 1.0,
+    "pipelineCompletionRate": 1.0,
+    "releaseReadyRate": 0.0,
+    "intentAccuracy": 1.0,
+    "toolContractAccuracy": 1.0,
+    "gateAccuracy": 0.0,
+    "edaPipelineAccuracy": 0.0,
+    "toolEvidenceAccuracy": null,
+    "observedToolCallCount": 32,
+    "toolArgumentSchemaValidityRate": 1.0,
+    "toolPostconditionPassRate": 0.9354838709677419,
+    "toolResultStatusCoverageRate": 1.0,
+    "handoffEvidenceAccuracy": null,
+    "handoffErrorCount": 0,
+    "humanAcceptanceRate": null,
+    "humanReviewedCaseCount": 0,
+    "hitlRequestCount": 0,
+    "hitlResponseCount": null,
+    "pairCount": 0,
+    "completePairCount": 0,
+    "falseReleaseCount": 0,
+    "totalLlmTokens": 185927,
+    "totalWallClockSeconds": 1426.466
+  }
+}

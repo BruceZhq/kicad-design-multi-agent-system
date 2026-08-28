@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+
 import {
   controlPlaneFetch,
   forwardJson,
@@ -32,6 +36,69 @@ interface StartedRun {
 interface CapabilityProfileSelector {
   id: string;
   version: string;
+}
+
+interface EvaluationSelection {
+  agentId: "ratsnestpro-multi-agent" | "ratsnestpro-single-agent-eval";
+  context: Record<string, string>;
+}
+
+function textField(value: unknown, pattern: RegExp): string | null {
+  return typeof value === "string" && pattern.test(value) ? value : null;
+}
+
+async function evaluationSelection(
+  value: unknown,
+  message: string,
+  model: unknown,
+  profile: CapabilityProfileSelector,
+): Promise<EvaluationSelection | null> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const context = value as Record<string, unknown>;
+  const planId = textField(context.planId, /^[A-Za-z0-9._:-]{1,200}$/);
+  const planDigest = textField(context.planDigest, /^[0-9a-f]{64}$/);
+  const pairId = textField(context.pairId, /^[A-Za-z0-9._:-]{1,200}$/);
+  const caseId = textField(context.caseId, /^[A-Za-z0-9._:-]{1,200}$/);
+  const arm = textField(context.arm, /^(?:single_agent|multi_agent)$/);
+  const promptDigest = textField(context.promptDigest, /^[0-9a-f]{64}$/);
+  if (!planId || !planDigest || !pairId || !caseId || !arm || !promptDigest) return null;
+
+  const planBytes = await readFile(
+    path.join(process.cwd(), "public", "evals", "paired-kicad-golden.v1.json"),
+  );
+  if (createHash("sha256").update(planBytes).digest("hex") !== planDigest) return null;
+  const plan = JSON.parse(planBytes.toString("utf8")) as {
+    planId?: unknown;
+    frozenExecution?: { model?: unknown };
+    cases?: Array<Record<string, unknown>>;
+  };
+  const evaluationCase = Array.isArray(plan.cases)
+    ? plan.cases.find((item) => item.caseId === caseId)
+    : undefined;
+  if (
+    plan.planId !== planId ||
+    !evaluationCase ||
+    evaluationCase.pairId !== pairId ||
+    evaluationCase.arm !== arm ||
+    evaluationCase.prompt !== message ||
+    plan.frozenExecution?.model !== model ||
+    evaluationCase.profileReference !== `${profile.id}@${profile.version}` ||
+    createHash("sha256").update(message, "utf8").digest("hex") !== promptDigest
+  ) return null;
+
+  return {
+    agentId: arm === "single_agent"
+      ? "ratsnestpro-single-agent-eval"
+      : "ratsnestpro-multi-agent",
+    context: {
+      planId,
+      planDigest,
+      pairId,
+      caseId,
+      arm,
+      promptDigest,
+    },
+  };
 }
 
 function capabilityProfile(value: unknown): CapabilityProfileSelector | null {
@@ -119,6 +186,39 @@ export async function POST(request: Request): Promise<Response> {
     return jsonError(request, "capability_profile must contain a valid id and version.");
   }
 
+  let evaluation: EvaluationSelection | null = null;
+  if (input.evaluation_context !== undefined) {
+    if (process.env.RATSNEST_EVAL_MODE_ENABLED !== "true") {
+      return problemResponse(
+        request,
+        "EVALUATION_MODE_DISABLED",
+        403,
+        "Paired evaluation mode is disabled.",
+      );
+    }
+    if (baseRunId || forkSourceRunId) {
+      return jsonError(request, "Evaluation cases must start in a fresh root run.");
+    }
+    try {
+      evaluation = await evaluationSelection(
+        input.evaluation_context,
+        message,
+        model,
+        selectedProfile,
+      );
+    } catch {
+      evaluation = null;
+    }
+    if (!evaluation) {
+      return problemResponse(
+        request,
+        "EVALUATION_PLAN_MISMATCH",
+        422,
+        "The evaluation request does not match the server-frozen plan.",
+      );
+    }
+  }
+
   const members = teamMembers(
     input.team_members ??
     (input.agent_config && typeof input.agent_config === "object"
@@ -148,6 +248,10 @@ export async function POST(request: Request): Promise<Response> {
           threadId,
           teamMembers: members,
           capabilityProfile: selectedProfile,
+          ...(evaluation ? {
+            agentId: evaluation.agentId,
+            evaluationContext: evaluation.context,
+          } : {}),
         });
     const started = await controlPlaneFetch(
       request,

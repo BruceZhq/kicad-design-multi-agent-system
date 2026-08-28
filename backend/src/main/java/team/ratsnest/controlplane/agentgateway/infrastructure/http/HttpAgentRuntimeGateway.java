@@ -36,7 +36,10 @@ import tools.jackson.databind.ObjectMapper;
 @Component
 public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
 
-    private static final String AGENT_ID = "ratsnestpro-multi-agent";
+    private static final String DEFAULT_AGENT_ID = "ratsnestpro-multi-agent";
+    private static final String SINGLE_AGENT_EVAL_ID = "ratsnestpro-single-agent-eval";
+    private static final Set<String> ALLOWED_AGENT_IDS = Set.of(
+            DEFAULT_AGENT_ID, SINGLE_AGENT_EVAL_ID);
     private static final String HISTORY_REQUEST_ID = "history-query";
     private static final byte[] EMPTY_BODY = new byte[0];
     private static final Duration UNARY_TIMEOUT = Duration.ofSeconds(20);
@@ -78,10 +81,15 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
 
     @Override
     public RuntimeRun startRun(StartRunCommand command) {
+        String agentId = agentId(command.config());
         byte[] body = jsonBytes(streamBody(command, 0));
         HttpResponse<InputStream> response = send(
                 routedRequest(
-                        "POST", streamPath(), body, command.identity(), command.requestId(),
+                        "POST",
+                        streamPath(agentId),
+                        body,
+                        command.identity(),
+                        command.requestId(),
                         "text/event-stream", channel(command.config())),
                 HttpResponse.BodyHandlers.ofInputStream());
         try {
@@ -98,7 +106,7 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
                 null,
                 "stream",
                 RunState.RUNNING,
-                AGENT_ID,
+                agentId,
                 command.threadId(),
                 now,
                 now,
@@ -295,8 +303,22 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
                 .method(method, publisher);
     }
 
-    private String streamPath() {
-        return "/internal/v1/runs/" + AGENT_ID + "/stream";
+    private String streamPath(String agentId) {
+        return "/internal/v1/runs/" + agentId + "/stream";
+    }
+
+    private String agentId(Map<String, Object> config) {
+        Object selected = config.get("agent_id");
+        String agentId = selected instanceof String value ? value : DEFAULT_AGENT_ID;
+        if (!ALLOWED_AGENT_IDS.contains(agentId)) {
+            throw new AgentRuntimeException(400, "Agent identifier is not allowlisted");
+        }
+        if (SINGLE_AGENT_EVAL_ID.equals(agentId)
+                && !Boolean.parseBoolean(System.getenv().getOrDefault(
+                        "RATSNESTPRO_SINGLE_AGENT_EVAL_ENABLED", "false"))) {
+            throw new AgentRuntimeException(403, "Single-agent evaluation is disabled");
+        }
+        return agentId;
     }
 
     private URI baseUri(String runtimeChannel) {
@@ -755,7 +777,7 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
                 HttpResponse<InputStream> response = send(
                         HttpAgentRuntimeGateway.this.routedStreamingRequest(
                                 "POST",
-                                streamPath(),
+                                streamPath(agentId(command.config())),
                                 body,
                                 command.identity(),
                                 command.requestId(),

@@ -52,11 +52,12 @@ def actual_artifacts(state: Mapping[str, Any]) -> list[str]:
     attempts = list(state.get("hardware_attempts", []))
     if state.get("hardware"):
         attempts.append(state["hardware"])
-    candidates = [
-        str(path)
-        for attempt in attempts
-        for path in attempt.get("actual_files", [])
-    ]
+    candidates: list[str] = []
+    for attempt in attempts:
+        candidates.extend(str(path) for path in attempt.get("actual_files", []))
+        pipeline_result_path = str(attempt.get("pipeline_result_path", ""))
+        if pipeline_result_path:
+            candidates.append(pipeline_result_path)
     report_path = str(state.get("review", {}).get("report_path", ""))
     if report_path:
         candidates.append(report_path)

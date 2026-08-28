@@ -73,7 +73,7 @@ def _refresh_embedded_uuids(nodes: list[Node]) -> None:
     def replace_declarations(node: Node) -> None:
         if not isinstance(node, list):
             return
-        if tag_of(node) == "uuid" and len(node) > 1:
+        if tag_of(node) in {"uuid", "tstamp"} and len(node) > 1:
             old = str(node[1])
             replacement = replacements.setdefault(old, new_uuid())
             node[1] = Atom(replacement) if isinstance(node[1], Atom) else replacement
@@ -96,7 +96,7 @@ def _refresh_embedded_uuids(nodes: list[Node]) -> None:
 
 
 def _apply_footprint_rotation(nodes: list[Node], rotation: float) -> None:
-    """Convert library-relative pad angles to board-instance angles."""
+    """Convert library-local pad angles to board-instance pad angles."""
     if float(rotation) % 360 == 0:
         return
     for node in nodes:
@@ -229,28 +229,74 @@ class PcbBoard:
         if self._find_footprint(reference):
             raise ValueError(f"reference {reference!r} already placed")
         fp_uuid = new_uuid()
-        fp = _sym(
-            "footprint",
-            lib_id,
-            _sym("layer", layer),
-            _sym("uuid", fp_uuid),
-            _sym("at", _n(x), _n(y), _n(rotation)),
-            _sym("property", "Reference", reference,
-                 _sym("at", _n(0), _n(-1), _n(0)), _sym("layer", "F.SilkS"),
-                 _sym("uuid", new_uuid())),
-            _sym("property", "Value", value,
-                 _sym("at", _n(0), _n(1), _n(0)), _sym("layer", "F.Fab"),
-                 _sym("uuid", new_uuid())),
-        )
-        if embed_node is not None:
+        if embed_node is None:
+            fp = _sym(
+                "footprint",
+                lib_id,
+                _sym("layer", layer),
+                _sym("uuid", fp_uuid),
+                _sym("at", _n(x), _n(y), _n(rotation)),
+                _sym("property", "Reference", reference,
+                     _sym("at", _n(0), _n(-1), _n(0)), _sym("layer", "F.SilkS"),
+                     _sym("uuid", new_uuid())),
+                _sym("property", "Value", value,
+                     _sym("at", _n(0), _n(1), _n(0)), _sym("layer", "F.Fab"),
+                     _sym("uuid", new_uuid())),
+            )
+        else:
             from copy import deepcopy
 
-            from .footprint import embeddable_children
-
-            children = [deepcopy(child) for child in embeddable_children(embed_node)]
+            # Preserve the full real library footprint.  KiCad rotates child
+            # positions through the footprint instance, but pad shape angles
+            # in a board instance are absolute and must include that rotation.
+            instance_owned = {
+                "version", "generator", "generator_version", "layer",
+                "uuid", "tstamp", "at",
+            }
+            children = [
+                deepcopy(child)
+                for child in embed_node[2:]
+                if not (
+                    isinstance(child, list)
+                    and tag_of(child) in instance_owned
+                )
+            ]
             _refresh_embedded_uuids(children)
             _apply_footprint_rotation(children, rotation)
-            fp.extend(children)
+            fp = _sym(
+                "footprint",
+                lib_id,
+                _sym("layer", layer),
+                _sym("uuid", fp_uuid),
+                _sym("at", _n(x), _n(y), _n(rotation)),
+                *children,
+            )
+
+            properties = {
+                str(child[1]): child
+                for child in children
+                if isinstance(child, list)
+                and tag_of(child) == "property"
+                and len(child) >= 3
+            }
+            if "Reference" in properties:
+                properties["Reference"][2] = reference
+            else:
+                fp.insert(
+                    5,
+                    _sym("property", "Reference", reference,
+                         _sym("at", _n(0), _n(-1), _n(0)),
+                         _sym("layer", "F.SilkS"), _sym("uuid", new_uuid()))
+                )
+            if "Value" in properties:
+                properties["Value"][2] = value
+            else:
+                fp.insert(
+                    6 if "Reference" not in properties else 5,
+                    _sym("property", "Value", value,
+                         _sym("at", _n(0), _n(1), _n(0)),
+                         _sym("layer", "F.Fab"), _sym("uuid", new_uuid()))
+                )
         self.root.append(fp)
         return fp_uuid
 
@@ -264,6 +310,7 @@ class PcbBoard:
             net = find_first(pad, "net")
             pads.append({
                 "number": str(pad[1]),
+                "type": str(pad[2]) if len(pad) > 2 else "",
                 "rel": (Atom(str(at[1])).as_float() if at else 0.0,
                         Atom(str(at[2])).as_float() if at and len(at) > 2 else 0.0),
                 "layers": [str(x) for x in layers[1:]] if layers else [],
@@ -288,6 +335,7 @@ class PcbBoard:
             dx, dy = rotate_offset(pad["rel"][0], pad["rel"][1], frot)
             out.append({"number": pad["number"], "x": round(fx + dx, 4),
                         "y": round(fy + dy, 4), "layers": pad["layers"],
+                        "type": pad["type"],
                         "net_index": pad["net_index"], "net": pad["net"]})
         return out
 
@@ -316,6 +364,8 @@ class PcbBoard:
         at = find_first(fp, "at")
         x = Atom(str(at[1])).as_float() if at else 0.0
         y = Atom(str(at[2])).as_float() if at and len(at) > 2 else 0.0
+        old_angle = Atom(str(at[3])).as_float() if at and len(at) > 3 else 0.0
+        _apply_footprint_rotation(fp, angle - old_angle)
         for i, c in enumerate(fp):
             if tag_of(c) == "at":
                 fp[i] = _sym("at", _n(x), _n(y), _n(angle))
@@ -416,11 +466,16 @@ class PcbBoard:
                     layer: Optional[str] = None) -> List[Dict[str, Any]]:
         out = []
         net_idx = self._net_index(net) if net is not None else None
+        net_names = {
+            item["index"]: item["name"]
+            for item in self.list_nets()
+        }
         for seg in find_all(self.root, "segment"):
             s = find_first(seg, "start")
             e = find_first(seg, "end")
             ly = find_first(seg, "layer")
             nn = find_first(seg, "net")
+            width = find_first(seg, "width")
             un = find_first(seg, "uuid")
             seg_layer = str(ly[1]) if ly and len(ly) > 1 else None
             seg_net = Atom(str(nn[1])).as_int() if nn and len(nn) > 1 else None
@@ -432,7 +487,14 @@ class PcbBoard:
                 "uuid": str(un[1]) if un and len(un) > 1 else None,
                 "start": [Atom(str(s[1])).as_float(), Atom(str(s[2])).as_float()] if s else None,
                 "end": [Atom(str(e[1])).as_float(), Atom(str(e[2])).as_float()] if e else None,
-                "layer": seg_layer, "net": seg_net,
+                "layer": seg_layer,
+                "net": seg_net,
+                "net_name": net_names.get(seg_net, ""),
+                "width": (
+                    Atom(str(width[1])).as_float()
+                    if width and len(width) > 1
+                    else None
+                ),
             })
         return out
 
@@ -454,6 +516,72 @@ class PcbBoard:
             )
         )
         return u
+
+    def list_zones(self) -> List[Dict[str, Any]]:
+        """Return source and filled copper geometry for deterministic audits."""
+
+        net_names = {
+            item["index"]: item["name"]
+            for item in self.list_nets()
+        }
+        zones: List[Dict[str, Any]] = []
+        for zone in find_all(self.root, "zone"):
+            net_node = find_first(zone, "net")
+            net_name_node = find_first(zone, "net_name")
+            layer_node = find_first(zone, "layer")
+            polygon = find_first(zone, "polygon")
+            net_index = (
+                Atom(str(net_node[1])).as_int()
+                if net_node and len(net_node) > 1
+                else None
+            )
+            points: List[List[float]] = []
+            if polygon is not None:
+                pts = find_first(polygon, "pts")
+                if pts is not None:
+                    for point in find_all(pts, "xy"):
+                        if len(point) >= 3:
+                            points.append([
+                                Atom(str(point[1])).as_float(),
+                                Atom(str(point[2])).as_float(),
+                            ])
+            filled_polygons: List[Dict[str, Any]] = []
+            for filled in find_all(zone, "filled_polygon"):
+                filled_layer = find_first(filled, "layer")
+                filled_points: List[List[float]] = []
+                filled_pts = find_first(filled, "pts")
+                if filled_pts is not None:
+                    for point in find_all(filled_pts, "xy"):
+                        if len(point) >= 3:
+                            filled_points.append([
+                                Atom(str(point[1])).as_float(),
+                                Atom(str(point[2])).as_float(),
+                            ])
+                filled_polygons.append({
+                    "layer": (
+                        str(filled_layer[1])
+                        if filled_layer and len(filled_layer) > 1
+                        else ""
+                    ),
+                    "points": filled_points,
+                    "island": find_first(filled, "island") is not None,
+                })
+            zones.append({
+                "net_index": net_index,
+                "net": (
+                    str(net_name_node[1])
+                    if net_name_node and len(net_name_node) > 1
+                    else net_names.get(net_index, "")
+                ),
+                "layer": (
+                    str(layer_node[1])
+                    if layer_node and len(layer_node) > 1
+                    else ""
+                ),
+                "points": points,
+                "filled_polygons": filled_polygons,
+            })
+        return zones
 
     def add_text(self, text: str, x: float, y: float, layer: str = "F.SilkS",
                  rotation: float = 0.0) -> str:

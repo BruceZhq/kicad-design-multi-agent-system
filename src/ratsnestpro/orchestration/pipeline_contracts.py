@@ -18,6 +18,7 @@ from typing import Literal
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from ratsnestpro.domain.contracts import ContractModel
+from ratsnestpro.orchestration.release_invariants import ReleaseIdentity
 
 _COMPONENT_REFERENCE_PATTERN = r"^[A-Za-z#][A-Za-z0-9_]*$"
 _COMPONENT_REFERENCE_RE = re.compile(_COMPONENT_REFERENCE_PATTERN)
@@ -114,6 +115,14 @@ class TopologyBlock(ProposalModel):
     name: str = Field(min_length=1, max_length=120)
     kind: str = Field(min_length=1, max_length=60)
     description: str = Field(default="", max_length=2_000)
+    implementation_kind: Literal[
+        "auto",
+        "component",
+        "copper_zone",
+        "mechanical_feature",
+        "board_constraint",
+    ] = "auto"
+    implementation_refs: list[str] = Field(default_factory=list, max_length=100)
 
 
 class TopologyPlan(ProposalModel):
@@ -179,6 +188,14 @@ class SelectedPart(ProposalModel):
     symbol: str = Field(min_length=1, max_length=200)  # lib_id, e.g. Device:R
     value: str = Field(min_length=1, max_length=200)
     footprint: str = Field(default="", max_length=240)
+    # The model may suggest ``footprint`` while selecting the device. Only the
+    # deterministic post-selection binder may mark that candidate verified.
+    footprint_binding_status: Literal[
+        "",
+        "verified_installed",
+        "unresolved",
+    ] = ""
+    footprint_binding_basis: str = Field(default="", max_length=240)
     role: str = Field(default="", max_length=120)
     mpn: str = Field(default="", max_length=160)
     lcsc: str = Field(default="", max_length=40)
@@ -235,6 +252,7 @@ class SelectionPlan(ProposalModel):
     """The chosen bill of components for the design."""
 
     parts: list[SelectedPart] = Field(default_factory=list, max_length=1_000)
+    component_closure_path: str = Field(default="", max_length=1_000)
     rationale: str = Field(default="", max_length=10_000)
 
     @model_validator(mode="before")
@@ -436,6 +454,9 @@ class ErcSummary(ProposalModel):
     """Result of the schematic ERC bottom-line (deterministic + optional cli ERC)."""
 
     sch_path: str = Field(min_length=1)
+    # Version of the deterministic evidence producer, not the KiCad report
+    # schema. Persisted summaries from an older comparator must be rebuilt.
+    evidence_contract_version: int = Field(default=0, ge=0)
     shorted_nets: list[list[str]] = Field(default_factory=list)
     single_pin_nets: list[str] = Field(default_factory=list)
     cli_available: bool = False
@@ -444,6 +465,13 @@ class ErcSummary(ProposalModel):
     cli_warning_count: int = Field(default=0, ge=0)
     cli_error_details: list[str] = Field(default_factory=list)
     cli_report_path: str = ""
+    connectivity_checked: bool = False
+    connectivity_matches: bool = False
+    connectivity_netlist_path: str = ""
+    connectivity_missing: list[str] = Field(default_factory=list)
+    connectivity_extra: list[str] = Field(default_factory=list)
+    connectivity_ambiguous: list[str] = Field(default_factory=list)
+    connectivity_error: str = ""
 
 
 class BoardZone(ProposalModel):
@@ -451,6 +479,7 @@ class BoardZone(ProposalModel):
 
     name: str = Field(min_length=1, max_length=120)
     kind: str = Field(min_length=1, max_length=40)  # power/analog/digital/rf/connector/mixed
+    target_ref: str = Field(default="", max_length=32)
     x1: float = Field(ge=-10_000, le=10_000)
     y1: float = Field(ge=-10_000, le=10_000)
     x2: float = Field(ge=-10_000, le=10_000)
@@ -641,9 +670,15 @@ class ManufactureResult(ProposalModel):
     unresolved_manifest_path: str = Field(default="", max_length=1_000)
     component_release_ready: bool = False
     component_release_blockers: list[str] = Field(default_factory=list)
+    requirement_invariants_path: str = Field(default="", max_length=1_000)
+    release_identity: ReleaseIdentity | None = None
+    requirement_release_ready: bool = False
+    requirement_release_blockers: list[str] = Field(default_factory=list)
     gerber_dir: str = Field(default="", max_length=1_000)
     manufacturing_export_applicable: bool = False
     gerber_exported: bool = False
     drill_paths: list[str] = Field(default_factory=list)
     drill_exported: bool = False
+    drc_report_path: str = Field(default="", max_length=1_000)
     drc_violations: list[str] = Field(default_factory=list)
+    drc_warnings: list[str] = Field(default_factory=list)

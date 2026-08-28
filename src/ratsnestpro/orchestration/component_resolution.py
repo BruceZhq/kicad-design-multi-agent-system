@@ -361,9 +361,15 @@ def _pad_numbers(pads: Sequence[Mapping[str, Any]] | None) -> set[str]:
 
 def _compatible_pin_pad_sets(
     symbol: str,
+    footprint: str,
     pin_numbers: set[str],
     pad_numbers: set[str],
 ) -> bool:
+    if not pin_numbers and not pad_numbers:
+        return (
+            symbol.partition(":")[0].casefold() == "mechanical"
+            and footprint.partition(":")[0].casefold() == "mountinghole"
+        )
     connector = symbol.startswith(("Connector:", "Connector_Generic:"))
     return pin_numbers == pad_numbers or (
         connector and bool(pin_numbers) and pin_numbers.issubset(pad_numbers)
@@ -910,6 +916,7 @@ class ComponentResolutionService:
             candidate_pins = _pin_numbers(candidate_pin_rows)
             if not _compatible_pin_pad_sets(
                 record.lib_id,
+                part.footprint,
                 candidate_pins,
                 pad_numbers,
             ):
@@ -1037,6 +1044,7 @@ class ComponentResolutionService:
             pad_numbers = _pad_numbers(pads)
             if not _compatible_pin_pad_sets(
                 part.symbol,
+                part.footprint,
                 pin_numbers,
                 pad_numbers,
             ):

@@ -126,7 +126,12 @@ def transform_pin(px: float, py: float, rot: float, mirror: Optional[str],
         y = -y
     elif mirror == "y":
         x = -x
-    r = math.radians(rot)
+    # KiCad symbol-library coordinates are Y-up while schematic coordinates
+    # are Y-down.  After reflecting Y, the instance rotation must therefore
+    # be applied with the opposite sign.  Using ``+rot`` puts labels on the
+    # reflected end of every 90/270-degree pin (visually close, electrically
+    # unconnected in the actual .kicad_sch file).
+    r = math.radians(-rot)
     rx = x * math.cos(r) - y * math.sin(r)
     ry = x * math.sin(r) + y * math.cos(r)
     return round(px + rx, 4), round(py + ry, 4)

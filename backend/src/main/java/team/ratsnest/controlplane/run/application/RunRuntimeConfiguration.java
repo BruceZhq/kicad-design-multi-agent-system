@@ -1,5 +1,6 @@
 package team.ratsnest.controlplane.run.application;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -18,13 +19,24 @@ class RunRuntimeConfiguration {
             List<TeamMember> teamMembers,
             CapabilityProfile profile,
             HarnessSelection harness) {
+        return create(teamMembers, profile, harness, null, Map.of());
+    }
+
+    Map<String, Object> create(
+            List<TeamMember> teamMembers,
+            CapabilityProfile profile,
+            HarnessSelection harness,
+            String agentId,
+            Map<String, String> evaluationContext) {
         return create(
                 teamMembers,
                 profile.id(),
                 profile.version(),
                 profile.digest(),
                 harness.version(),
-                harness.channel());
+                harness.channel(),
+                agentId,
+                evaluationContext);
     }
 
     Map<String, Object> create(
@@ -34,19 +46,39 @@ class RunRuntimeConfiguration {
             String profileDigest,
             HarnessVersion harness,
             String harnessChannel) {
+        return create(
+                teamMembers,
+                profileId,
+                profileVersion,
+                profileDigest,
+                harness,
+                harnessChannel,
+                null,
+                Map.of());
+    }
+
+    Map<String, Object> create(
+            List<TeamMember> teamMembers,
+            String profileId,
+            String profileVersion,
+            String profileDigest,
+            HarnessVersion harness,
+            String harnessChannel,
+            String agentId,
+            Map<String, String> evaluationContext) {
         List<Map<String, Object>> members = teamMembers.stream()
                 .map(member -> Map.<String, Object>of(
                         "role_id", member.roleId(),
                         "name", member.name(),
                         "responsibility", member.responsibility()))
                 .toList();
-        return Map.of(
-                "team_members", members,
-                "capability_profile", Map.of(
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("team_members", members);
+        config.put("capability_profile", Map.of(
                         "id", profileId,
                         "version", profileVersion,
-                        "digest", profileDigest),
-                "harness_version", Map.of(
+                        "digest", profileDigest));
+        config.put("harness_version", Map.of(
                         "id", harness.harnessVersionId(),
                         "version", harness.version(),
                         "manifest_digest", harness.manifestDigest(),
@@ -56,5 +88,12 @@ class RunRuntimeConfiguration {
                         "contract_digest", harness.contractDigest(),
                         "policy_digest", harness.policyDigest(),
                         "channel", harnessChannel));
+        if (agentId != null) {
+            config.put("agent_id", agentId);
+        }
+        if (evaluationContext != null && !evaluationContext.isEmpty()) {
+            config.put("evaluation_context", Map.copyOf(evaluationContext));
+        }
+        return Map.copyOf(config);
     }
 }

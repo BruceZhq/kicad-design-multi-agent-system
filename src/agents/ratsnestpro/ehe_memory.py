@@ -85,6 +85,11 @@ def _atomic_publish(path: Path, payload: dict[str, Any]) -> None:
             os.link(temporary, path)
         except FileExistsError:
             pass
+        except OSError:
+            # Some supported Windows/workspace filesystems reject hard links.
+            # The event ID is content-addressed, so replacing an equivalent
+            # record is still idempotent while preserving an atomic publish.
+            temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
 

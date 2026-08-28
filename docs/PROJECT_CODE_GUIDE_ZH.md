@@ -34,12 +34,12 @@
 - 包管理锁文件、图片、字体、构建缓存和第三方许可证。
 - CSS 视觉细节；前端只讲 BFF、聊天、SSE、状态恢复和后端连接。
 
-### 0.3 阅读时必须知道的当前工作区状态
+### 0.3 阅读时必须知道的版本边界
 
-本文以当前工作区为快照。当前存在一组尚未提交的“运行租约可见性与恢复”改动，涉及 Python、Java、contracts 和前端。文中使用以下标识：
+本文以 2026-08-29 的收敛版本为快照。运行租约、前端恢复、检查点续跑、Agentic Recovery、严格 Release Gate 和配对评测代码均属于仓库实现；文中仍列出的缺口表示尚未完成的覆盖或部署条件，而不是只能在作者工作区使用的隐式补丁。
 
-- **基线**：当前提交已经包含的能力。
-- **WIP**：工作区存在、但尚不能等同于干净克隆能力的改动。
+- **当前实现**：源码、契约和部署文件中已经存在的能力。
+- **可选部署**：需要外部 GPU、托管基础设施或独立 Profile 才启用的能力。
 - **生成文件**：由 proto 等源契约生成，不应作为手工修改入口。
 
 项目总原则写在 `CLAUDE.md`：Java 拥有 SaaS 身份和 Run 权威状态，Python 拥有 Agent 执行；不得硬编码“电路板成功”或伪造 EDA 证据；Evolution 不得自动合并、推送或部署。
@@ -50,7 +50,7 @@
 - 第 4–7 章：Python Runtime、Agent 内核、内嵌 EDA、Harness Evolution。
 - 第 8–9 章：Java 控制面逐包/逐类说明和 Flyway V1–V18。
 - 第 10–12 章：跨语言 contracts、前端 BFF、Compose/Kubernetes/OTel。
-- 第 13–14 章：当前 recovery WIP、测试和 CI 边界。
+- 第 13–14 章：运行恢复实现、已知边界、测试和 CI。
 - 第 15–18 章：按故障定位代码、推荐阅读路线、维护不变量。
 - 第 19–20 章：小型入口/生成文件补充索引和术语表。
 
@@ -324,7 +324,7 @@ Temporal workflow 固定推进 17 个步骤。每个 Activity 启动独立子进
 - subscriber 与 producer 解耦；subscriber 断开不意味着取消 Run。
 - cancel 是请求状态，由执行协作式检查，而不是直接杀死任意进程。
 - HITL 使用 interaction ID 和 state version，防止重复或过期回答。
-- **WIP** 使用 Redis server `TIME` 计算 `execution_lease_active/recoverable/lease_expires_at/checked_at`，避免应用节点时钟差异。
+- 使用 Redis server `TIME` 计算 `execution_lease_active/recoverable/lease_expires_at/checked_at`，避免应用节点时钟差异。
 
 这套机制解决的是“同一个 Run 最多一个有效写者”和“连接断开后可回放”，不是后台自动调度恢复。lease 过期后仍需外部重新调用 start/recover 才会接管。
 
@@ -496,6 +496,17 @@ Profile 会约束允许的 workflow modes、required decisions、知识策略、
 | 15 | `route_signals` | 信号布线或 Freerouting DSN/SES 交互 |
 | 16 | `route_fab` | DRC、丝印、孔、板边和可制造性修复 |
 | 17 | `manufacture` | Gerber/钻孔/BOM/报告等最终制造输出 |
+
+#### 6.3.1 功能所有权与布局簇
+
+`pipeline.py` 的布局链不以“当前几何最近”推断器件所有权。`_connected_refs_by_ref()` 从已验证 PinMap 构造按网络 fanout 加权的连接图，`_functional_anchor_ref()` 再结合 role token、连接强度和可作为功能锚点的器件类别，得到从属件的唯一锚点。`_decoupling_pad_target()` 只在这个锚点的供电网络上计算旋转后的真实 pad 坐标，因此 LDO 输出电容不会因为偶然靠近 MCU 而被错误归属。
+
+一般布局使用两级恢复：
+
+1. `_maxrect_pack()` 接收 `dependent -> anchor` 依赖图，在保持 footprint 尺寸排序的同时，保证锚点先于从属件落位。
+2. 如果所有器件虽然都放入板框、但邻近/边界/区域等严格门禁仍失败，则启用 dependency-aware courtyard shape packer 做功能簇联合重排。候选按未放置数、严格错误数和目标误差排序。
+
+`_repair_proximity_placements()` 仍优先执行单器件、碰撞安全的局部搜索；只有局部搜索没有降低严格错误时才联合重排。这样不会为一个电容无条件打乱整板，也不会把“全部塞下”误判为合法布局。对应回归测试为 `tests/test_layout_functional_clusters.py`。
 
 ### 6.4 `eda/` 文件地图
 
@@ -685,7 +696,7 @@ RLS 的核心不是 Controller 中加一个 `WHERE organization_id=?`，而是�
 | `DeliveryStatus.java` | 交付真相枚举 | 规范化 `release_ready/delivered_with_issues/execution_blocked` 等，和执行生命周期状态分离 |
 | `RunInteraction.java` | HITL 领域记录 | interaction ID、state version、状态、问题、回答、response request ID |
 | `ConversationSummary.java` | 会话列表模型 | thread 最新 Run、摘要、pending interaction 等前端恢复所需信息 |
-| `RunController.java` | Run REST API | start/get/cancel/revise/events/history/conversations/delete/runtime-info/interaction；**WIP** 增加 runtime-status 和 recover |
+| `RunController.java` | Run REST API | start/get/cancel/revise/events/history/conversations/delete/runtime-info/interaction/runtime-status/recover |
 | `RunService.java` | Run 业务总编排 | 幂等创建、profile/harness 固化、Runtime 启动、SSE 事件处理、状态迁移、revision、HITL、history、manifest、reconciliation |
 | `RunRepository.java` | Run SQL 和状态机 | insert/find/lock/update；SQL 条件禁止 terminal 回退；状态和 event count 单调；幂等查询和 revision lineage |
 | `RunInteractionRepository.java` | HITL SQL/CAS | pending→responding→responded；`stateVersion` 和 `response_request_id` 防重复/过期回答 |
@@ -704,7 +715,7 @@ RLS 的核心不是 Controller 中加一个 `WHERE organization_id=?`，而是�
 4. **revision**：要求父 Run terminal 且是最新 revision；复制不可变 execution snapshot，创建新子 Run，不覆盖旧产物。
 5. **interaction**：先 DB CAS 成 responding，再调用 Runtime resume，成功后 responded；失败保留可诊断状态。
 6. **conversation delete**：写 principal-scoped tombstone，隐藏该用户视图，不删除共享 Run。
-7. **WIP recover**：只允许非 terminal、非 waiting、无 active lease且 Runtime 明确 recoverable 的 Run；复用稳定 Run UUID 再次 start。
+7. **recover**：只允许非 terminal、非 waiting、无 active lease且 Runtime 明确 recoverable 的 Run；复用稳定 Run UUID 再次 start。
 
 #### Run 状态与 delivery 状态不是同一概念
 
@@ -816,7 +827,7 @@ Trial 会先在数据库进入 pending/evaluating，再派发 Python。派发失
 | `contracts/public/v1/problem-detail.schema.json` | Java/Next/客户端 | 统一 problem details |
 | `organization-project-api.schema.json` | Java/Next | 组织、membership、project 请求响应 |
 | `user-profile-api.schema.json` | Java/Next | profile/avatar metadata |
-| `run-api.schema.json` | Java/Next | Run、revision、interaction、events、history、conversation、artifact、runtime info；**WIP** 包含 runtime status/recover |
+| `run-api.schema.json` | Java/Next | Run、revision、interaction、events、history、conversation、artifact、runtime info、runtime status/recover |
 | `harness-release-api.schema.json` | Java 管理 API | Harness version/rollout/admin DTO |
 | `evolution-api.schema.json` | Java 管理 API | observation/candidate/trial/approval DTO |
 | `contracts/evolution/v1/evolution.schema.json` | Python/Java Evolution | observation、candidate、trial 和 proof 边界 |
@@ -851,7 +862,7 @@ Pydantic model
   ↔ TypeScript parser/type/UI
 ```
 
-当前 recovery WIP 正好修改了整条链，因此应把“schema compatibility matrix”作为合并门槛，而不只验证新版本互相能编译。
+Recovery 能力跨越整条链，因此应把“schema compatibility matrix”作为发布门槛，而不只验证新版本互相能编译。
 
 ---
 
@@ -870,8 +881,8 @@ Pydantic model
 | `lib/request-intent.ts` | root/revision 决策 | 根据新项目表达、profile 变化和现有 Run 判断创建 root 还是 revision |
 | `lib/sse.ts` | 浏览器 SSE parser | 处理 chunk 边界、CRLF、event/data/id/retry 和残余 buffer |
 | `app/api/chat/route.ts` | 聊天主 BFF | 创建 Run/Revision 后立即订阅 Java events；转发 `Last-Event-ID`；关闭代理 buffering |
-| `components/chat-console.tsx` | 聊天状态机主体 | session/history/conversation、提交、SSE 消费、去重、重连、HITL、delivery/artifact、revision；**WIP** runtime polling/recover |
-| `types/chat.ts` | 前端 wire 类型和 parser | 对 Run、event、interaction、artifact、conversation 做运行时解析；**WIP** 增加 runtime status/recovery state |
+| `components/chat-console.tsx` | 聊天状态机主体 | session/history/conversation、提交、SSE 消费、去重、重连、HITL、delivery/artifact、revision、runtime polling/recover |
+| `types/chat.ts` | 前端 wire 类型和 parser | 对 Run、event、interaction、artifact、conversation、runtime status/recovery state 做运行时解析 |
 | `components/markdown-content.tsx` | AI Markdown 展示 | 不启用 raw HTML；用户消息按纯文本展示 |
 
 ### 11.2 BFF Route 对应关系
@@ -890,8 +901,8 @@ Pydantic model
 | `/api/conversations` | conversation list/delete | thread 摘要和用户级 tombstone |
 | `/api/runs/{id}/artifacts` | Run artifact list | Java 授权后读取 manifest |
 | `/api/artifacts/{artifactId}/download` | artifact `:download` | Java授权后返回短期下载地址 |
-| `/api/runs/{id}/runtime-status` | **WIP** runtime status | 查询 lease advisory |
-| `/api/runs/{id}/recover` | **WIP** recover | 用户确认后重新 start 同一 Run |
+| `/api/runs/{id}/runtime-status` | runtime status | 查询 lease advisory |
+| `/api/runs/{id}/recover` | recover | 用户确认后重新 start 同一 Run |
 
 ### 11.3 SSE 重连
 
@@ -903,7 +914,7 @@ Pydantic model
 4. `replay_gap` 不盲目继续，提示重建状态；
 5. 浏览器 AbortController 取消的是订阅，不自动取消后台 Run。
 
-当前 WIP 的页面刷新恢复还不完整：普通 active Run 会被轮询，但不总是自动调用续订；terminal 后也不保证自动重新加载错过的最终消息。
+页面刷新后会依据 Java 权威 Run 状态和 Runtime lease advisory 恢复展示；generic recover 仍要求用户确认，避免多个浏览器标签自动争抢同一执行租约。Terminal 内容以 Java 历史与 Artifact Manifest 重建，而不是依赖浏览器保留完整 SSE。
 
 ---
 
@@ -961,18 +972,18 @@ Pydantic model
 
 ---
 
-## 13. 当前 Recovery WIP 专章
+## 13. 运行恢复实现与边界
 
 ### 13.1 修改范围
 
-当前未提交实现同时修改：
+当前实现跨越以下模块：
 
 - Python：`schema.py`、`run_registry.py`、`redis_run_registry.py`、`grpc_runtime.py`、生成 proto。
 - private contracts：agent runtime JSON Schema 和 proto。
 - Java：`AgentRuntimeGateway`、HTTP/gRPC adapter、`RunService`、`RunController`。
 - public contract：Run API Schema。
 - 前端：chat types、ChatConsole、recovery card 样式、BFF runtime-status/recover route，以及 Node test script。
-- 测试：Python、Java `agentgateway/run`、Node 三组当前未跟踪测试。
+- 测试：Python、Java `agentgateway/run` 和 Node 运行状态/恢复测试。
 
 ### 13.2 状态判定
 
@@ -990,9 +1001,9 @@ Pydantic model
 Redis 侧的实现还有两点关键细节：
 
 - 使用 Redis `TIME` 而不是应用节点本地时间计算 lease 是否过期，降低多实例时钟偏差造成的误判；memory registry 可以报告本地 task 活跃，但永远不宣称具备进程重启后的 durable recoverable。
-- **WIP** 给 `[DONE]` 事件写入 fencing token 和 terminal 标记。订阅时跳过旧世代 producer 留下的 DONE；只有当前 fence 且已提交 terminal 状态的最终 DONE 才交付。旧事件仍保留在 Stream 供审计，不靠删除历史实现正确性。
+- `[DONE]` 事件绑定 fencing token 和 terminal 标记。订阅时跳过旧世代 producer 留下的 DONE；只有当前 fence 且已提交 terminal 状态的最终 DONE 才交付。旧事件仍保留在 Stream 供审计，不靠删除历史实现正确性。
 
-### 13.3 合并前需要处理的点
+### 13.3 仍需持续验证的兼容性点
 
 1. v1 JSON 把新字段直接设成 required，旧 Runtime 响应会让新 Java HTTP adapter 失败。
 2. proto additive field number 安全，但旧 peer 的 `checked_at` 是空默认值，新 Java仍强制解析。
@@ -1013,16 +1024,16 @@ Python测试主要覆盖：
 - intent/decision 少量分支。
 - knowledge gateway。
 - Reviewer 先持久化确定性报告。
-- **WIP** Redis recovery status。
+- Redis recovery status。
 
 Java测试主要覆盖：
 
 - Evolution collector/service proof。
 - Harness rollback。
 - Spring proxy compatibility。
-- **WIP** runtime status 分类器。
+- runtime status 分类器。
 
-前端当前只有少量 **WIP** runtime-status parser/label Node tests，没有完整 React、BFF、SSE 或浏览器 E2E。
+前端已有 runtime-status parser/label Node tests；完整 React、BFF、SSE 和浏览器 E2E 仍是覆盖缺口。
 
 ### 14.2 明显缺口
 

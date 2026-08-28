@@ -98,7 +98,10 @@ _GAPS: tuple[RequirementGap, ...] = (
         ),
         *_DEFAULT,
         stated_when=("board size", "outline", "尺寸", "外形", "板框", "长宽"),
-        stated_pattern=r"\d+\s*(?:x|×|\*)\s*\d+\s*mm",
+        stated_pattern=(
+            r"\d+(?:\.\d+)?\s*(?:mm)?\s*(?:x|×|\*)\s*"
+            r"\d+(?:\.\d+)?\s*mm"
+        ),
     ),
     RequirementGap(
         "layer_count",
@@ -184,7 +187,10 @@ _GAPS: tuple[RequirementGap, ...] = (
         *_DEFAULT,
         applies_when=("button", "pushbutton", "switch", "按键", "按钮"),
         stated_when=("internal pull-up", "external pull-up", "内部上拉", "外部上拉"),
-        stated_pattern=r"\b(?:4\.7|10)\s*k(?:ohm)?\b[^\n]{0,30}(?:pull|上拉)",
+        stated_pattern=(
+            r"\b(?:4\.7|10)\s*k\s*(?:ohm|ω|欧姆|欧)?"
+            r"[^\n]{0,30}(?:pull|上拉)"
+        ),
     ),
     RequirementGap(
         "mounting",
@@ -263,6 +269,32 @@ def design_decisions(
             )
         )
     return decisions
+
+
+def _slot_accepts_resolution(requirement: str, slot: str) -> bool:
+    gap = next((item for item in _GAPS if item.slot == slot), None)
+    if gap is None:
+        return True
+    lowered = (requirement or "").lower()
+    return gap.relevant(lowered) and not gap.stated(lowered)
+
+
+def applicable_decisions(
+    requirement: str,
+    decisions: list[OpenDecision],
+) -> list[OpenDecision]:
+    """Drop stale questions whose value is already fixed by user input.
+
+    Checkpointed HITL questions can outlive a parser deployment.  Revalidating
+    them at resume time makes the original requirement authoritative and keeps
+    human input as a fill-only patch, never an implicit requirement rewrite.
+    """
+
+    return [
+        decision
+        for decision in decisions
+        if _slot_accepts_resolution(requirement, decision.slot)
+    ]
 
 
 def intent_decisions(intent: dict[str, Any], requirement: str) -> list[OpenDecision]:
@@ -392,6 +424,17 @@ def merge_resolutions(
 
 
 def apply_resolutions(requirement: str, resolved: list[dict[str, str]]) -> str:
+    stale_slots = {
+        str(item.get("slot", ""))
+        for item in resolved
+        if item.get("slot")
+        and not _slot_accepts_resolution(requirement, str(item["slot"]))
+    }
+    if stale_slots:
+        raise ValueError(
+            "HITL answers cannot override values already fixed by the original "
+            f"requirement: {', '.join(sorted(stale_slots))}"
+        )
     lines = [
         f"{DECISION_PREFIX} {item['slot']}={item['key']} — {item['value']}"
         for item in resolved

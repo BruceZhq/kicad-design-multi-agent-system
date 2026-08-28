@@ -4,7 +4,7 @@
 
 [在线 Demo](https://brucezhq.github.io/kicad-design-multi-agent-system/) · [GitHub 源码](https://github.com/BruceZhq/kicad-design-multi-agent-system) · [五案例审计报告](docs/ratsnestpro/test-results/five-case-e2e-general-fixes-2026-07-30.md)
 
-[Agent 可观测与自动评测](docs/observability-and-evaluation.md) · [公开 recorded eval 报告](evals/reports/public-recorded-eval.md)
+[项目与架构详解](docs/PROJECT_DESCRIPTION_ZH.md) · [源码导读](docs/PROJECT_CODE_GUIDE_ZH.md) · [Release-ready 收敛报告](evals/reports/release-ready-convergence-20260829.md) · [Agent 可观测与自动评测](docs/observability-and-evaluation.md)
 
 > Demo 使用模拟数据展示需求提交、Agent 协作、人工确认和产物交付，不调用真实 LLM、KiCad 或任何私有服务。
 
@@ -30,26 +30,37 @@ flowchart LR
 flowchart TD
     subgraph S1[需求与器件闭环]
       direction LR
-      A1[1 Profile/需求快照] --> A2[2 选型与封装绑定] --> A3[3 符号存在性] --> A4[4 封装存在性] --> A5[5 引脚-焊盘兼容]
+      A1[1 requirements] --> A2[2 topology] --> A3[3 selection] --> A4[4 schematic_connections] --> A5[5 schematic_pinmap]
     end
     subgraph S2[KiCad 工程生成]
       direction LR
-      A6[6 原理图] --> A7[7 网络连接] --> A8[8 板框/层叠/约束] --> A9[9 元件放置]
+      A6[6 schematic_layout] --> A7[7 schematic_materialize] --> A8[8 erc] --> A9[9 layout_partition] --> A10[10 layout_critical] --> A11[11 layout_general]
     end
     subgraph S3[路由与验证]
       direction LR
-      A10[10 导出 DSN] --> A11[11 Freerouting] --> A12[12 生成 SES] --> A13[13 导回 PCB] --> A14[14 ERC] --> A15[15 DRC/未连接]
+      A12[12 layout_write] --> A13[13 route_plan] --> A14[14 route_planes] --> A15[15 route_signals] --> A16[16 route_fab]
     end
     subgraph S4[交付]
       direction LR
-      A16[16 BOM/CPL/Gerber/钻孔] --> A17[17 Reviewer + Manifest]
+      A17[17 manufacture + Reviewer + Manifest]
     end
     A5 --> A6
-    A9 --> A10
-    A15 --> A16
+    A11 --> A12
+    A16 --> A17
 ```
 
-### 五案例 E2E 回归结果
+### 当前严格 Release-ready 结果
+
+2026-08-29 的终态取证确认两个受支持黄金板型达到严格发布条件：
+
+| 案例 | 17 步 | ERC errors | DRC errors | 未连接 | 路由 | 发布产物 |
+|---|---:|---:|---:|---:|---:|---:|
+| NE555 LED 闪烁板 | 17/17 | 0 | 0 | 0 | 6/6 nets，15/15 connections | 55 |
+| STM32F030 最小开发板 | 17/17 | 0 | 0 | 0 | 16/16 nets，50/50 connections | 66 |
+
+两例均为 `release_ready` 并登记可信 Manifest。当前只有 NE555 具有完整单/多 Agent 配对：单 Agent 为 `delivered_with_issues`，多 Agent 为 `release_ready`；这是一个 pair 的真实观察，不构成总体成功率结论。证据、耗时口径和 N/A 指标见 [Release-ready 收敛报告](evals/reports/release-ready-convergence-20260829.md)。
+
+### 历史五案例 E2E 基线
 
 2026-07-30 的 `generalfix-v6` 固定矩阵覆盖 RP2040、STM32G431、ESP32-C3、nRF52840 和 STM32F072 五类板卡需求。结果按证据层级报告：
 
@@ -65,7 +76,7 @@ flowchart TD
 
 ### 当前能力边界
 
-- 当前回归证明了多智能体编排、长任务恢复、真实 KiCad 产物生成和确定性门禁；尚未证明稳定生成可制造 PCB。
+- 当前回归证明了多智能体编排、长任务恢复、真实 KiCad 产物、确定性门禁，并在两个受支持黄金板型上形成严格发布正例；尚未证明对任意自由需求稳定生成可制造 PCB。
 - 五案例主要覆盖 MCU 控制板，不能外推到高速 DDR/PCIe、射频、柔性板或复杂电源设计。
 - 静态 Demo 展示交互与证据模型，不执行真实模型推理或 EDA 工具。
 - `ratsnestpro`、`ratsnest-*` 是为数据库迁移、内部 API 和工程兼容保留的稳定内部标识，不代表公开产品名称。
@@ -92,7 +103,7 @@ flowchart TD
 - Parts Specialist 负责器件、符号、封装、引脚—焊盘兼容性及可采购性证据。
 - Hardware Engineer 通过 Temporal 执行长时间 KiCad、Freerouting 和制造活动。
 - Reviewer 独立审查 ERC、DRC、连通性、布局、制造和交付风险。
-- AHE 只修复 Harness/流程缺陷；EHE 聚合跨任务的匿名失败签名并生成隔离候选，不直接修改稳定源码。
+- AHE 在单次 Run 内对工程实体、工具失败和最窄上游步骤执行有界 Plan–Act–Observe–Reflect；Harness 源码缺陷只形成 EHE/Evolution 隔离候选，运行时不会热修改稳定源码。
 - 普通设计风险可以交付为 `delivered_with_issues`；工具执行故障才会进入 `execution_blocked`。
 - 产物使用内容寻址和 SHA-256 Manifest，支持人工反馈创建新 Revision，不覆盖旧工程。
 
@@ -258,9 +269,9 @@ LLM 的布局意图会被编译为带 digest 的 placement constraint sidecar。
 
 ### AHE
 
-AHE（Agentic Harness Engineer）处理框架自身的可恢复缺陷，例如事件格式漂移、状态增量错误、输入映射错误、局部网络生成失败或旧上下文污染。它不把真实器件缺失、硬件规格冲突或 KiCad 工具不可用伪装成成功。
+AHE 现在包含一个受治理的 Skill Agent Loop。普通工程 Gate 失败后，Hardware Engineer 会加载当前领域 Skill 与 `failure-reflection` Skill，由 LLM 基于 Artifact、工具报告和历史尝试选择 `local_repair / replan_upstream / retry_tool / investigate_harness / ask_human / stop`，Harness 再把动作绑定到已注册的工程工具并重新执行权威检查。外层 17 步顺序保持稳定，内层具备 Plan–Act–Observe–Reflect 与 ReAct 式改路能力。
 
-每次任务受总修复次数、同一失败签名次数、墙钟时间和 LLM token 预算限制。预算耗尽后系统保留产物并报告问题，而不是无限循环。
+LLM 拥有诊断、计划、工具选择、候选修改和动态回滚权；用户硬约束、工作区边界、ERC/DRC/连通性和 Release Gate 仍由 Harness 掌握。每轮 `RecoveryDecision/RecoveryTurnRecord` 都随 Checkpoint 持久化；同一动作、Artifact 指纹和分数无改善时禁止原样重放。只有安全恢复路径耗尽、证据或权限缺失、必须人工决策或存在硬冲突时，任务才进入 `blocked`。
 
 ### EHE
 

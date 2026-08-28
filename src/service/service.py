@@ -104,7 +104,10 @@ def _effective_run_timeout_seconds(
 ) -> float | None:
     """Keep the HTTP run owner alive for the full durable workflow lifetime."""
 
-    if agent_id != "ratsnestpro-multi-agent" or not settings.RATSNESTPRO_TEMPORAL_ENABLED:
+    if agent_id not in {
+        "ratsnestpro-multi-agent",
+        "ratsnestpro-single-agent-eval",
+    } or not settings.RATSNESTPRO_TEMPORAL_ENABLED:
         return requested_timeout
     temporal_deadline = (
         settings.RATSNESTPRO_TEMPORAL_WORKFLOW_TIMEOUT_SECONDS
@@ -1242,7 +1245,10 @@ async def cancel_run(
 ) -> RunCancelResponse:
     try:
         current = await run_registry.get(request_id, user_id)
-        if current.agent_id == "ratsnestpro-multi-agent" and not current.is_terminal:
+        if current.agent_id in {
+            "ratsnestpro-multi-agent",
+            "ratsnestpro-single-agent-eval",
+        } and not current.is_terminal:
             from agents.ratsnestpro.temporal.client import (
                 signal_hardware_workflow_by_request_id,
                 temporal_enabled,

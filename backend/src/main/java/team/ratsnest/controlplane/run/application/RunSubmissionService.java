@@ -90,7 +90,11 @@ public class RunSubmissionService {
         HarnessSelection harness = harnessReleaseRouter.route(
                 tenantId, projectId, idempotencyKey);
         Map<String, Object> config = runtimeConfiguration.create(
-                request.teamMembers(), profile, harness);
+                request.teamMembers(),
+                profile,
+                harness,
+                request.agentId(),
+                request.evaluationContext());
         String fingerprint = fingerprints.start(
                 tenantId,
                 projectId,
@@ -571,7 +575,9 @@ public class RunSubmissionService {
                         existing.profileVersion(),
                         existing.profileDigest(),
                         harnessVersions.get(existing.harnessVersionId()),
-                        existing.harnessChannel()));
+                        existing.harnessChannel(),
+                        request.agentId(),
+                        request.evaluationContext()));
         return matching(existing, replayFingerprint).run();
     }
 

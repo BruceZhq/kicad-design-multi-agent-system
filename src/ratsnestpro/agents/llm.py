@@ -53,6 +53,10 @@ class LlmError(RuntimeError):
     """Raised when a required LLM call cannot be completed."""
 
 
+class NonRetryableLlmError(LlmError):
+    """Raised when another attempt cannot repair the provider failure."""
+
+
 @runtime_checkable
 class LLMClient(Protocol):
     """Minimal chat interface. Implementations return assistant text."""

@@ -41,6 +41,30 @@ _QUERY_STOP_WORDS = {
     "with",
 }
 
+# Web search is only a discovery mechanism.  Parts technical evidence may use
+# documents hosted by these manufacturer-owned domains; distributor/blog/search
+# snippets are deliberately excluded and never become procurement evidence.
+_OFFICIAL_MANUFACTURER_DOMAINS = frozenset(
+    {
+        "analog.com",
+        "diodes.com",
+        "espressif.com",
+        "infineon.com",
+        "littelfuse.com",
+        "microchip.com",
+        "monolithicpower.com",
+        "nordicsemi.com",
+        "nxp.com",
+        "onsemi.com",
+        "qorvo.com",
+        "raspberrypi.com",
+        "renesas.com",
+        "silabs.com",
+        "st.com",
+        "ti.com",
+    }
+)
+
 
 def _st_official_results(query: str) -> list[dict[str, str]]:
     """Recover canonical ST document URLs when the query contains an ST document ID."""
@@ -84,6 +108,101 @@ def _merge_results(
         seen_urls.add(url)
         merged.append(result)
     return merged
+
+
+def _official_manufacturer_domain(url: str) -> str | None:
+    """Return the allow-listed manufacturer domain for an HTTPS URL."""
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").rstrip(".").lower()
+    if parsed.scheme != "https" or not hostname:
+        return None
+    return next(
+        (
+            domain
+            for domain in _OFFICIAL_MANUFACTURER_DOMAINS
+            if hostname == domain or hostname.endswith(f".{domain}")
+        ),
+        None,
+    )
+
+
+def _official_manufacturer_sources(query: str) -> str:
+    """Discover bounded manufacturer sources without trusting search snippets."""
+    raw = json.loads(_search_web(query))
+    governed: list[dict[str, Any]] = []
+    for item in raw.get("results", []):
+        if not isinstance(item, dict):
+            continue
+        normalised = _normalise_result(item)
+        domain = _official_manufacturer_domain(normalised["href"])
+        if domain is None:
+            continue
+        is_pdf = urlparse(normalised["href"]).path.lower().endswith(".pdf")
+        governed.append(
+            {
+                **normalised,
+                "authority": "official_manufacturer",
+                "manufacturer_domain": domain,
+                "evidence_class": (
+                    "official_manufacturer_datasheet"
+                    if is_pdf
+                    else "official_manufacturer_page"
+                ),
+                # Provenance is trusted; remote text remains untrusted input to
+                # an LLM and must be extracted through fetch_datasheet first.
+                "untrusted_content": True,
+                "procurement_claims_allowed": False,
+            }
+        )
+    governed.sort(
+        key=lambda item: item["evidence_class"] != "official_manufacturer_datasheet"
+    )
+    upstream_status = str(raw.get("status", "no_results"))
+    status = "ok" if governed else (
+        "temporarily_unavailable"
+        if upstream_status == "temporarily_unavailable"
+        else "no_results"
+    )
+    return json.dumps(
+        {
+            "status": status,
+            "query": query,
+            "results": governed,
+            "evidence_sufficient": False,
+            "policy": {
+                "technical_evidence_requires_datasheet_extraction": True,
+                "stock_price_lead_time_claims_allowed": False,
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def official_datasheet_evidence_sufficient(
+    component_query: str,
+    result: dict[str, Any],
+) -> bool:
+    """Accept only exact component text extracted from an official PDF."""
+    if result.get("status") not in {"ok", "partial"}:
+        return False
+    if _official_manufacturer_domain(str(result.get("source_url", ""))) is None:
+        return False
+    pages = result.get("matched_pages", [])
+    if not isinstance(pages, list) or not pages:
+        return False
+    identities = {
+        re.sub(r"[^a-z0-9]", "", token.lower())
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_.+-]{3,}", component_query)
+        if any(character.isdigit() for character in token)
+    }
+    if not identities:
+        return False
+    extracted = re.sub(
+        r"[^a-z0-9]",
+        "",
+        " ".join(str(page.get("text", "")) for page in pages if isinstance(page, dict)).lower(),
+    )
+    return any(identity in extracted for identity in identities)
 
 
 def _provider_search(query: str) -> list[dict[str, Any]]:
@@ -373,6 +492,12 @@ def _search_web(query: str) -> str:
 def web_search(query: str) -> str:
     """Search multiple web providers for official datasheets and reference designs."""
     return _search_web(query)
+
+
+@tool("web_search_official_manufacturer")
+def web_search_official_manufacturer(query: str) -> str:
+    """Find manufacturer-owned technical sources; never infer procurement facts."""
+    return _official_manufacturer_sources(query)
 
 
 @tool("fetch_datasheet")

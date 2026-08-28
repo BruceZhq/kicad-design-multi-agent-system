@@ -285,7 +285,10 @@ public class RunController {
             @Size(max = 200) String model,
             @Pattern(regexp = "[A-Za-z0-9._:-]{1,200}") String threadId,
             @NotNull @Valid CapabilityProfileRequest capabilityProfile,
-            @Size(max = 8) List<@Valid TeamMemberRequest> teamMembers) {
+            @Size(max = 8) List<@Valid TeamMemberRequest> teamMembers,
+            @Pattern(regexp = "ratsnestpro-(?:multi-agent|single-agent-eval)")
+                    String agentId,
+            @Valid EvaluationContextRequest evaluationContext) {
 
         StartRequest toServiceRequest() {
             List<TeamMember> members = teamMembers == null
@@ -296,7 +299,28 @@ public class RunController {
                     model,
                     threadId,
                     capabilityProfile.toService(),
-                    members);
+                    members,
+                    agentId,
+                    evaluationContext == null ? Map.of() : evaluationContext.toService());
+        }
+    }
+
+    record EvaluationContextRequest(
+            @NotBlank @Pattern(regexp = "[A-Za-z0-9._:-]{1,200}") String planId,
+            @NotBlank @Pattern(regexp = "[0-9a-f]{64}") String planDigest,
+            @NotBlank @Pattern(regexp = "[A-Za-z0-9._:-]{1,200}") String pairId,
+            @NotBlank @Pattern(regexp = "[A-Za-z0-9._:-]{1,200}") String caseId,
+            @NotBlank @Pattern(regexp = "single_agent|multi_agent") String arm,
+            @NotBlank @Pattern(regexp = "[0-9a-f]{64}") String promptDigest) {
+
+        Map<String, String> toService() {
+            return Map.of(
+                    "plan_id", planId,
+                    "plan_digest", planDigest,
+                    "pair_id", pairId,
+                    "case_id", caseId,
+                    "arm", arm,
+                    "prompt_digest", promptDigest);
         }
     }
 

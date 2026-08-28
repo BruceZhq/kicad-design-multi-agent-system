@@ -1,0 +1,114 @@
+{
+  "schemaVersion": "1.0",
+  "planId": "ratsnest-supported-golden-boards-v1",
+  "cases": [
+    {
+      "caseId": "golden.01-ne555-led-blinker",
+      "category": "eda_pipeline",
+      "prompt": "请帮我设计一块 5 V 供电、约 1 Hz 的 NE555 LED 闪烁板。定时器使用 NE555D 的 SOIC-8 版本；为保证工程可复现，使用以下精确 KiCad 绑定：\nKiCad symbol: Timer:NE555D\nKiCad footprint: Package_SO:SOIC-8_3.9x4.9mm_P1.27mm\n定时电阻为 10 kΩ 和 68 kΩ，定时电容为 10 µF；LED 使用 0805 封装并串联 330 Ω 电阻。U1 电源旁放置 100 nF 去耦电容，电容到 U1 的 VCC/GND 电源焊盘距离都不得超过 3 mm。使用两针 2.54 mm 接口输入 5 V。PCB 只用两层铜，板框不超过 40 mm × 30 mm，底层保持连续 GND 铺铜，+5V 与 GND 主干线宽不小于 0.30 mm。四角各放置一个 M2 非金属化安装孔，使用以下精确 KiCad 绑定：\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n四个安装孔引用与位置固定为 H1=左上、H2=右上、H3=左下、H4=右下。请交付可编辑 KiCad 工程、BOM、CPL、Gerber、钻孔、ERC、DRC 和布线结果；任何没有真正落入工程文件的硬性要求都不得被宣称通过。",
+      "expectedIntents": ["build"],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "parts-specialist",
+        "hardware-engineer:dispatch",
+        "hardware-engineer:temporal",
+        "reviewer",
+        "supervisor"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.0",
+      "replay": "none",
+      "timeoutSeconds": 7200,
+      "agentConfig": {}
+    },
+    {
+      "caseId": "golden.02-stm32f030-minimal-board",
+      "category": "eda_pipeline",
+      "prompt": "请设计一块基于 STM32F030F4P6（TSSOP-20）的简易开发板。MCU 使用内部时钟；两针接口输入 5 V，经 AP1117-33 或资料和 KiCad 库均能验证的等效稳压器产生 3.3 V。输入端包含自恢复保险丝和反接保护，稳压器输入输出电容按数据手册配置。MCU 的全部电源脚都要连接并独立去耦，另加一个 bulk capacitor；NRST 使用上拉和复位按键，BOOT0 使用下拉；提供 3V3、GND、SWDIO、SWCLK 四针调试接口。再提供一个用户 LED、一个带外部 10 kΩ 上拉的低电平有效按键、带独立上拉的四针 I²C 接口和三针 UART 接口。PCB 为双层，最大 45 mm × 35 mm，底层连续 GND，普通信号线宽不小于 0.20 mm，5 V/3.3 V 主干不小于 0.40 mm，并放置两个 M2 非金属化安装孔。请交付可编辑 KiCad 工程和完整打样文件，并以真实 ERC、DRC、未连接数和最终工程文件为准。",
+      "expectedIntents": ["build"],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "parts-specialist",
+        "hardware-engineer:dispatch",
+        "hardware-engineer:temporal",
+        "reviewer",
+        "supervisor"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "replay": "none",
+      "timeoutSeconds": 7200,
+      "agentConfig": {}
+    },
+    {
+      "caseId": "golden.03-stm32g070-controller",
+      "category": "eda_pipeline",
+      "prompt": "请设计一块 STM32G070RBT6 最小控制板。主控采用 LQFP-64 和内部时钟；两针接口输入稳定 5 V，使用 AP2112K-3.3 产生 3.3 V。所有 MCU 电源引脚需要独立 100 nF 去耦，并设置必要的输入、输出和 bulk capacitor；NRST、BOOT0 连接必须完整。提供标准 10-pin Cortex SWD、一个串联 1 kΩ 电阻的用户 LED、一个带外部 10 kΩ 上拉的低电平有效用户按键、一个带独立上拉的 3.3 V I²C 接口和一个 3.3 V UART 接口。PCB 使用双层，最大 70 mm × 45 mm，底层保持连续 GND，电源主干线宽不小于 0.40 mm，四角设置 M2 非金属化安装孔，连接器靠近板边，去耦靠近对应电源焊盘。请使用当前环境中真实且引脚/焊盘兼容的 KiCad 符号和封装；找不到时只能给出可验证替代项，不能改 Value 冒充。交付可编辑 KiCad 工程及 BOM、CPL、Gerber、钻孔、ERC、DRC 和真实布线结果。",
+      "expectedIntents": ["build"],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "parts-specialist",
+        "hardware-engineer:dispatch",
+        "hardware-engineer:temporal",
+        "reviewer",
+        "supervisor"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "replay": "none",
+      "timeoutSeconds": 7200,
+      "agentConfig": {}
+    }
+  ]
+}

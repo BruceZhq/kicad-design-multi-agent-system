@@ -93,6 +93,7 @@ _WORKFLOW_IDENTITY_FIELDS: tuple[str, ...] = (
     "harness_version_id",
     "harness_manifest_digest",
     "governance_scope_token",
+    "resume_from_step",
 )
 
 

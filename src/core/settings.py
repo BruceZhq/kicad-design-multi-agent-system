@@ -126,6 +126,9 @@ class Settings(BaseSettings):
     RATSNESTPRO_TEMPORAL_POLL_SECONDS: float = Field(default=1.0, ge=0.1, le=30)
     RATSNESTPRO_TEMPORAL_RETRY_ATTEMPTS: int = Field(default=3, ge=1, le=5)
     RATSNESTPRO_TEMPORAL_GRACEFUL_SHUTDOWN_SECONDS: int = Field(default=30, ge=1, le=300)
+    # The single-agent graph is an internal evaluation control. It is never
+    # exposed by the product service unless an evaluator enables it explicitly.
+    RATSNESTPRO_SINGLE_AGENT_EVAL_ENABLED: bool = False
     # Provider-visible Hardware Engineer output uses Redis only as a bounded
     # live bridge. The local JSONL transcript remains the audit/fallback copy.
     RATSNESTPRO_LLM_STREAM_ENABLED: bool = False

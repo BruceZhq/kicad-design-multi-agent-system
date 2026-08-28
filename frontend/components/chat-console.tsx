@@ -44,7 +44,10 @@ import {
 } from "@/types/chat";
 import { TeamConfig, TeamRole } from "@/types/team";
 
-const AGENT_ID = "ratsnestpro-multi-agent";
+const PRODUCTION_AGENT_ID = "ratsnestpro-multi-agent";
+const SINGLE_AGENT_EVAL_ID = "ratsnestpro-single-agent-eval";
+const EVALUATION_LAUNCH_KEY = "ratsnest.evaluation-launch";
+const EVALUATION_LAST_RUN_KEY = "ratsnest.evaluation-last-run";
 const THREAD_KEY = "ratsnest.thread-id";
 const ORGANIZATION_KEY = "ratsnest.organization-id";
 const PROJECT_KEY = "ratsnest.project-id";
@@ -90,6 +93,38 @@ interface ProfileMigrationNotice {
   sourceRevisionNumber: number;
   sourceProfile: string;
   targetProfile: string;
+}
+
+type EvaluationArm = "single_agent" | "multi_agent";
+
+interface EvaluationLaunch {
+  planId: string;
+  planDigest: string;
+  pairId: string;
+  caseId: string;
+  arm: EvaluationArm;
+  promptDigest: string;
+  prompt: string;
+  model: string;
+  profileReference: string;
+}
+
+function parseEvaluationLaunch(value: unknown): EvaluationLaunch | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  const safe = (field: string) => typeof item[field] === "string" && /^[A-Za-z0-9._:@-]{1,200}$/.test(item[field]);
+  if (
+    !safe("planId") ||
+    typeof item.planDigest !== "string" || !/^[0-9a-f]{64}$/.test(item.planDigest) ||
+    !safe("pairId") ||
+    !safe("caseId") ||
+    (item.arm !== "single_agent" && item.arm !== "multi_agent") ||
+    typeof item.promptDigest !== "string" || !/^[0-9a-f]{64}$/.test(item.promptDigest) ||
+    typeof item.prompt !== "string" || item.prompt.length < 1 || item.prompt.length > 100_000 ||
+    !safe("model") ||
+    !safe("profileReference")
+  ) return null;
+  return item as unknown as EvaluationLaunch;
 }
 
 function newId(): string {
@@ -288,6 +323,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
   const [artifacts, setArtifacts] = useState<RunArtifact[]>([]);
   const [artifactLoading, setArtifactLoading] = useState(false);
   const [artifactError, setArtifactError] = useState("");
+  const [evaluationLaunch, setEvaluationLaunch] = useState<EvaluationLaunch | null>(null);
   const [channel, setChannel] = useState<Channel>("design");
   const activeRun = useRef<ActiveRun | null>(null);
   const observedRun = useRef<ObservedRun | null>(null);
@@ -297,6 +333,20 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
   const selectedThread = useRef("");
   const skipHistoryThread = useRef<string | null>(null);
   const messageEnd = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(EVALUATION_LAUNCH_KEY);
+      const launch = raw ? parseEvaluationLaunch(JSON.parse(raw)) : null;
+      if (!launch) return;
+      localStorage.setItem(MODEL_KEY, launch.model);
+      localStorage.setItem(PROFILE_KEY, launch.profileReference);
+      setDraft(launch.prompt);
+      setEvaluationLaunch(launch);
+    } catch {
+      sessionStorage.removeItem(EVALUATION_LAUNCH_KEY);
+    }
+  }, []);
 
   function setLive(next: DisplayMessage | null) {
     liveRef.current = next;
@@ -741,6 +791,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     const message = draft.trim();
+    const evaluationRun = evaluationLaunch;
     const requestedProfile = requestedCapabilityProfile(message);
     const effectiveProfileReference = requestedProfile ?? profileReference;
     const selectedProfile = profiles.find(
@@ -751,6 +802,14 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
       return;
     }
     if (!message || busy || interaction?.status === "waiting" || interaction?.status === "error" || !workspaceReady || !workspace || !model || !selectedProfile) return;
+    if (evaluationRun && (
+      message !== evaluationRun.prompt ||
+      model !== evaluationRun.model ||
+      `${selectedProfile.id}@${selectedProfile.version}` !== evaluationRun.profileReference
+    )) {
+      setStatus("冻结评测输入已变化，请返回配对评测页重新选择此执行臂");
+      return;
+    }
 
     const idempotencyKey = newId();
     const mode = runSubmissionMode(
@@ -758,8 +817,8 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
       selectedProfile,
       latestRun ? latestRun.capabilityProfile : undefined,
     );
-    const profileMigration = mode === "profile-migration";
-    const newProject = mode === "explicit-new-project" || profileMigration;
+    const profileMigration = !evaluationRun && mode === "profile-migration";
+    const newProject = Boolean(evaluationRun) || mode === "explicit-new-project" || profileMigration;
     const migrationSource = profileMigration ? latestRun : null;
     if (profileMigration && migrationSource) {
       const source = migrationSource.capabilityProfile
@@ -814,6 +873,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     let replayRejected = false;
     let awaitingInput = false;
     let migrationSwitched = !profileMigration;
+    const evaluationStartedAt = evaluationRun ? new Date().toISOString() : null;
 
     try {
       for (let attempt = 0; attempt <= MAX_RECONNECTS && terminal === null; attempt += 1) {
@@ -840,6 +900,16 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
                 name,
                 responsibility,
               })),
+              ...(evaluationRun ? {
+                evaluation_context: {
+                  planId: evaluationRun.planId,
+                  planDigest: evaluationRun.planDigest,
+                  pairId: evaluationRun.pairId,
+                  caseId: evaluationRun.caseId,
+                  arm: evaluationRun.arm,
+                  promptDigest: evaluationRun.promptDigest,
+                },
+              } : {}),
             }),
             signal: controller.signal,
           });
@@ -865,6 +935,16 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
             throw new Error("运行标识缺失或发生变化");
           }
           runId = responseRunId;
+          if (evaluationRun) {
+            sessionStorage.setItem(EVALUATION_LAST_RUN_KEY, JSON.stringify({
+              ...evaluationRun,
+              runId,
+              threadId: submissionThreadId,
+              status: "running",
+              startedAt: evaluationStartedAt,
+            }));
+            sessionStorage.removeItem(EVALUATION_LAUNCH_KEY);
+          }
           if (profileMigration && !migrationSwitched) {
             if (selectedThread.current !== submissionThreadId) {
               throw new NonRetryableRequestError("已离开来源会话，迁移任务将在后台继续");
@@ -949,6 +1029,16 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
       }
       if (!awaitingInput) commitLive();
       if (terminal !== null) setEventStreamState("idle");
+      if (evaluationRun && runId) {
+        sessionStorage.setItem(EVALUATION_LAST_RUN_KEY, JSON.stringify({
+          ...evaluationRun,
+          runId,
+          threadId: submissionThreadId,
+          status: awaitingInput ? "waiting_for_input" : terminal ?? "disconnected",
+          startedAt: evaluationStartedAt,
+          finishedAt: terminal ? new Date().toISOString() : null,
+        }));
+      }
     } catch (error) {
       if (selectedThread.current !== submissionThreadId) {
         // The user opened another conversation. The backend run continues;
@@ -980,6 +1070,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     } finally {
       if (activeRun.current?.idempotencyKey === idempotencyKey) activeRun.current = null;
       if (selectedThread.current === submissionThreadId) setBusy(false);
+      if (evaluationRun && runId && terminal !== null) setEvaluationLaunch(null);
     }
   }
 
@@ -1400,13 +1491,22 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
         : modelLoadState === "ready"
           ? "没有可用模型"
           : "等待工作区";
+  const displayedAgentId = evaluationLaunch?.arm === "single_agent"
+    ? SINGLE_AGENT_EVAL_ID
+    : PRODUCTION_AGENT_ID;
+  const displayedTeamLabel = evaluationLaunch?.arm === "single_agent"
+    ? "单智能体对照"
+    : `${team.roles.length} 位智能体 · Supervisor 在线`;
 
   return (
     <main className="workbench-page">
       <header className="product-header workbench-topbar">
         <span className="window-dots" aria-hidden="true"><i /><i /><i /></span>
         <div className="header-center"><span className="workbench-brand">KDMAS</span> KiCad Design Multi-Agent System · {team.name}</div>
-        <AccountMenu />
+        <div className="workbench-header-actions">
+          <a className="evaluation-entry" href="/evaluation">配对评测</a>
+          <AccountMenu />
+        </div>
       </header>
 
       <div className="workbench-shell">
@@ -1468,7 +1568,13 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
 
           <section className="team-roster">
             <small>智能体团队</small>
-            {team.roles.map((role) => {
+            {evaluationLaunch?.arm === "single_agent" ? (
+              <div className="roster-row">
+                <span>单</span>
+                <strong title="连续上下文单智能体对照；复用相同证据工具、Temporal 流水线与门禁">Single Agent Control</strong>
+                <em className={busy ? "live" : ""}>{busy ? "执行中" : "已装载"}</em>
+              </div>
+            ) : team.roles.map((role) => {
               const currentStatus = roleStatus(role, eventMessages, busy, activitySnapshot);
               return (
                 <div className="roster-row" key={role.role_id}>
@@ -1493,7 +1599,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
                     setModel(event.target.value);
                     localStorage.setItem(MODEL_KEY, event.target.value);
                   }}
-                  disabled={busy || models.length === 0}
+                  disabled={busy || models.length === 0 || Boolean(evaluationLaunch)}
                 >
                   {models.length === 0 && <option value="">{modelPlaceholder}</option>}
                   {models.map((item) => <option key={item} value={item}>{item}</option>)}
@@ -1517,7 +1623,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
                       setStatus("请选择能力范围");
                     }
                   }}
-                  disabled={busy || profiles.length === 0}
+                  disabled={busy || profiles.length === 0 || Boolean(evaluationLaunch)}
                 >
                   <option value="">请选择版本化场景…</option>
                   {profiles.map((profile) => (
@@ -1532,18 +1638,25 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
               </div>
             </div>
             <span title={workspace ? `${workspace.organization.tenantId} / ${workspace.project.projectId}` : undefined}>
-              {workspace ? `${workspace.organization.name} · ${workspace.project.name}` : "工作区未就绪"} · {AGENT_ID}
+              {workspace ? `${workspace.organization.name} · ${workspace.project.name}` : "工作区未就绪"} · {displayedAgentId}
             </span>
           </div>
         </aside>
 
         <section className="conversation-column">
           <header className="conversation-header">
-            <div><strong># {channel === "design" ? "设计执行" : channel === "evidence" ? "资料与证据" : "审查问题"}</strong><span>{team.roles.length} 位智能体 · Supervisor 在线</span></div>
+            <div><strong># {channel === "design" ? "设计执行" : channel === "evidence" ? "资料与证据" : "审查问题"}</strong><span>{displayedTeamLabel}</span></div>
             <span className={`live-state ${headerRunning ? "running" : ""}`}><i /> {headerStatus}</span>
           </header>
 
           <div className="conversation-scroll" aria-live="polite" aria-busy={busy}>
+            {channel === "design" && evaluationLaunch && (
+              <section className="profile-migration-notice" aria-label="冻结配对评测执行臂">
+                <strong>冻结配对评测 · {evaluationLaunch.arm === "single_agent" ? "单智能体对照" : "生产多智能体"}</strong>
+                <span>{evaluationLaunch.pairId} · {evaluationLaunch.caseId}</span>
+                <small>提示词、模型和能力范围已锁定；发送后会创建独立工程会话，并由 Java 控制面复核计划 SHA-256。</small>
+              </section>
+            )}
             {channel === "design" && profileMigrationNotice && (
               <section className="profile-migration-notice" aria-label="能力范围迁移来源">
                 <strong>能力范围迁移 · 新工程根节点</strong>
@@ -1591,6 +1704,7 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
               placeholder="描述需求，或在任务进行中补充约束与反馈…"
               rows={2}
               maxLength={100_000}
+              readOnly={Boolean(evaluationLaunch)}
               disabled={!workspaceReady || runtimeNonTerminal || interaction?.status === "waiting" || interaction?.status === "error"}
               aria-label="KiCad 硬件设计需求"
             />
@@ -1954,6 +2068,35 @@ function MessageCard({ message }: { message: DisplayMessage }) {
             <JsonDetails label="查看模型与 Token JSON" value={metadata} />
           )}
         </div>
+      </article>
+    );
+  }
+
+  if (message.type === "custom" && message.custom_data.kind === "ahe_event") {
+    const eventName = String(message.custom_data.event ?? "recovery_event");
+    const step = String(message.custom_data.step ?? "unknown");
+    const rawRecovery = message.custom_data.recovery;
+    const recovery = rawRecovery && typeof rawRecovery === "object"
+      ? rawRecovery as Record<string, unknown>
+      : {};
+    const action = String(recovery.action ?? "observe");
+    const target = typeof recovery.target_step === "string" ? recovery.target_step : step;
+    const status = String(recovery.status ?? eventName);
+    const labels: Record<string, string> = {
+      recovery_planned: "LLM 已制定恢复计划",
+      recovery_action_started: "Harness 正在执行恢复动作",
+      recovery_observed: "已取得新的确定性检查结果",
+      recovery_exhausted: "当前恢复策略已耗尽",
+    };
+    return (
+      <article className="workflow-event ahe-recovery-event">
+        <span className="event-icon">↻</span>
+        <div>
+          <strong>{labels[eventName] ?? `AHE · ${eventName}`}</strong>
+          <p>{step} · {action}{target !== step ? ` → ${target}` : ""}</p>
+        </div>
+        <em className={status.toLowerCase()}>{status}</em>
+        <JsonDetails label="查看恢复轨迹 JSON" value={message.custom_data} />
       </article>
     );
   }

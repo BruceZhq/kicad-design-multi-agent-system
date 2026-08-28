@@ -22,6 +22,15 @@ _SAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
 _EXCLUDED_PREFIXES = ("temporal_input-", "llm_outputs")
 _EXCLUDED_NAMES = {"temporal_recovery.json", ".pipeline.lock"}
 _EXCLUDED_SUFFIXES = {".lock", ".tmp", ".temp", ".part"}
+_MANIFEST_DIGEST_FIELDS = (
+    "artifact_id",
+    "kind",
+    "media_type",
+    "name",
+    "object_key",
+    "sha256",
+    "size_bytes",
+)
 
 
 def artifact_workspace_root() -> Path:
@@ -239,6 +248,7 @@ def publish_artifact_manifest(
                         uuid5(NAMESPACE_URL, f"ratsnest-artifact:{run_uuid}:{object_key}")
                     ),
                     "name": source.name,
+                    "relative_path": source.relative_to(root).as_posix(),
                     "kind": _artifact_kind(source),
                     "media_type": media_type,
                     "size_bytes": source.stat().st_size,
@@ -254,8 +264,12 @@ def publish_artifact_manifest(
         errors.append("no publishable artifact files were found in the run workspace")
     if errors:
         status = "execution_blocked"
+    canonical_artifacts = [
+        {field: artifact[field] for field in _MANIFEST_DIGEST_FIELDS}
+        for artifact in artifacts
+    ]
     manifest_seed = json.dumps(
-        artifacts,
+        canonical_artifacts,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

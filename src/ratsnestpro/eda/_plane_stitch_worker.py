@@ -89,7 +89,7 @@ def _gaps(report: dict) -> list[dict]:
             description = str(item.get("description", ""))
             net_match = _NET_RE.search(description)
             layer_match = _LAYER_RE.search(description)
-            if net_match is None or layer_match is None:
+            if net_match is None:
                 valid = False
                 break
             if net_name and net_match.group(1) != net_name:
@@ -101,19 +101,61 @@ def _gaps(report: dict) -> list[dict]:
                     {
                         "x": float(item["pos"]["x"]),
                         "y": float(item["pos"]["y"]),
-                        "layer": layer_match.group(1),
+                        "layer": (
+                            layer_match.group(1)
+                            if layer_match is not None
+                            else None
+                        ),
                     }
                 )
             except (KeyError, TypeError, ValueError):
                 valid = False
                 break
         if valid and len(endpoints) == 2:
+            left_layer = endpoints[0]["layer"]
+            right_layer = endpoints[1]["layer"]
+            if left_layer is None and right_layer is not None:
+                endpoints[0]["layer"] = right_layer
+            elif right_layer is None and left_layer is not None:
+                endpoints[1]["layer"] = left_layer
+            elif left_layer is None and right_layer is None:
+                endpoints[0]["layer"] = "F.Cu"
+                endpoints[1]["layer"] = "F.Cu"
+            if endpoints[0]["layer"] != endpoints[1]["layer"]:
+                continue
             result.append({"net": net_name, "endpoints": endpoints})
     return result
 
 
+def _unconnected_count(report: dict) -> int:
+    """Count every authoritative unconnected error, parsed or not."""
+
+    return sum(
+        isinstance(finding, dict)
+        and str(finding.get("severity", "error")) == "error"
+        for finding in report.get("unconnected_items", [])
+    )
+
+
 def _no_new_errors(after: Counter, before: Counter) -> bool:
     return all(count <= before[key] for key, count in after.items())
+
+
+def _candidate_is_monotonic_gain(
+    after_errors: Counter,
+    before_errors: Counter,
+    *,
+    added_zones: int,
+    after_gap_count: int,
+    before_gap_count: int,
+) -> bool:
+    """Keep safe copper materialization even when no ratline needed closing."""
+
+    return (
+        _no_new_errors(after_errors, before_errors)
+        and after_gap_count <= before_gap_count
+        and (added_zones > 0 or after_gap_count < before_gap_count)
+    )
 
 
 def _layer_id(board, name: str):
@@ -164,6 +206,13 @@ def _materialize_planes(
         zone.SetLayer(layer_id)
         zone.SetNet(net)
         zone.SetLocalClearance(pcbnew.FromMM(clearance_mm))
+        # Generated planes must not introduce a starved-thermal DRC error on
+        # sparse nets (for example, a bottom GND plane whose only bottom-side
+        # anchor is one through-hole pad).  A solid connection is deterministic
+        # and removes the spoke-count dependency; removing isolated islands
+        # prevents disconnected pour fragments from surviving the fill.
+        zone.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)
+        zone.SetIslandRemovalMode(pcbnew.ISLAND_REMOVAL_MODE_ALWAYS)
         outline = zone.Outline()
         outline.NewOutline()
         for x, y in polygon:
@@ -281,7 +330,7 @@ def main() -> None:
             )
             baseline_errors = _error_counts(baseline_report)
             baseline_gaps = _gaps(baseline_report)
-            original_gap_count = len(baseline_gaps)
+            original_gap_count = _unconnected_count(baseline_report)
             board = pcbnew.LoadBoard(str(accepted_path))
             result["added_zones"] = _materialize_planes(
                 board,
@@ -296,9 +345,13 @@ def main() -> None:
             )
             accepted_errors = _error_counts(accepted_report)
             accepted_gaps = _gaps(accepted_report)
-            if not _no_new_errors(accepted_errors, baseline_errors):
+            accepted_gap_count = _unconnected_count(accepted_report)
+            if (
+                not _no_new_errors(accepted_errors, baseline_errors)
+                or accepted_gap_count > original_gap_count
+            ):
                 raise RuntimeError(
-                    "planned copper planes introduced new DRC errors"
+                    "planned copper planes worsened DRC"
                 )
             plane_nets = {
                 str(assignment["net"])
@@ -315,7 +368,7 @@ def main() -> None:
             # a valid patch is already available.
             while (
                 accepted_gaps
-                and len(accepted_gaps) == original_gap_count
+                and accepted_gap_count == original_gap_count
             ):
                 gap = next(
                     (
@@ -378,25 +431,33 @@ def main() -> None:
                     )
                     candidate_errors = _error_counts(candidate_report)
                     candidate_gaps = _gaps(candidate_report)
+                    candidate_gap_count = _unconnected_count(candidate_report)
                     if (
-                        len(candidate_gaps) < len(accepted_gaps)
+                        candidate_gap_count < accepted_gap_count
                         and _no_new_errors(candidate_errors, accepted_errors)
                     ):
                         shutil.copy2(candidate_path, accepted_path)
                         accepted_errors = candidate_errors
                         accepted_gaps = candidate_gaps
+                        accepted_gap_count = candidate_gap_count
                         result["added_vias"] += len(fanouts)
                         improved = True
                         break
                 if not improved:
                     break
 
-            result["unconnected"] = len(accepted_gaps)
+            result["unconnected"] = accepted_gap_count
             result["closed_gaps"] = max(
                 0,
-                original_gap_count - len(accepted_gaps),
+                original_gap_count - accepted_gap_count,
             )
-            if result["closed_gaps"] > 0:
+            if _candidate_is_monotonic_gain(
+                accepted_errors,
+                baseline_errors,
+                added_zones=result["added_zones"],
+                after_gap_count=accepted_gap_count,
+                before_gap_count=original_gap_count,
+            ):
                 final_board = pcbnew.LoadBoard(str(accepted_path))
                 try:
                     result["routed_tracks"] = int(final_board.GetTracks().size())
@@ -404,7 +465,7 @@ def main() -> None:
                     result["routed_tracks"] = len(list(final_board.GetTracks()))
                 shutil.copy2(accepted_path, pcb_path)
                 final_report = _run_drc(cli, pcb_path, report_path)
-                result["unconnected"] = len(_gaps(final_report))
+                result["unconnected"] = _unconnected_count(final_report)
                 result["ok"] = True
             else:
                 result["added_zones"] = 0
@@ -413,4 +474,5 @@ def main() -> None:
     print("RESULT " + json.dumps(result))
 
 
-main()
+if __name__ == "__main__":
+    main()

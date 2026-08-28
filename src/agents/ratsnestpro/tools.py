@@ -21,7 +21,17 @@ from pydantic import ValidationError
 
 from agents.ratsnestpro.ehe_memory import EheMemory
 from agents.ratsnestpro.knowledge_gateway import search_external_knowledge
-from ratsnestpro.agents import LlmError, LlmMode, Reviewer, parse_mode
+from agents.ratsnestpro.warning_contract import (
+    apply_warning_contract,
+    classify_warnings,
+)
+from ratsnestpro.agents import (
+    LlmError,
+    LlmMode,
+    NonRetryableLlmError,
+    Reviewer,
+    parse_mode,
+)
 from ratsnestpro.eda import footprints, grounding, symbols
 from ratsnestpro.eda.adapter import kicad_cli_available, run_erc
 from ratsnestpro.eda.local_library import (
@@ -55,6 +65,10 @@ from ratsnestpro.orchestration.pipeline_contracts import (
 from ratsnestpro.orchestration.placement_constraints import (
     review_pcb_placement_constraints,
 )
+from ratsnestpro.orchestration.release_invariants import (
+    ReleaseIdentity,
+    validate_release_invariant_manifest,
+)
 from ratsnestpro.orchestration.review_project import ReviewProjectError
 from ratsnestpro.parts import PartSelector
 from service.ahe_event import (
@@ -83,7 +97,7 @@ from service.llm_output_stream import (
 LlmModeName = Literal["offline", "auto", "required"]
 
 _SAFE_NAME = re.compile(r"[^a-zA-Z0-9_.-]+")
-_PIPELINE_STATE_SCHEMA_VERSION = 5
+_PIPELINE_STATE_SCHEMA_VERSION = 7
 _ARCHITECT_EVIDENCE_MARKER = "GROUNDED ARCHITECT EVIDENCE"
 _CHANGE_REQUEST_MARKERS = (
     "USER CHANGE REQUEST:",
@@ -95,16 +109,16 @@ _EVIDENCE_MARKERS = (
 )
 _CONTINUATION_ONLY = re.compile(
     r"\b(?:continue|resume|retry|rerun|re-run|proceed)\b|"
-    r"(?:继续|续跑|重试|重新运行|接着运行|从检查点)",
+    r"(?:继续|恢复|续跑|重试|重新运行|重新执行|接着运行|从检查点)",
     re.IGNORECASE,
 )
 _HARDWARE_CHANGE_SIGNAL = re.compile(
-    r"\d|"
+    r"\b(?:[a-z]{1,3}\d+|\d+(?:\.\d+)?\s*(?:v|a|w|hz|khz|mhz|ohm|mm|mil))\b|"
     r"\b(?:mcu|soc|fpga|component|part|sensor|connector|interface|"
     r"usb|can|uart|spi|i2c|ethernet|power|supply|rail|voltage|current|"
     r"schematic|pcb|pin|net|trace|route|routing|via|impedance|layer|"
     r"outline|dimension|size|footprint|package|bom|gerber|erc|drc)\b|"
-    r"(?:器件|元件|主控|芯片|传感器|连接器|接口|电源|电压|电流|"
+    r"(?:器件|元件|主控|芯片|传感器|连接器|接口|电源|电压|电流|电阻|电容|电感|"
     r"原理图|电路板|引脚|网络|走线|布线|过孔|阻抗|层数|板框|尺寸|"
     r"封装|物料|生产文件)",
     re.IGNORECASE,
@@ -337,11 +351,18 @@ def _reject_same_revision_checkpoint_regression(
         current = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return
-    same_revision = (
+    same_identity = (
         current.get("project_name") == payload.get("project_name")
         and current.get("requirement_contract") == payload.get("requirement_contract")
-        and int(current.get("revision", 0)) == int(payload.get("revision", 0))
     )
+    current_revision = int(current.get("revision", 0))
+    next_revision = int(payload.get("revision", 0))
+    if next_revision < current_revision:
+        raise PipelineCheckpointRegressionError(
+            "refusing stale pipeline checkpoint revision "
+            f"{next_revision}; current revision is {current_revision}"
+        )
+    same_revision = same_identity and current_revision == next_revision
     current_steps = int(current.get("completed_steps", 0))
     next_steps = int(payload.get("completed_steps", 0))
     if same_revision and next_steps < current_steps:
@@ -375,6 +396,10 @@ def _write_pipeline_state(
         "steps": _pipeline_steps(state),
         "repair_history": [repair.model_dump(mode="json") for repair in state.repair_history],
         "replan_history": [replan.model_dump(mode="json") for replan in state.replan_history],
+        "recovery_history": [
+            recovery.model_dump(mode="json")
+            for recovery in state.recovery_history
+        ],
         "capability_gaps": [gap.model_dump(mode="json") for gap in state.capability_gaps],
         "intermediate_artifacts": {
             step.value: artifact.model_dump(mode="json")
@@ -395,6 +420,15 @@ def _write_pipeline_state(
         "connection_synthesis_report": (
             state.connection_synthesis_report.model_dump(mode="json")
             if state.connection_synthesis_report is not None
+            else None
+        ),
+        "release_resume": (
+            {
+                "step": state.release_resume_step.value,
+                "token_digest": state.release_resume_token_digest,
+            }
+            if state.release_resume_step is not None
+            and state.release_resume_token_digest
             else None
         ),
     }
@@ -696,6 +730,8 @@ def _load_pipeline_state(
     path: Path,
     requirement: str,
     project_name: str,
+    resume_from_step: PipelineStep | None = None,
+    resume_token: str | None = None,
 ) -> PipelineState:
     payload = json.loads(path.read_text(encoding="utf-8"))
     saved_requirement = str(payload.get("requirement", ""))
@@ -719,23 +755,212 @@ def _load_pipeline_state(
     steps = payload.get("steps")
     if not isinstance(artifacts, dict) or not isinstance(steps, list):
         raise TypeError("pipeline checkpoint is missing artifacts or step history")
-    return restore_pipeline_state(
+    release_resume = payload.get("release_resume")
+    persisted_resume_step = (
+        str(release_resume.get("step", ""))
+        if isinstance(release_resume, dict)
+        else ""
+    )
+    persisted_resume_token_digest = (
+        str(release_resume.get("token_digest", ""))
+        if isinstance(release_resume, dict)
+        else ""
+    )
+    explicit_invalidation: PipelineStep | None = None
+    resume_already_consumed = False
+    resume_checkpoint_preinvalidated = False
+    if resume_from_step is not None:
+        if not resume_token:
+            raise ValueError("resume_from_step requires a bounded resume token")
+        resume_token_digest = hashlib.sha256(resume_token.encode("utf-8")).hexdigest()
+        already_consumed = (
+            persisted_resume_step == resume_from_step.value
+            and persisted_resume_token_digest == resume_token_digest
+        )
+        try:
+            persisted_completed = [
+                PipelineStep(str(item.get("name", "")))
+                for item in steps
+                if isinstance(item, dict)
+            ]
+        except ValueError:
+            persisted_completed = []
+        resume_index = list(PipelineStep).index(resume_from_step)
+        # A cancelled recovery may have already atomically truncated the
+        # checkpoint before its rollback target, then receive a fresh bounded
+        # token in the next control-plane revision.  Requiring the old failed
+        # StepResult in that state rejects a safe continuation and strands the
+        # verified prefix.  Accept only an exact canonical prefix at or before
+        # the recorded rollback target; malformed or forward checkpoints still
+        # take the strict earliest-blocker path below.
+        resume_checkpoint_preinvalidated = (
+            persisted_resume_step == resume_from_step.value
+            and persisted_completed
+            == list(PipelineStep)[: len(persisted_completed)]
+            and len(persisted_completed) <= resume_index
+        )
+        if already_consumed or resume_checkpoint_preinvalidated:
+            resume_already_consumed = True
+            explicit_invalidation = None
+            persisted_resume_step = resume_from_step.value
+            persisted_resume_token_digest = resume_token_digest
+        else:
+            try:
+                terminal_result = json.loads(
+                    path.with_name("pipeline_result.json").read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError, TypeError):
+                terminal_result = {}
+            expected_value = checkpoint_resume_step(
+                steps,
+                terminal_result if isinstance(terminal_result, dict) else {},
+            )
+            expected_resume = PipelineStep(expected_value) if expected_value else None
+            if expected_resume != resume_from_step:
+                raise ValueError(
+                    "resume_from_step must match the earliest failed or incomplete step"
+                )
+            explicit_invalidation = resume_from_step
+            persisted_resume_step = resume_from_step.value
+            persisted_resume_token_digest = resume_token_digest
+    requirement_invalidation = _requirement_invalidation_step(
+        saved_requirement,
+        requirement,
+    )
+    invalidations = [
+        step
+        for step in (requirement_invalidation, explicit_invalidation)
+        if step is not None
+    ]
+    invalidate_from_step = (
+        min(invalidations, key=list(PipelineStep).index)
+        if invalidations
+        else None
+    )
+    persisted_completed_steps = int(payload.get("completed_steps", len(steps)))
+    restored = restore_pipeline_state(
         requirement_text=requirement,
         project_name=project_name,
         intermediate_artifacts=artifacts,
         steps=steps,
-        revision=int(payload.get("revision", 0)),
+        revision=(
+            int(payload.get("revision", 0))
+            + (1 if explicit_invalidation is not None else 0)
+        ),
         repair_history=payload.get("repair_history", []),
         replan_history=payload.get("replan_history", []),
+        recovery_history=payload.get("recovery_history", []),
         capability_gaps=payload.get("capability_gaps", []),
         resume_candidates=payload.get("resume_candidates", {}),
         connection_synthesis_checkpoint=payload.get("connection_synthesis_checkpoint"),
         connection_synthesis_report=payload.get("connection_synthesis_report"),
-        invalidate_from_step=_requirement_invalidation_step(
-            saved_requirement,
-            requirement,
-        ),
+        release_resume_step=persisted_resume_step,
+        release_resume_token_digest=persisted_resume_token_digest,
+        invalidate_from_step=invalidate_from_step,
         artifact_first=True,
+    )
+    if (
+        explicit_invalidation is None
+        and len(restored.results) < persisted_completed_steps
+    ):
+        # Resume revalidates every persisted artifact against the current
+        # deterministic checks.  Dropping a now-invalid suffix is an
+        # intentional state transition, not a stale writer regression, so it
+        # must receive a new revision before the shorter prefix is persisted.
+        restored.revision += 1
+    if explicit_invalidation is not None:
+        expected_prefix = list(PipelineStep)[:list(PipelineStep).index(explicit_invalidation)]
+        if restored.completed != expected_prefix:
+            raise ValueError(
+                "resume checkpoint did not restore the exact verified prefix before "
+                f"{explicit_invalidation.value}"
+            )
+    elif resume_already_consumed and resume_from_step is not None:
+        resume_index = list(PipelineStep).index(resume_from_step)
+        expected = list(PipelineStep)[:resume_index]
+        valid_prefix = (
+            restored.completed
+            == list(PipelineStep)[: len(restored.completed)]
+        )
+        if (
+            (
+                resume_checkpoint_preinvalidated
+                and (not valid_prefix or len(restored.completed) > resume_index)
+            )
+            or (
+                not resume_checkpoint_preinvalidated
+                and restored.completed[:resume_index] != expected
+            )
+        ):
+            raise ValueError(
+                "consumed resume checkpoint no longer contains its verified upstream prefix"
+            )
+    return restored
+
+
+def checkpoint_resume_step(
+    steps: list[Any],
+    terminal_result: dict[str, Any] | None = None,
+) -> str | None:
+    """Return the only safe continuation point for a canonical checkpoint."""
+
+    canonical = list(PipelineStep)
+    completed: list[PipelineStep] = []
+    for index, item in enumerate(steps):
+        if not isinstance(item, dict) or index >= len(canonical):
+            return None
+        try:
+            step = PipelineStep(str(item.get("name", "")))
+        except ValueError:
+            return None
+        if step != canonical[index]:
+            return None
+        completed.append(step)
+        if item.get("blocked") is True or item.get("execution_blocked") is True:
+            return step.value
+    if len(completed) < len(canonical):
+        return canonical[len(completed)].value
+    if len(completed) > len(canonical):
+        return None
+
+    result = terminal_result or {}
+    if result.get("release_ready") is not False:
+        return None
+    verification = result.get("verification", {})
+    if isinstance(verification, dict):
+        erc = verification.get("erc", {})
+        if isinstance(erc, dict) and (
+            int(erc.get("errors", 0) or 0) > 0
+            or _verification_has_blocked_warnings(erc)
+        ):
+            return PipelineStep.ERC.value
+        drc = verification.get("drc", {})
+        if isinstance(drc, dict):
+            if int(drc.get("unconnected", 0) or 0) > 0:
+                return PipelineStep.ROUTE_SIGNALS.value
+            if (
+                int(drc.get("errors", 0) or 0) > 0
+                or _verification_has_blocked_warnings(drc)
+            ):
+                return PipelineStep.ROUTE_FAB.value
+    component_release = result.get("component_release", {})
+    if (
+        isinstance(component_release, dict)
+        and component_release.get("release_ready") is False
+    ):
+        return PipelineStep.SELECTION.value
+    return PipelineStep.MANUFACTURE.value
+
+
+def _verification_has_blocked_warnings(verification: dict[str, Any]) -> bool:
+    classifications = verification.get("warning_classifications", {})
+    if not isinstance(classifications, dict):
+        return False
+    return any(
+        isinstance(value, dict)
+        and isinstance(value.get("resolution"), dict)
+        and value["resolution"].get("status") == "blocked"
+        for value in classifications.values()
     )
 
 
@@ -791,6 +1016,51 @@ def _transcript_token_usage(path: Path | None) -> int:
     except (OSError, json.JSONDecodeError):
         return total
     return total
+
+
+_NON_RETRYABLE_PROVIDER_STATUS_CODES = frozenset({401, 402, 403, 404})
+_NON_RETRYABLE_PROVIDER_MARKERS = (
+    "insufficient balance",
+    "insufficient_balance",
+    "insufficient quota",
+    "insufficient_quota",
+    "billing hard limit",
+    "billing_not_active",
+)
+
+
+def _provider_status_code(exc: Exception) -> int | None:
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+    if isinstance(status, int):
+        return status
+    match = re.search(r"(?:error code|http)\s*[:=]?\s*(\d{3})", str(exc), re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def _non_retryable_provider_failure(exc: Exception) -> bool:
+    status = _provider_status_code(exc)
+    text = str(exc).casefold()
+    return status in _NON_RETRYABLE_PROVIDER_STATUS_CODES or any(
+        marker in text for marker in _NON_RETRYABLE_PROVIDER_MARKERS
+    )
+
+
+def _provider_failure_message(exc: Exception, model_name: str) -> str:
+    status = _provider_status_code(exc)
+    text = str(exc).casefold()
+    suffix = f" (HTTP {status})" if status is not None else ""
+    if status == 402 or any(marker in text for marker in _NON_RETRYABLE_PROVIDER_MARKERS):
+        reason = "provider balance or quota is exhausted"
+    elif status in {401, 403}:
+        reason = "provider credentials were rejected"
+    elif status == 404:
+        reason = "provider endpoint or model was not found"
+    else:
+        reason = "provider rejected the request"
+    return f"LLM model {model_name}: {reason}{suffix}"
 
 
 class _ToolkitLlmClient:
@@ -855,13 +1125,24 @@ class _ToolkitLlmClient:
             raise LlmError("LLM token budget exhausted before the next pipeline call")
         try:
             response = self._model.invoke(messages)
-        except Exception:
+        except Exception as exc:
+            if _non_retryable_provider_failure(exc):
+                raise NonRetryableLlmError(
+                    _provider_failure_message(exc, self._model_name)
+                ) from exc
             if self._model is self._fallback_model:
                 raise
             # A provider may not expose thinking on a particular endpoint or
             # model version. Preserve task completion with the established
             # non-thinking configuration instead of failing the pipeline.
-            response = self._fallback_model.invoke(messages)
+            try:
+                response = self._fallback_model.invoke(messages)
+            except Exception as fallback_exc:
+                if _non_retryable_provider_failure(fallback_exc):
+                    raise NonRetryableLlmError(
+                        _provider_failure_message(fallback_exc, self._model_name)
+                    ) from fallback_exc
+                raise
         usage = getattr(response, "usage_metadata", None)
         call_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
         self._used_llm_tokens += (
@@ -969,6 +1250,9 @@ def _current_pipeline_files(
     """
 
     candidates: list[Path] = list(metadata_paths)
+    selection = state.artifact(PipelineStep.SELECTION)
+    if isinstance(selection, SelectionPlan) and selection.component_closure_path:
+        candidates.append(Path(selection.component_closure_path))
     materialized = state.artifact(PipelineStep.SCH_MATERIALIZE)
     if isinstance(materialized, MaterializeResult):
         schematic_path = Path(materialized.sch_path)
@@ -976,11 +1260,21 @@ def _current_pipeline_files(
             [
                 schematic_path,
                 schematic_path.with_suffix(".kicad_pro"),
+                schematic_path.parent / "sym-lib-table",
+                schematic_path.parent / "library-bindings.lock.json",
             ]
         )
+        library_bundle = schematic_path.parent / ".ratsnest-libs"
+        if library_bundle.is_dir():
+            candidates.extend(
+                path for path in library_bundle.rglob("*") if path.is_file()
+            )
     erc = state.artifact(PipelineStep.ERC)
-    if isinstance(erc, ErcSummary) and erc.cli_report_path:
-        candidates.append(Path(erc.cli_report_path))
+    if isinstance(erc, ErcSummary):
+        if erc.cli_report_path:
+            candidates.append(Path(erc.cli_report_path))
+        if erc.connectivity_netlist_path:
+            candidates.append(Path(erc.connectivity_netlist_path))
     board = state.artifact(PipelineStep.LAYOUT_WRITE)
     if isinstance(board, PcbWriteResult):
         pcb_path = Path(board.pcb_path)
@@ -989,11 +1283,19 @@ def _current_pipeline_files(
                 pcb_path,
                 pcb_path.with_name(f"{pcb_path.stem}.unrouted.kicad_pcb"),
                 pcb_path.with_suffix(".drc.json"),
+                pcb_path.with_suffix(".warning-waivers.json"),
                 pcb_path.with_suffix(".kicad_pro"),
+                pcb_path.parent / "fp-lib-table",
+                pcb_path.parent / "library-bindings.lock.json",
             ]
         )
         if board.placement_constraints_path:
             candidates.append(Path(board.placement_constraints_path))
+        library_bundle = pcb_path.parent / ".ratsnest-libs"
+        if library_bundle.is_dir():
+            candidates.extend(
+                path for path in library_bundle.rglob("*") if path.is_file()
+            )
     route = state.artifact(PipelineStep.ROUTE_SIGNALS)
     if isinstance(route, RouteResult):
         if route.dsn_path:
@@ -1008,6 +1310,8 @@ def _current_pipeline_files(
                 manufacture.bom_path,
                 manufacture.cpl_path,
                 manufacture.unresolved_manifest_path,
+                manufacture.requirement_invariants_path,
+                manufacture.drc_report_path,
             )
             if value
         )
@@ -1043,6 +1347,12 @@ def _preferred_project_file(
     return next(iter(sorted(directory.glob(f"*{suffix}"))), None)
 
 
+def _classify_eda_warnings(findings: list[dict[str, Any]]) -> dict[str, Any]:
+    """Classify every remaining warning without suppressing any KiCad result."""
+
+    return classify_warnings(findings)
+
+
 def _drc_check(pcb_path: Path | None) -> dict[str, Any]:
     if pcb_path is None or not pcb_path.is_file():
         return {
@@ -1054,6 +1364,7 @@ def _drc_check(pcb_path: Path | None) -> dict[str, Any]:
             "unconnected": None,
             "report_path": None,
             "by_type": {},
+            "warning_classifications": {},
         }
     cli = kicad_cli_available()
     if cli is None:
@@ -1066,6 +1377,7 @@ def _drc_check(pcb_path: Path | None) -> dict[str, Any]:
             "unconnected": None,
             "report_path": None,
             "by_type": {},
+            "warning_classifications": {},
         }
 
     report = pcb_path.with_suffix(".drc.json")
@@ -1101,6 +1413,7 @@ def _drc_check(pcb_path: Path | None) -> dict[str, Any]:
             "unconnected": None,
             "report_path": str(report) if report.is_file() else None,
             "by_type": {},
+            "warning_classifications": {},
         }
 
     violations = data.get("violations", []) if isinstance(data, dict) else []
@@ -1113,6 +1426,12 @@ def _drc_check(pcb_path: Path | None) -> dict[str, Any]:
     for finding in findings:
         finding_type = str(finding.get("type", "unknown"))
         by_type[finding_type] = by_type.get(finding_type, 0) + 1
+    warning_classifications = apply_warning_contract(
+        _classify_eda_warnings(findings),
+        findings,
+        pcb_path=pcb_path,
+        report_path=report,
+    )
     return {
         "applicable": True,
         "available": True,
@@ -1122,6 +1441,7 @@ def _drc_check(pcb_path: Path | None) -> dict[str, Any]:
         "unconnected": len(unconnected_items),
         "report_path": str(report),
         "by_type": by_type,
+        "warning_classifications": warning_classifications,
     }
 
 
@@ -1135,11 +1455,28 @@ def _erc_check(sch_path: Path | None) -> dict[str, Any]:
             "warnings": None,
             "report_path": None,
             "by_type": {},
+            "warning_classifications": {},
         }
     result = run_erc(sch_path)
     by_type: dict[str, int] = {}
     for violation in result.violations:
         by_type[violation.rule_id] = by_type.get(violation.rule_id, 0) + 1
+    findings = [
+        {
+            "severity": violation.severity,
+            "type": violation.rule_id,
+            "description": violation.message,
+        }
+        for violation in result.violations
+    ]
+    classifications = _classify_eda_warnings(findings)
+    if result.report_path:
+        classifications = apply_warning_contract(
+            classifications,
+            findings,
+            sch_path=sch_path,
+            report_path=Path(result.report_path),
+        )
     return {
         "applicable": True,
         "available": result.available,
@@ -1148,6 +1485,7 @@ def _erc_check(sch_path: Path | None) -> dict[str, Any]:
         "warnings": result.warning_count if result.ran else None,
         "report_path": result.report_path,
         "by_type": by_type,
+        "warning_classifications": classifications,
     }
 
 
@@ -1196,6 +1534,39 @@ def _verification_blockers(verification: dict[str, Any]) -> list[str]:
             blockers.append(f"kicad-cli {display} did not run")
         elif result.get("errors") != 0:
             blockers.append(f"kicad-cli {display} reported {result.get('errors')} error(s)")
+        for rule_id, classification in result.get(
+            "warning_classifications",
+            {},
+        ).items():
+            resolution = classification.get("resolution", {})
+            if str(resolution.get("status", "")) in {
+                "auto_equivalent",
+                "waived",
+            }:
+                continue
+            disposition = str(classification.get("disposition", ""))
+            if disposition not in {
+                "repair_required",
+                "explicit_review_required",
+                "repair_or_explicit_waiver_required",
+                "normalized_structure_evidence_required",
+            }:
+                continue
+            count = classification.get("count", 0)
+            reason = str(resolution.get("reason", "")).strip() or (
+                "repair is required"
+                if disposition == "repair_required"
+                else "explicit review is required"
+                if disposition == "explicit_review_required"
+                else (
+                    "repair or a report-digest/rule/count-bound waiver is required; "
+                    "no verified warning-waiver contract is implemented"
+                )
+            )
+            blockers.append(
+                f"kicad-cli {display} warning {rule_id} ({count} finding(s)): "
+                f"{reason}"
+            )
     drc = verification.get("drc", {})
     if drc.get("applicable") and drc.get("unconnected") != 0:
         blockers.append(f"kicad-cli DRC reported {drc.get('unconnected')} unconnected item(s)")
@@ -1205,6 +1576,18 @@ def _verification_blockers(verification: dict[str, Any]) -> list[str]:
 def _verification_markdown(verification: dict[str, Any]) -> str:
     erc = verification["erc"]
     drc = verification["drc"]
+    warning_lines: list[str] = []
+    for label, section in (("ERC", erc), ("DRC", drc)):
+        for rule_id, classification in section.get(
+            "warning_classifications",
+            {},
+        ).items():
+            warning_lines.append(
+                f"- {label} warning `{rule_id}`: count={classification['count']}, "
+                f"disposition={classification['disposition']}, "
+                f"resolution={classification.get('resolution', {}).get('status', 'blocked')}, "
+                "suppressed=false"
+            )
     return "\n".join(
         [
             "## Independent kicad-cli verification",
@@ -1218,8 +1601,98 @@ def _verification_markdown(verification: dict[str, Any]) -> str:
                 f"warnings={drc['warnings']}, unconnected={drc['unconnected']}, "
                 f"report=`{drc['report_path']}`"
             ),
+            *warning_lines,
         ]
     )
+
+
+def _release_invariant_manifest(
+    project: Path,
+    pcb_path: Path | None,
+) -> dict[str, Any]:
+    """Validate one manufacturing receipt against current pipeline evidence."""
+
+    directory = project if project.is_dir() else project.parent
+    candidates = sorted(directory.glob("*.release_invariants.json"))
+    if not candidates:
+        return {
+            "status": "missing",
+            "path": None,
+            "schema_version": None,
+            "requirement_release_ready": False,
+            "blockers": [
+                "release-invariant manifest is missing from the project directory"
+            ],
+            "findings": [],
+            "invariants": {},
+        }
+    if len(candidates) != 1:
+        return {
+            "status": "invalid",
+            "path": None,
+            "schema_version": None,
+            "requirement_release_ready": False,
+            "blockers": [
+                "release-invariant manifest is ambiguous: "
+                f"found {len(candidates)} candidates"
+            ],
+            "findings": [],
+            "invariants": {},
+        }
+
+    manifest_path = candidates[0]
+    try:
+        if pcb_path is None or not pcb_path.is_file():
+            raise ValueError("current KiCad PCB is unavailable")
+        state_path = directory / "pipeline_state.json"
+        state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+        if not isinstance(state_payload, dict):
+            raise ValueError("pipeline_state.json root must be an object")
+        requirement = str(state_payload.get("requirement", "")).strip()
+        project_name = str(state_payload.get("project_name", "")).strip()
+        artifacts = state_payload.get("intermediate_artifacts")
+        if not requirement or not project_name or not isinstance(artifacts, dict):
+            raise ValueError("pipeline state lacks release identity inputs")
+        selection_payload = artifacts.get(PipelineStep.SELECTION.value)
+        selection = SelectionPlan.model_validate(selection_payload)
+        manifest = validate_release_invariant_manifest(
+            manifest_path,
+            project_name=project_name,
+            requirement=requirement,
+            pcb_path=pcb_path,
+            parts=selection.parts,
+        )
+        blockers = list(manifest.requirement_release_blockers)
+        findings = [
+            finding.model_dump(mode="json") for finding in manifest.findings
+        ]
+        requirement_release_ready = manifest.requirement_release_ready
+        return {
+            "status": "passed" if requirement_release_ready and not blockers else "blocked",
+            "path": str(manifest_path),
+            "schema_version": manifest.schema_version,
+            "requirement_release_ready": requirement_release_ready,
+            "blockers": blockers,
+            "findings": findings,
+            "invariants": manifest.invariants.model_dump(mode="json"),
+            "release_identity": manifest.release_identity.model_dump(mode="json"),
+        }
+    except (
+        OSError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        ValidationError,
+    ) as exc:
+        return {
+            "status": "invalid",
+            "path": str(manifest_path),
+            "schema_version": None,
+            "requirement_release_ready": False,
+            "blockers": [f"release-invariant manifest is invalid: {exc}"],
+            "findings": [],
+            "invariants": {},
+        }
 
 
 def ratsnest_search_internal_knowledge(
@@ -1396,6 +1869,8 @@ def _run_pcb_pipeline_unlocked(
     until_step: str | None = None,
     external_retry_managed: bool = False,
     ahe_budget: dict[str, int] | None = None,
+    resume_from_step: str | None = None,
+    resume_token: str | None = None,
 ) -> str:
     """Run RatsNestPro pipeline B, the fixed 17-step schematic-to-manufacture flow.
 
@@ -1408,6 +1883,13 @@ def _run_pcb_pipeline_unlocked(
         requested_mode = parse_mode(llm_mode)
         mode = _pipeline_mode(requirement, requested_mode)
         requested_until = PipelineStep(until_step) if until_step else None
+        requested_resume = PipelineStep(resume_from_step) if resume_from_step else None
+        active_resume = (
+            requested_resume
+            if requested_resume is not None
+            and (requested_until is None or requested_until == requested_resume)
+            else None
+        )
         out = _run_dir(run_name)
         out.mkdir(parents=True, exist_ok=True)
         workflow_id = os.getenv("RATSNESTPRO_LLM_TRANSCRIPT_WORKFLOW_ID", "").strip()
@@ -1482,8 +1964,18 @@ def _run_pcb_pipeline_unlocked(
                     )
                     if isinstance(issue, dict) and issue.get("name")
                 ]
+        if active_resume is not None and not state_path.is_file():
+            raise ValueError(
+                "resume_from_step requires an existing verified pipeline checkpoint"
+            )
         state = (
-            _load_pipeline_state(state_path, requirement, project)
+            _load_pipeline_state(
+                state_path,
+                requirement,
+                project,
+                resume_from_step=active_resume,
+                resume_token=resume_token,
+            )
             if state_path.is_file()
             else PipelineState(
                 requirement_text=requirement,
@@ -1494,15 +1986,20 @@ def _run_pcb_pipeline_unlocked(
             state.capability_gaps = ehe_memory.active_gaps()
         resumed_steps = len(state.results)
         require_freerouting = _env_flag("RATSNESTPRO_REQUIRE_FREEROUTING")
+        repair_release_issues = _env_flag(
+            "RATSNESTPRO_REPAIR_RELEASE_ISSUES",
+            default=True,
+        )
         Pipeline().run(
             state,
             PipelineContext(
                 mode=mode,
                 client=client,
                 out_dir=str(out),
-                # AHE is limited to failures that prevent mechanical execution.
-                # Design/ERC/DRC findings remain visible and do not consume the
-                # repair budget in artifact-first mode.
+                # Release failures participate in the same bounded AHE ledger.
+                # Artifact-first still guarantees an editable draft, while
+                # deterministic ERC/DRC failures may now roll back to the
+                # owning stage instead of being reported without correction.
                 repair_attempts=_env_int(
                     "RATSNESTPRO_AHE_STAGNATION_LIMIT",
                     default=2,
@@ -1516,6 +2013,22 @@ def _run_pcb_pipeline_unlocked(
                 # values and are still captured in the issue ledger.
                 capture_step_errors=not external_retry_managed,
                 ahe_enabled=_env_flag("RATSNESTPRO_AHE_ENABLED", default=True),
+                agentic_recovery_enabled=_env_flag(
+                    "RATSNESTPRO_AGENTIC_RECOVERY_ENABLED",
+                    default=True,
+                ),
+                max_agentic_recovery_turns_per_step=_env_int(
+                    "RATSNESTPRO_AGENTIC_RECOVERY_MAX_TURNS_PER_STEP",
+                    default=6,
+                    minimum=1,
+                    maximum=12,
+                ),
+                max_total_agentic_recovery_turns=_env_int(
+                    "RATSNESTPRO_AGENTIC_RECOVERY_MAX_TOTAL_TURNS",
+                    default=24,
+                    minimum=1,
+                    maximum=64,
+                ),
                 max_total_repair_attempts=min(
                     _env_int(
                         "RATSNESTPRO_AHE_MAX_REPAIRS",
@@ -1547,12 +2060,12 @@ def _run_pcb_pipeline_unlocked(
                 ),
                 max_replan_attempts=_env_int(
                     "RATSNESTPRO_AHE_MAX_REPLANS",
-                    default=0,
+                    default=1,
                     minimum=0,
                     maximum=2,
                 ),
                 artifact_first=True,
-                repair_release_issues=False,
+                repair_release_issues=repair_release_issues,
                 design_repair_attempts=_env_int(
                     "RATSNESTPRO_DESIGN_REPAIR_STAGNATION_LIMIT",
                     default=1,
@@ -1663,6 +2176,7 @@ def _run_pcb_pipeline_unlocked(
             requested_until is not None
             and requested_until != PipelineStep.MANUFACTURE
             and target_reached
+            and (not state.blocked or not repair_release_issues)
             and not state.execution_blocked
         ):
             # Temporal advances one canonical checkpoint at a time. Re-running
@@ -1694,6 +2208,7 @@ def _run_pcb_pipeline_unlocked(
             )
         route_artifact = state.artifact(PipelineStep.ROUTE_SIGNALS)
         selection_artifact = state.artifact(PipelineStep.SELECTION)
+        manufacture_artifact = state.artifact(PipelineStep.MANUFACTURE)
         routing = (
             route_artifact.model_dump()
             if isinstance(route_artifact, RouteResult)
@@ -1839,6 +2354,12 @@ def _run_pcb_pipeline_unlocked(
                 "ready": not component_release_issues,
                 "blockers": component_release_issues,
             },
+            "release_identity": (
+                manufacture_artifact.release_identity.model_dump(mode="json")
+                if isinstance(manufacture_artifact, ManufactureResult)
+                and manufacture_artifact.release_identity is not None
+                else None
+            ),
             "design_repair": {
                 "attempts": len(design_repairs),
                 "history": [repair.model_dump(mode="json") for repair in design_repairs],
@@ -1851,6 +2372,17 @@ def _run_pcb_pipeline_unlocked(
                 "replan_history": [
                     replan.model_dump(mode="json") for replan in state.replan_history
                 ],
+                "agentic_recovery": {
+                    "enabled": _env_flag(
+                        "RATSNESTPRO_AGENTIC_RECOVERY_ENABLED",
+                        default=True,
+                    ),
+                    "turns": len(state.recovery_history),
+                    "history": [
+                        recovery.model_dump(mode="json")
+                        for recovery in state.recovery_history
+                    ],
+                },
                 "capability_gaps": [gap.model_dump(mode="json") for gap in state.capability_gaps],
             },
             "ehe": _ehe_result_payload(
@@ -1937,6 +2469,8 @@ def ratsnest_run_pcb_pipeline(
     model_name: str | None = None,
     model_type: str | None = None,
     ahe_budget: dict[str, int] | None = None,
+    resume_from_step: str | None = None,
+    resume_token: str | None = None,
 ) -> str:
     """Run one checkpointed 17-step PCB pipeline without run-directory races."""
     out = _run_dir(run_name)
@@ -1950,6 +2484,8 @@ def ratsnest_run_pcb_pipeline(
                 model_name=model_name,
                 model_type=model_type,
                 ahe_budget=ahe_budget,
+                resume_from_step=resume_from_step,
+                resume_token=resume_token,
             )
     except OSError as exc:
         return _json(
@@ -1970,6 +2506,8 @@ def ratsnest_run_pcb_pipeline_until(
     model_name: str | None = None,
     model_type: str | None = None,
     ahe_budget: dict[str, int] | None = None,
+    resume_from_step: str | None = None,
+    resume_token: str | None = None,
 ) -> str:
     """Advance one checkpointed run through ``until_step``.
 
@@ -1992,6 +2530,8 @@ def ratsnest_run_pcb_pipeline_until(
                 until_step=until_step,
                 external_retry_managed=True,
                 ahe_budget=ahe_budget,
+                resume_from_step=resume_from_step,
+                resume_token=resume_token,
             )
     except OSError as exc:
         return _json(
@@ -2010,6 +2550,9 @@ def ratsnest_review_kicad_project(
     llm_mode: LlmModeName = "offline",
     model_name: str | None = None,
     model_type: str | None = None,
+    upstream_release_ready: bool | None = None,
+    upstream_release_blockers: list[str] | None = None,
+    upstream_release_identity: dict[str, Any] | None = None,
 ) -> str:
     """Review a KiCad project located inside the RatsNestPro workspace.
 
@@ -2020,14 +2563,15 @@ def ratsnest_review_kicad_project(
     try:
         project = _workspace_path(project_path)
         mode = parse_mode(llm_mode)
-        # The deterministic review is the release authority and must exist on
-        # disk before an advisory model call can block, fail, or be cancelled.
+        # The deterministic review is the independent review-gate authority and
+        # must exist on disk before advisory enrichment can fail or be cancelled.
         reviewed = review_project(project, mode=LlmMode.OFFLINE, client=None)
         schematic_path, pcb_path = _paired_project_files(
             project,
             reviewed.schematic_path,
             reviewed.pcb_path,
         )
+        release_invariants = _release_invariant_manifest(project, pcb_path)
         verification = _verification(
             schematic_path,
             pcb_path,
@@ -2054,12 +2598,12 @@ def ratsnest_review_kicad_project(
             if component_release_gate is not None
             else []
         )
-        blocked = (
+        independent_blocked = (
             reviewed.blocked
             or bool(verification_blockers)
             or bool(placement_review_blockers)
         )
-        verdict_reasons = [
+        independent_reasons = [
             *verification_blockers,
             *component_review_blockers,
             *placement_review_blockers,
@@ -2069,28 +2613,118 @@ def ratsnest_review_kicad_project(
                 else []
             ),
         ]
-        authoritative_verdict = {
+        independent_review_verdict = {
             "schema_version": 1,
             "source": "deterministic_project_and_kicad_cli_gates",
-            "verdict": "BLOCKED" if blocked else "PASS",
-            "blocked": blocked,
-            "reasons": verdict_reasons,
+            "scope": "independent_review",
+            "verdict": "BLOCKED" if independent_blocked else "PASS",
+            "blocked": independent_blocked,
+            "reasons": independent_reasons,
         }
+        integrated_release = (
+            upstream_release_ready is not None
+            or upstream_release_blockers is not None
+            or upstream_release_identity is not None
+        )
+        release_reasons: list[str] = []
+        if integrated_release:
+            if upstream_release_ready is not True:
+                release_reasons.append(
+                    "upstream hardware pipeline did not attest release_ready=true"
+                )
+            release_reasons.extend(
+                str(item).strip()
+                for item in (upstream_release_blockers or [])
+                if str(item).strip()
+            )
+            try:
+                expected_release_identity = ReleaseIdentity.model_validate(
+                    upstream_release_identity,
+                    strict=True,
+                )
+            except (TypeError, ValueError, ValidationError):
+                expected_release_identity = None
+                release_reasons.append(
+                    "upstream hardware release identity is missing or invalid"
+                )
+            manifest_release_identity = release_invariants.get("release_identity")
+            if (
+                expected_release_identity is not None
+                and expected_release_identity.model_dump(mode="json")
+                != manifest_release_identity
+            ):
+                release_reasons.append(
+                    "upstream hardware release identity does not match the independently "
+                    "validated release-invariant manifest"
+                )
+            if release_invariants["status"] != "passed":
+                release_reasons.extend(release_invariants["blockers"])
+            release_reasons.extend(independent_reasons)
+            release_reasons = list(dict.fromkeys(release_reasons))
+            release_blocked: bool | None = bool(release_reasons)
+            release_verdict = {
+                "schema_version": 1,
+                "source": "upstream_hardware_invariants_and_independent_review",
+                "scope": "overall_release",
+                "evaluated": True,
+                "verdict": "BLOCKED" if release_blocked else "PASS",
+                "blocked": release_blocked,
+                "reasons": release_reasons,
+            }
+        else:
+            release_blocked = None
+            release_verdict = {
+                "schema_version": 1,
+                "source": "independent_review_only",
+                "scope": "overall_release",
+                "evaluated": False,
+                "verdict": "NOT_EVALUATED",
+                "blocked": None,
+                "reasons": [
+                    "upstream hardware release evidence was not supplied"
+                ],
+            }
+        effective_blocked = (
+            bool(release_blocked) if integrated_release else independent_blocked
+        )
+        # Compatibility alias: callers that consumed authoritative_verdict keep
+        # working, while its scope is now explicit and cannot be mistaken for
+        # an overall release verdict in standalone review mode.
+        authoritative_verdict = (
+            release_verdict if integrated_release else independent_review_verdict
+        )
         verdict_markdown = "\n".join(
             [
-                "# Authoritative review verdict",
+                "# Independent review-gate verdict",
                 "",
-                f"**Verdict:** **{authoritative_verdict['verdict']}**",
+                f"**Verdict:** **{independent_review_verdict['verdict']}**",
+                "",
+                "**Scope:** `independent_review`",
                 "",
                 *(
-                    [f"- {reason}" for reason in verdict_reasons]
-                    if verdict_reasons
+                    [f"- {reason}" for reason in independent_reasons]
+                    if independent_reasons
                     else ["- All required deterministic and kicad-cli gates passed."]
                 ),
                 "",
                 (
-                    "Only this deterministic section defines release status. "
-                    "The advisory analysis below cannot override it."
+                    "This deterministic section defines only the independent "
+                    "review gate. It does not by itself claim overall release."
+                ),
+            ]
+        )
+        release_verdict_markdown = "\n".join(
+            [
+                "# Overall release acceptance",
+                "",
+                f"**Verdict:** **{release_verdict['verdict']}**",
+                "",
+                "**Scope:** `overall_release`",
+                "",
+                *(
+                    [f"- {reason}" for reason in release_verdict["reasons"]]
+                    if release_verdict["reasons"]
+                    else ["- Upstream, invariant, and independent review gates passed."]
                 ),
             ]
         )
@@ -2137,6 +2771,7 @@ def ratsnest_review_kicad_project(
             return "\n\n".join(
                 [
                     verdict_markdown,
+                    release_verdict_markdown,
                     _verification_markdown(verification),
                     placement_markdown,
                     str(advisory_review["markdown"]),
@@ -2190,7 +2825,7 @@ def ratsnest_review_kicad_project(
                 _atomic_write_text(report_path, review_markdown)
         return _json(
             {
-                "status": "blocked" if blocked else "ok",
+                "status": "blocked" if effective_blocked else "ok",
                 "workspace": str(_workspace_root()),
                 "project_path": str(project),
                 "report_path": str(report_path),
@@ -2212,6 +2847,9 @@ def ratsnest_review_kicad_project(
                     "blockers": component_review_blockers,
                 },
                 "authoritative_verdict": authoritative_verdict,
+                "independent_review_verdict": independent_review_verdict,
+                "release_verdict": release_verdict,
+                "release_invariants": release_invariants,
                 "advisory_review": advisory_review,
                 "review": review_markdown,
             }
@@ -2532,11 +3170,19 @@ def ratsnest_validate_kicad_binding(
     }
     symbol_exists = info is not None
     footprint_exists = pad_numbers is not None
+    symbol_library = symbol_id.partition(":")[0].casefold()
+    footprint_library = footprint_id.partition(":")[0].casefold()
+    explicit_mechanical_zero_pin_binding = (
+        not pin_numbers
+        and not actual_pad_numbers
+        and symbol_library == "mechanical"
+        and footprint_library == "mountinghole"
+    )
     compatible = (
         symbol_exists
         and footprint_exists
-        and bool(pin_numbers)
         and pin_numbers == actual_pad_numbers
+        and (bool(pin_numbers) or explicit_mechanical_zero_pin_binding)
     )
     blockers: list[str] = []
     if not symbol_exists:
@@ -2544,7 +3190,13 @@ def ratsnest_validate_kicad_binding(
     if not footprint_exists:
         blockers.append("exact footprint lib_id is not installed")
     if symbol_exists and footprint_exists and not compatible:
-        blockers.append("symbol pin numbers do not match footprint pad numbers")
+        if not pin_numbers and not actual_pad_numbers:
+            blockers.append(
+                "zero-pin/zero-pad binding is allowed only for the explicit "
+                "Mechanical symbol and MountingHole footprint families"
+            )
+        else:
+            blockers.append("symbol pin numbers do not match footprint pad numbers")
     return _json(
         {
             "status": "ok" if compatible else "blocked",

@@ -20,6 +20,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from agents.ratsnestpro.temporal.contracts import (
+    CANONICAL_STEPS,
     COMPENSATE_ACTIVITY,
     EXECUTE_STEP_ACTIVITY,
     READ_RESULT_ACTIVITY,
@@ -120,6 +121,24 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _canonical_resume_step(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or value not in CANONICAL_STEPS:
+        raise ValueError("resume_from_step must be a canonical pipeline step")
+    return value
+
+
+def _manifest_content_digest(value: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _manifest(command: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
     """Persist the large immutable request once instead of once per Activity."""
 
@@ -131,8 +150,19 @@ def _manifest(command: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
             raise ValueError("Temporal run manifest must contain a JSON object")
         if value.get("workflow_id") != command.get("workflow_id"):
             raise ValueError("Temporal run manifest workflow identity mismatch")
-        if value.get("requirement_hash") != command.get("requirement_hash"):
+        requirement = str(value.get("requirement", ""))
+        actual_requirement_hash = hashlib.sha256(
+            requirement.encode("utf-8")
+        ).hexdigest()
+        if (
+            value.get("requirement_hash") != actual_requirement_hash
+            or actual_requirement_hash != command.get("requirement_hash")
+        ):
             raise ValueError("Temporal run manifest requirement digest mismatch")
+        manifest_resume = _canonical_resume_step(value.get("resume_from_step"))
+        command_resume = _canonical_resume_step(command.get("resume_from_step"))
+        if manifest_resume != command_resume:
+            raise ValueError("Temporal run manifest resume step mismatch")
         command_scope = _verified_governance_scope(command)
         scope_matches_manifest = bool(
             command_scope is not None
@@ -147,6 +177,12 @@ def _manifest(command: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
                 for key, item in value.items()
                 if key not in {*_GOVERNANCE_FIELDS, "governance_scope_token"}
             }
+        expected_manifest_digest = str(command.get("manifest_digest", "")).strip()
+        if (
+            expected_manifest_digest
+            and _manifest_content_digest(value) != expected_manifest_digest
+        ):
+            raise ValueError("Temporal run manifest content digest mismatch")
         return path, value
 
     requirement = str(command.get("requirement", "")).strip()
@@ -159,6 +195,7 @@ def _manifest(command: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
     if not workflow_id or expected_hash != actual_hash:
         raise ValueError("Temporal first-step identity or requirement digest is invalid")
     governance_scope = _verified_governance_scope(command)
+    resume_from_step = _canonical_resume_step(command.get("resume_from_step"))
     manifest_id = hashlib.sha256(workflow_id.encode("utf-8")).hexdigest()[:20]
     path = (
         _workspace_root()
@@ -188,6 +225,8 @@ def _manifest(command: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
             else {}
         ),
     }
+    if resume_from_step:
+        value["resume_from_step"] = resume_from_step
     if governance_scope is not None:
         value.update(
             {
@@ -386,6 +425,7 @@ async def _execute_pipeline_step(command: dict[str, Any]) -> dict[str, Any]:
         )
     summary = compact_pipeline_result(payload, step)
     summary["manifest_path"] = str(manifest_path)
+    summary["manifest_digest"] = _manifest_content_digest(manifest)
     summary["activity_attempt"] = activity.info().attempt
     return summary
 

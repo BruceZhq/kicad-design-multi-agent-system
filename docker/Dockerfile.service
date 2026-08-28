@@ -41,6 +41,7 @@ COPY src/agents/ ./agents/
 COPY src/core/ ./core/
 COPY src/evolution/ ./evolution/
 COPY src/memory/ ./memory/
+COPY src/observability/ ./observability/
 COPY src/schema/ ./schema/
 COPY src/service/ ./service/
 COPY src/ratsnestpro/ ./ratsnestpro/

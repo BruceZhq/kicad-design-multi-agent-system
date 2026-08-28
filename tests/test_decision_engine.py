@@ -85,3 +85,40 @@ def test_incomplete_or_unoffered_answer_is_rejected() -> None:
         parse_resolutions(incomplete, decisions)
     with pytest.raises(ValueError, match="not offered"):
         parse_resolutions(unoffered, decisions)
+
+
+def test_explicit_chinese_board_contract_is_not_sent_to_hitl() -> None:
+    requirement = (
+        "请设计一块双层控制板，板子尺寸不超过 40 mm × 30 mm，"
+        "底层连续铺地。"
+    )
+
+    slots = {item.slot for item in design_decisions(requirement)}
+
+    assert "board_outline" not in slots
+    assert "layer_count" not in slots
+
+
+def test_explicit_chinese_external_button_pullup_is_not_sent_to_hitl() -> None:
+    requirement = "增加一个带外部 10 kΩ 上拉的低电平有效按键。"
+
+    slots = {item.slot for item in design_decisions(requirement)}
+
+    assert "button_bias" not in slots
+
+
+def test_hitl_cannot_override_an_explicit_original_constraint() -> None:
+    requirement = "请设计一块双层板，尺寸不超过 40 mm × 30 mm。"
+
+    with pytest.raises(ValueError, match="cannot override"):
+        apply_resolutions(
+            requirement,
+            [{
+                "slot": "board_outline",
+                "kind": "assumption",
+                "key": "A",
+                "label": "50 x 40 mm",
+                "value": "For board_outline, use 50 x 40 mm.",
+                "citation": "engineering default",
+            }],
+        )

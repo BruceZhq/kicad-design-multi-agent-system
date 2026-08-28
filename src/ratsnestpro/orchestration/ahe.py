@@ -57,6 +57,17 @@ class FailureAction(StrEnum):
     STOP = "stop"
 
 
+class RecoveryAction(StrEnum):
+    """One executable next move selected by the task-local recovery loop."""
+
+    LOCAL_REPAIR = "local_repair"
+    REPLAN_UPSTREAM = "replan_upstream"
+    RETRY_TOOL = "retry_tool"
+    INVESTIGATE_HARNESS = "investigate_harness"
+    ASK_HUMAN = "ask_human"
+    STOP = "stop"
+
+
 GOVERNED_HARNESS_REASON_CODES = frozenset({
     "generic_capability_closure_contradiction",
     "verified_pin_alias_resolution_lost",
@@ -131,6 +142,57 @@ class FailureAttribution(ContractModel):
     independent_project_count: int = Field(default=1, ge=1)
 
 
+class RecoveryDecision(ContractModel):
+    """Validated Plan/Act decision proposed from one failure observation.
+
+    The decision is advisory until the pipeline validates the named target and
+    tool against its current state. Defaults are deliberately fail-closed so a
+    partial or legacy payload cannot accidentally authorize a mutation.
+    """
+
+    decision_id: str = Field(default_factory=lambda: str(uuid4()))
+    failure_ids: list[str] = Field(default_factory=list, max_length=64)
+    action: RecoveryAction = RecoveryAction.STOP
+    origin: FailureOrigin = FailureOrigin.UNKNOWN
+    target_step: str | None = Field(default=None, max_length=120)
+    strategy: str = Field(default="", max_length=240)
+    tool_name: str = Field(default="", max_length=240)
+    tool_args: dict[str, Any] = Field(default_factory=dict)
+    hypothesis: str = Field(default="", max_length=8_000)
+    expected_observation: str = Field(default="", max_length=4_000)
+    success_checks: list[str] = Field(default_factory=list, max_length=64)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class RecoveryTurnRecord(ContractModel):
+    """Durable Plan -> Act -> Observe record for one bounded recovery turn."""
+
+    turn_id: str = Field(default_factory=lambda: str(uuid4()))
+    step: str = Field(default="", max_length=120)
+    attempt: int = Field(default=1, ge=1)
+    revision: int = Field(default=0, ge=0)
+    failure_ids: list[str] = Field(default_factory=list, max_length=64)
+    decision: RecoveryDecision = Field(default_factory=RecoveryDecision)
+    status: Literal[
+        "planned",
+        "acted",
+        "observed",
+        "improved",
+        "verified",
+        "rejected",
+        "error",
+        "exhausted",
+        "terminal",
+    ] = "planned"
+    before_score: tuple[int, int, int] = (0, 0, 0)
+    after_score: tuple[int, int, int] | None = None
+    observation: str = Field(default="", max_length=12_000)
+    baseline_fingerprint: str = Field(default="", max_length=120)
+    used_llm: bool = False
+    skill_name: str = Field(default="", max_length=120)
+    skill_digest: str = Field(default="", max_length=128)
+
+
 _REF_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Z]{1,4}\d+[A-Z]?)(?![A-Za-z0-9_])")
 _HARD_CHECK_RE = re.compile(
     r"^(?:immutable_|fixed_constraint_|forbidden_requirement|identity_violation)"
@@ -179,6 +241,7 @@ def make_failure(
     origin: FailureOrigin | None = None,
     reason_code: str = "",
     affected_refs: list[str] | None = None,
+    evidence: dict[str, Any] | None = None,
 ) -> FailureEnvelope:
     """Normalize one failed check into a stable, board-independent signature."""
 
@@ -243,6 +306,7 @@ def make_failure(
             "check_name": check_name,
             "reason_code": stable_reason_code,
             "message": message,
+            **(evidence or {}),
         },
     )
 
@@ -328,6 +392,7 @@ def ahe_event(
     gap: CapabilityGap | None = None,
     replan: ReplanRecord | None = None,
     attribution: FailureAttribution | None = None,
+    recovery: RecoveryTurnRecord | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "kind": "ahe_event",
@@ -345,4 +410,16 @@ def ahe_event(
         payload["replan"] = replan.model_dump(mode="json")
     if attribution is not None:
         payload["attribution"] = attribution.model_dump(mode="json")
+    if recovery is not None:
+        # Keep free-form engineering rationale in the run-local checkpoint.
+        # The event bridge receives only structural fields so cross-run
+        # telemetry cannot leak prompts or proprietary board details.
+        payload["recovery"] = {
+            **recovery.model_dump(mode="json"),
+            "action": recovery.decision.action.value,
+            "origin": recovery.decision.origin.value,
+            "target_step": recovery.decision.target_step,
+            "tool_name": recovery.decision.tool_name,
+            "confidence": recovery.decision.confidence,
+        }
     return payload

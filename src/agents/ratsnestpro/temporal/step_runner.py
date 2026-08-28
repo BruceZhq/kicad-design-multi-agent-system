@@ -86,6 +86,12 @@ def main() -> int:
                 if isinstance(command.get("ahe_budget"), dict)
                 else None
             ),
+            resume_from_step=(
+                str(command["resume_from_step"])
+                if command.get("resume_from_step")
+                else None
+            ),
+            resume_token=(workflow_id or None),
         )
         result = json.loads(raw)
         if not isinstance(result, dict):

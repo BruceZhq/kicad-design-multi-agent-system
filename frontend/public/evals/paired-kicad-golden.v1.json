@@ -1,0 +1,992 @@
+{
+  "schemaVersion": "1.0",
+  "planId": "ratsnest-paired-kicad-golden-v1",
+  "assetManifestPath": "evals/paired/kicad-assets.v1.json",
+  "assetManifestDigest": "384b376900421ca3a6900ef0eab6321f07f4f82d6ed0af3e4e39d71a2d66bb12",
+  "frozenExecution": {
+    "model": "deepseek-v4-flash",
+    "provider": "deepseek",
+    "environmentDigest": "384b376900421ca3a6900ef0eab6321f07f4f82d6ed0af3e4e39d71a2d66bb12",
+    "configDigest": "ccc52370b0cd95f19e16fc04cfd3bad5284bc3a9eeb5eaef9963114db8e47d1a"
+  },
+  "cases": [
+    {
+      "caseId": "golden.p01.single",
+      "title": "NE555 LED 闪烁板",
+      "tier": "foundation",
+      "category": "eda_pipeline",
+      "arm": "single_agent",
+      "pairId": "golden.p01",
+      "verifiedAssetIds": [
+        "ne555d-soic8",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pin-header-1x02",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 5 V 供电、约 1 Hz 的 NE555 LED 闪烁板。定时网络使用 10 kΩ、68 kΩ 和 10 µF，LED 串联 330 Ω，U1 电源脚旁放置 100 nF 去耦。两针接口输入 5 V，双层板不超过 40 mm × 30 mm，底层连续铺地，四角放置 M2 非金属化安装孔。精确 KiCad 绑定如下，禁止用改 Value 的占位器替代：\nKiCad symbol: Timer:NE555D\nKiCad footprint: Package_SO:SOIC-8_3.9x4.9mm_P1.27mm\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Connector_Generic:Conn_01x02\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n请交付可编辑 KiCad 工程、BOM、CPL、Gerber、钻孔、ERC、DRC 和真实布线结果。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "single-agent-eval"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p01.multi",
+      "title": "NE555 LED 闪烁板",
+      "tier": "foundation",
+      "category": "eda_pipeline",
+      "arm": "multi_agent",
+      "pairId": "golden.p01",
+      "verifiedAssetIds": [
+        "ne555d-soic8",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pin-header-1x02",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 5 V 供电、约 1 Hz 的 NE555 LED 闪烁板。定时网络使用 10 kΩ、68 kΩ 和 10 µF，LED 串联 330 Ω，U1 电源脚旁放置 100 nF 去耦。两针接口输入 5 V，双层板不超过 40 mm × 30 mm，底层连续铺地，四角放置 M2 非金属化安装孔。精确 KiCad 绑定如下，禁止用改 Value 的占位器替代：\nKiCad symbol: Timer:NE555D\nKiCad footprint: Package_SO:SOIC-8_3.9x4.9mm_P1.27mm\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Connector_Generic:Conn_01x02\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n请交付可编辑 KiCad 工程、BOM、CPL、Gerber、钻孔、ERC、DRC 和真实布线结果。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "parts-specialist",
+        "hardware-engineer:dispatch",
+        "hardware-engineer:temporal",
+        "reviewer",
+        "supervisor"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p02.multi",
+      "title": "AP2112K 低噪声电源板",
+      "tier": "foundation",
+      "category": "eda_pipeline",
+      "arm": "multi_agent",
+      "pairId": "golden.p02",
+      "verifiedAssetIds": [
+        "ap2112k-3v3-sot23-5",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pin-header-1x02",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块把稳定 5 V 转为 3.3 V 的小型电源板，使用 AP2112K-3.3。输入和输出各用两针接口，输入、输出电容按器件要求配置，另加电源指示 LED 和 1 kΩ 限流电阻。双层板不超过 30 mm × 25 mm，电源主干不小于 0.5 mm，稳压器散热铜皮与地回流连续，并放置两个 M2 非金属化安装孔。精确 KiCad 绑定如下：\nKiCad symbol: Regulator_Linear:AP2112K-3.3\nKiCad footprint: Package_TO_SOT_SMD:SOT-23-5\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Connector_Generic:Conn_01x02\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n请输出可编辑工程和完整制造文件，并以实际 ERC、DRC 和未连接数判定结果。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "parts-specialist",
+        "hardware-engineer:dispatch",
+        "hardware-engineer:temporal",
+        "reviewer",
+        "supervisor"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p02.single",
+      "title": "AP2112K 低噪声电源板",
+      "tier": "foundation",
+      "category": "eda_pipeline",
+      "arm": "single_agent",
+      "pairId": "golden.p02",
+      "verifiedAssetIds": [
+        "ap2112k-3v3-sot23-5",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pin-header-1x02",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块把稳定 5 V 转为 3.3 V 的小型电源板，使用 AP2112K-3.3。输入和输出各用两针接口，输入、输出电容按器件要求配置，另加电源指示 LED 和 1 kΩ 限流电阻。双层板不超过 30 mm × 25 mm，电源主干不小于 0.5 mm，稳压器散热铜皮与地回流连续，并放置两个 M2 非金属化安装孔。精确 KiCad 绑定如下：\nKiCad symbol: Regulator_Linear:AP2112K-3.3\nKiCad footprint: Package_TO_SOT_SMD:SOT-23-5\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Connector_Generic:Conn_01x02\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n请输出可编辑工程和完整制造文件，并以实际 ERC、DRC 和未连接数判定结果。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "single-agent-eval"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p03.single",
+      "title": "LM35 温度采集模块",
+      "tier": "subsystem",
+      "category": "eda_pipeline",
+      "arm": "single_agent",
+      "pairId": "golden.p03",
+      "verifiedAssetIds": [
+        "lm35-lp-to92",
+        "ap2112k-3v3-sot23-5",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pin-header-1x02",
+        "pin-header-1x04",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 5 V 输入的 LM35 温度采集模块。AP2112K-3.3 生成 3.3 V，LM35 输出通过四针接口提供 3V3、GND、模拟输出和滤波后输出；在传感器输出端设置 100 Ω/100 nF 低通网络，并加电源指示灯。双层板不超过 40 mm × 30 mm，模拟区域远离电源入口，底层地平面连续，放置两个 M2 安装孔。精确 KiCad 绑定：\nKiCad symbol: Sensor_Temperature:LM35-LP\nKiCad footprint: Package_TO_SOT_THT:TO-92_Inline\nKiCad symbol: Regulator_Linear:AP2112K-3.3\nKiCad footprint: Package_TO_SOT_SMD:SOT-23-5\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Connector_Generic:Conn_01x02\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical\nKiCad symbol: Connector_Generic:Conn_01x04\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n交付可编辑工程、制造文件和真实校验报告。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "single-agent-eval"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p03.multi",
+      "title": "LM35 温度采集模块",
+      "tier": "subsystem",
+      "category": "eda_pipeline",
+      "arm": "multi_agent",
+      "pairId": "golden.p03",
+      "verifiedAssetIds": [
+        "lm35-lp-to92",
+        "ap2112k-3v3-sot23-5",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pin-header-1x02",
+        "pin-header-1x04",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 5 V 输入的 LM35 温度采集模块。AP2112K-3.3 生成 3.3 V，LM35 输出通过四针接口提供 3V3、GND、模拟输出和滤波后输出；在传感器输出端设置 100 Ω/100 nF 低通网络，并加电源指示灯。双层板不超过 40 mm × 30 mm，模拟区域远离电源入口，底层地平面连续，放置两个 M2 安装孔。精确 KiCad 绑定：\nKiCad symbol: Sensor_Temperature:LM35-LP\nKiCad footprint: Package_TO_SOT_THT:TO-92_Inline\nKiCad symbol: Regulator_Linear:AP2112K-3.3\nKiCad footprint: Package_TO_SOT_SMD:SOT-23-5\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Connector_Generic:Conn_01x02\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical\nKiCad symbol: Connector_Generic:Conn_01x04\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n交付可编辑工程、制造文件和真实校验报告。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "parts-specialist",
+        "hardware-engineer:dispatch",
+        "hardware-engineer:temporal",
+        "reviewer",
+        "supervisor"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p04.multi",
+      "title": "MCP23017 I²C 扩展板",
+      "tier": "subsystem",
+      "category": "eda_pipeline",
+      "arm": "multi_agent",
+      "pairId": "golden.p04",
+      "verifiedAssetIds": [
+        "mcp23017-sp-dip28",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pin-header-1x02",
+        "pin-header-1x04",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 3.3 V MCP23017 I²C GPIO 扩展板。A0/A1/A2 各用 10 kΩ 下拉，SDA/SCL 各用 4.7 kΩ 上拉，两个中断脚和 16 路 GPIO 分组引出，电源脚旁放 100 nF 去耦并加一个 10 µF bulk 电容和电源 LED。双层板最大 60 mm × 45 mm，接口沿板边布置，放置四个 M2 安装孔。精确 KiCad 绑定：\nKiCad symbol: Interface_Expansion:MCP23017_SP\nKiCad footprint: Package_DIP:DIP-28_W7.62mm\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Connector_Generic:Conn_01x04\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n完成原理图、布局布线和全部制造输出，不得把未执行检查写成通过。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "parts-specialist",
+        "hardware-engineer:dispatch",
+        "hardware-engineer:temporal",
+        "reviewer",
+        "supervisor"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p04.single",
+      "title": "MCP23017 I²C 扩展板",
+      "tier": "subsystem",
+      "category": "eda_pipeline",
+      "arm": "single_agent",
+      "pairId": "golden.p04",
+      "verifiedAssetIds": [
+        "mcp23017-sp-dip28",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pin-header-1x02",
+        "pin-header-1x04",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 3.3 V MCP23017 I²C GPIO 扩展板。A0/A1/A2 各用 10 kΩ 下拉，SDA/SCL 各用 4.7 kΩ 上拉，两个中断脚和 16 路 GPIO 分组引出，电源脚旁放 100 nF 去耦并加一个 10 µF bulk 电容和电源 LED。双层板最大 60 mm × 45 mm，接口沿板边布置，放置四个 M2 安装孔。精确 KiCad 绑定：\nKiCad symbol: Interface_Expansion:MCP23017_SP\nKiCad footprint: Package_DIP:DIP-28_W7.62mm\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Connector_Generic:Conn_01x04\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n完成原理图、布局布线和全部制造输出，不得把未执行检查写成通过。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "single-agent-eval"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p05.single",
+      "title": "LIS3DH 运动传感器板",
+      "tier": "subsystem",
+      "category": "eda_pipeline",
+      "arm": "single_agent",
+      "pairId": "golden.p05",
+      "verifiedAssetIds": [
+        "lis3dh-lga16",
+        "resistor-0805",
+        "capacitor-0805",
+        "pin-header-1x04",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 3.3 V LIS3DH 三轴加速度传感器板，使用 I²C 接口，SDA/SCL 各有 4.7 kΩ 上拉，CS 固定到 I²C 模式，SA0 用 10 kΩ 下拉，INT1 引出。每个电源域按资料放置 100 nF 去耦，另加 4.7 µF bulk 电容。板框不超过 25 mm × 25 mm，双层地平面连续，传感器置于板中心并标注 X/Y 方向，两个 M2 安装孔保持对称。精确 KiCad 绑定：\nKiCad symbol: Sensor_Motion:LIS3DH\nKiCad footprint: Package_LGA:LGA-16_3x3mm_P0.5mm_LayoutBorder3x5y\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Connector_Generic:Conn_01x04\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n交付可编辑工程、坐标文件和所有制造检查结果。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "single-agent-eval"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p05.multi",
+      "title": "LIS3DH 运动传感器板",
+      "tier": "subsystem",
+      "category": "eda_pipeline",
+      "arm": "multi_agent",
+      "pairId": "golden.p05",
+      "verifiedAssetIds": [
+        "lis3dh-lga16",
+        "resistor-0805",
+        "capacitor-0805",
+        "pin-header-1x04",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 3.3 V LIS3DH 三轴加速度传感器板，使用 I²C 接口，SDA/SCL 各有 4.7 kΩ 上拉，CS 固定到 I²C 模式，SA0 用 10 kΩ 下拉，INT1 引出。每个电源域按资料放置 100 nF 去耦，另加 4.7 µF bulk 电容。板框不超过 25 mm × 25 mm，双层地平面连续，传感器置于板中心并标注 X/Y 方向，两个 M2 安装孔保持对称。精确 KiCad 绑定：\nKiCad symbol: Sensor_Motion:LIS3DH\nKiCad footprint: Package_LGA:LGA-16_3x3mm_P0.5mm_LayoutBorder3x5y\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Connector_Generic:Conn_01x04\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n交付可编辑工程、坐标文件和所有制造检查结果。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "parts-specialist",
+        "hardware-engineer:dispatch",
+        "hardware-engineer:temporal",
+        "reviewer",
+        "supervisor"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p06.multi",
+      "title": "STM32F030 小型控制板",
+      "tier": "controller",
+      "category": "eda_pipeline",
+      "arm": "multi_agent",
+      "pairId": "golden.p06",
+      "verifiedAssetIds": [
+        "stm32f030f4px-tssop20",
+        "ap2112k-3v3-sot23-5",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pushbutton-tl3342",
+        "pin-header-1x02",
+        "pin-header-1x04",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 STM32F030F4P6 小型控制板，使用内部时钟。两针接口输入 5 V，AP2112K-3.3 产生 3.3 V；MCU 电源脚独立放 100 nF 去耦，另加 10 µF bulk。NRST 上拉并接复位按键，BOOT0 下拉；四针接口提供 3V3、GND、SWDIO、SWCLK，再加一个串 1 kΩ 的用户 LED 和一个带 10 kΩ 上拉的低电平按键。双层板最大 45 mm × 35 mm，底层连续 GND，两个 M2 安装孔。精确 KiCad 绑定：\nKiCad symbol: MCU_ST_STM32F0:STM32F030F4Px\nKiCad footprint: Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm\nKiCad symbol: Regulator_Linear:AP2112K-3.3\nKiCad footprint: Package_TO_SOT_SMD:SOT-23-5\nKiCad symbol: Switch:SW_Push\nKiCad footprint: Button_Switch_SMD:SW_SPST_TL3342\nKiCad symbol: Connector_Generic:Conn_01x04\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n交付完整 KiCad 与打样文件，所有门禁以真实文件为准。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "parts-specialist",
+        "hardware-engineer:dispatch",
+        "hardware-engineer:temporal",
+        "reviewer",
+        "supervisor"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p06.single",
+      "title": "STM32F030 小型控制板",
+      "tier": "controller",
+      "category": "eda_pipeline",
+      "arm": "single_agent",
+      "pairId": "golden.p06",
+      "verifiedAssetIds": [
+        "stm32f030f4px-tssop20",
+        "ap2112k-3v3-sot23-5",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pushbutton-tl3342",
+        "pin-header-1x02",
+        "pin-header-1x04",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 STM32F030F4P6 小型控制板，使用内部时钟。两针接口输入 5 V，AP2112K-3.3 产生 3.3 V；MCU 电源脚独立放 100 nF 去耦，另加 10 µF bulk。NRST 上拉并接复位按键，BOOT0 下拉；四针接口提供 3V3、GND、SWDIO、SWCLK，再加一个串 1 kΩ 的用户 LED 和一个带 10 kΩ 上拉的低电平按键。双层板最大 45 mm × 35 mm，底层连续 GND，两个 M2 安装孔。精确 KiCad 绑定：\nKiCad symbol: MCU_ST_STM32F0:STM32F030F4Px\nKiCad footprint: Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm\nKiCad symbol: Regulator_Linear:AP2112K-3.3\nKiCad footprint: Package_TO_SOT_SMD:SOT-23-5\nKiCad symbol: Switch:SW_Push\nKiCad footprint: Button_Switch_SMD:SW_SPST_TL3342\nKiCad symbol: Connector_Generic:Conn_01x04\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n交付完整 KiCad 与打样文件，所有门禁以真实文件为准。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "single-agent-eval"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p07.single",
+      "title": "STM32G070 工业控制板",
+      "tier": "controller",
+      "category": "eda_pipeline",
+      "arm": "single_agent",
+      "pairId": "golden.p07",
+      "verifiedAssetIds": [
+        "stm32g070rbtx-lqfp64",
+        "ap2112k-3v3-sot23-5",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pushbutton-tl3342",
+        "pin-header-1x02",
+        "pin-header-1x04",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 STM32G070RBT6 工业控制板，使用内部时钟。5 V 两针输入经 AP2112K-3.3 供电；所有 VDD/VDDA 各自就近 100 nF 去耦，模拟电源再加滤波，电源入口和 3.3 V 各有 bulk 电容。NRST 和 BOOT0 连接完整；引出 SWD、一路 UART、一路 I²C、一个用户 LED 和一个低电平按键。双层板最大 70 mm × 45 mm，连接器靠板边，电源主干不小于 0.4 mm，四角 M2 安装孔。精确 KiCad 绑定：\nKiCad symbol: MCU_ST_STM32G0:STM32G070RBTx\nKiCad footprint: Package_QFP:LQFP-64_10x10mm_P0.5mm\nKiCad symbol: Regulator_Linear:AP2112K-3.3\nKiCad footprint: Package_TO_SOT_SMD:SOT-23-5\nKiCad symbol: Switch:SW_Push\nKiCad footprint: Button_Switch_SMD:SW_SPST_TL3342\nKiCad symbol: Connector_Generic:Conn_01x04\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n请交付可编辑工程、BOM/CPL/Gerber/钻孔以及真实 ERC、DRC 和布线结果。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "single-agent-eval"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p07.multi",
+      "title": "STM32G070 工业控制板",
+      "tier": "controller",
+      "category": "eda_pipeline",
+      "arm": "multi_agent",
+      "pairId": "golden.p07",
+      "verifiedAssetIds": [
+        "stm32g070rbtx-lqfp64",
+        "ap2112k-3v3-sot23-5",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pushbutton-tl3342",
+        "pin-header-1x02",
+        "pin-header-1x04",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 STM32G070RBT6 工业控制板，使用内部时钟。5 V 两针输入经 AP2112K-3.3 供电；所有 VDD/VDDA 各自就近 100 nF 去耦，模拟电源再加滤波，电源入口和 3.3 V 各有 bulk 电容。NRST 和 BOOT0 连接完整；引出 SWD、一路 UART、一路 I²C、一个用户 LED 和一个低电平按键。双层板最大 70 mm × 45 mm，连接器靠板边，电源主干不小于 0.4 mm，四角 M2 安装孔。精确 KiCad 绑定：\nKiCad symbol: MCU_ST_STM32G0:STM32G070RBTx\nKiCad footprint: Package_QFP:LQFP-64_10x10mm_P0.5mm\nKiCad symbol: Regulator_Linear:AP2112K-3.3\nKiCad footprint: Package_TO_SOT_SMD:SOT-23-5\nKiCad symbol: Switch:SW_Push\nKiCad footprint: Button_Switch_SMD:SW_SPST_TL3342\nKiCad symbol: Connector_Generic:Conn_01x04\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n请交付可编辑工程、BOM/CPL/Gerber/钻孔以及真实 ERC、DRC 和布线结果。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "parts-specialist",
+        "hardware-engineer:dispatch",
+        "hardware-engineer:temporal",
+        "reviewer",
+        "supervisor"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p08.multi",
+      "title": "STM32F072 USB-MIDI 控制板",
+      "tier": "integrated",
+      "category": "eda_pipeline",
+      "arm": "multi_agent",
+      "pairId": "golden.p08",
+      "verifiedAssetIds": [
+        "stm32f072cbtx-lqfp48",
+        "usb-c-usb2-gct-usb4105",
+        "ap2112k-3v3-sot23-5",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pushbutton-tl3342",
+        "pin-header-1x04",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 STM32F072CBT6 USB-MIDI 控制板，使用芯片内部 HSI48 时钟，不放外部晶振。USB-C 仅做 USB 2.0 device 与 5 V 输入，CC1/CC2 各接 5.1 kΩ 下拉；AP2112K-3.3 提供 3.3 V。所有 MCU 电源脚独立去耦，配置 NRST、BOOT0、四针 SWD、两个用户按键和两个状态 LED；USB D+/D- 作为差分对等长布线并保持连续参考地。双层板最大 65 mm × 45 mm，四角 M2 安装孔。精确 KiCad 绑定：\nKiCad symbol: MCU_ST_STM32F0:STM32F072CBTx\nKiCad footprint: Package_QFP:LQFP-48_7x7mm_P0.5mm\nKiCad symbol: Connector:USB_C_Receptacle_USB2.0_16P\nKiCad footprint: Connector_USB:USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal\nKiCad symbol: Regulator_Linear:AP2112K-3.3\nKiCad footprint: Package_TO_SOT_SMD:SOT-23-5\nKiCad symbol: Switch:SW_Push\nKiCad footprint: Button_Switch_SMD:SW_SPST_TL3342\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Connector_Generic:Conn_01x04\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n请交付可编辑项目、完整制造包和真实校验记录。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "parts-specialist",
+        "hardware-engineer:dispatch",
+        "hardware-engineer:temporal",
+        "reviewer",
+        "supervisor"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p08.single",
+      "title": "STM32F072 USB-MIDI 控制板",
+      "tier": "integrated",
+      "category": "eda_pipeline",
+      "arm": "single_agent",
+      "pairId": "golden.p08",
+      "verifiedAssetIds": [
+        "stm32f072cbtx-lqfp48",
+        "usb-c-usb2-gct-usb4105",
+        "ap2112k-3v3-sot23-5",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pushbutton-tl3342",
+        "pin-header-1x04",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 STM32F072CBT6 USB-MIDI 控制板，使用芯片内部 HSI48 时钟，不放外部晶振。USB-C 仅做 USB 2.0 device 与 5 V 输入，CC1/CC2 各接 5.1 kΩ 下拉；AP2112K-3.3 提供 3.3 V。所有 MCU 电源脚独立去耦，配置 NRST、BOOT0、四针 SWD、两个用户按键和两个状态 LED；USB D+/D- 作为差分对等长布线并保持连续参考地。双层板最大 65 mm × 45 mm，四角 M2 安装孔。精确 KiCad 绑定：\nKiCad symbol: MCU_ST_STM32F0:STM32F072CBTx\nKiCad footprint: Package_QFP:LQFP-48_7x7mm_P0.5mm\nKiCad symbol: Connector:USB_C_Receptacle_USB2.0_16P\nKiCad footprint: Connector_USB:USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal\nKiCad symbol: Regulator_Linear:AP2112K-3.3\nKiCad footprint: Package_TO_SOT_SMD:SOT-23-5\nKiCad symbol: Switch:SW_Push\nKiCad footprint: Button_Switch_SMD:SW_SPST_TL3342\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Connector_Generic:Conn_01x04\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n请交付可编辑项目、完整制造包和真实校验记录。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "single-agent-eval"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p09.single",
+      "title": "STM32G431 双路电机控制板",
+      "tier": "integrated",
+      "category": "eda_pipeline",
+      "arm": "single_agent",
+      "pairId": "golden.p09",
+      "verifiedAssetIds": [
+        "stm32g431cbtx-lqfp48",
+        "l293d-dip16",
+        "ap2112k-3v3-sot23-5",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pushbutton-tl3342",
+        "pin-header-1x02",
+        "pin-header-1x04",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 STM32G431CBT6 双路直流电机控制板。逻辑侧 5 V 输入经 AP2112K-3.3 给 MCU 供电，电机电源由独立两针接口输入并共地；L293D 驱动两路电机，四路控制信号和两路使能连接 MCU 定时器引脚，电机接口靠板边。MCU 使用内部时钟，配置 SWD、复位按键、用户 LED，全部电源脚独立去耦；逻辑地回流与电机大电流回流在电源入口单点汇合。双层板最大 80 mm × 55 mm，电机电源线不小于 1 mm，四角 M2 孔。精确 KiCad 绑定：\nKiCad symbol: MCU_ST_STM32G4:STM32G431CBTx\nKiCad footprint: Package_QFP:LQFP-48_7x7mm_P0.5mm\nKiCad symbol: Driver_Motor:L293D\nKiCad footprint: Package_DIP:DIP-16_W7.62mm\nKiCad symbol: Regulator_Linear:AP2112K-3.3\nKiCad footprint: Package_TO_SOT_SMD:SOT-23-5\nKiCad symbol: Switch:SW_Push\nKiCad footprint: Button_Switch_SMD:SW_SPST_TL3342\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Connector_Generic:Conn_01x02\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical\nKiCad symbol: Connector_Generic:Conn_01x04\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n交付完整工程和制造输出，必须报告真实 ERC、DRC、未连接与布线状态。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "single-agent-eval"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p09.multi",
+      "title": "STM32G431 双路电机控制板",
+      "tier": "integrated",
+      "category": "eda_pipeline",
+      "arm": "multi_agent",
+      "pairId": "golden.p09",
+      "verifiedAssetIds": [
+        "stm32g431cbtx-lqfp48",
+        "l293d-dip16",
+        "ap2112k-3v3-sot23-5",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pushbutton-tl3342",
+        "pin-header-1x02",
+        "pin-header-1x04",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 STM32G431CBT6 双路直流电机控制板。逻辑侧 5 V 输入经 AP2112K-3.3 给 MCU 供电，电机电源由独立两针接口输入并共地；L293D 驱动两路电机，四路控制信号和两路使能连接 MCU 定时器引脚，电机接口靠板边。MCU 使用内部时钟，配置 SWD、复位按键、用户 LED，全部电源脚独立去耦；逻辑地回流与电机大电流回流在电源入口单点汇合。双层板最大 80 mm × 55 mm，电机电源线不小于 1 mm，四角 M2 孔。精确 KiCad 绑定：\nKiCad symbol: MCU_ST_STM32G4:STM32G431CBTx\nKiCad footprint: Package_QFP:LQFP-48_7x7mm_P0.5mm\nKiCad symbol: Driver_Motor:L293D\nKiCad footprint: Package_DIP:DIP-16_W7.62mm\nKiCad symbol: Regulator_Linear:AP2112K-3.3\nKiCad footprint: Package_TO_SOT_SMD:SOT-23-5\nKiCad symbol: Switch:SW_Push\nKiCad footprint: Button_Switch_SMD:SW_SPST_TL3342\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Connector_Generic:Conn_01x02\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical\nKiCad symbol: Connector_Generic:Conn_01x04\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n交付完整工程和制造输出，必须报告真实 ERC、DRC、未连接与布线状态。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "parts-specialist",
+        "hardware-engineer:dispatch",
+        "hardware-engineer:temporal",
+        "reviewer",
+        "supervisor"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p10.multi",
+      "title": "ESP32-C3 运动遥测节点",
+      "tier": "integrated",
+      "category": "eda_pipeline",
+      "arm": "multi_agent",
+      "pairId": "golden.p10",
+      "verifiedAssetIds": [
+        "esp32-c3-wroom-02u",
+        "lis3dh-lga16",
+        "ap2112k-3v3-sot23-5",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pushbutton-tl3342",
+        "pin-header-1x02",
+        "pin-header-1x04",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 ESP32-C3 运动遥测节点。两针 5 V 输入经 AP2112K-3.3 供电，ESP32-C3-WROOM-02U 连接 LIS3DH 的 I²C 接口，SDA/SCL 各 4.7 kΩ 上拉并引出 INT1；模块 EN 上拉并有复位键，GPIO9 设置启动键，另有状态 LED 和四针 UART 下载接口。所有电源入口和模块旁按资料去耦；天线净空区域禁止铜、走线和器件。双层板最大 55 mm × 40 mm，四角 M2 孔。精确 KiCad 绑定：\nKiCad symbol: RF_Module:ESP32-C3-WROOM-02U\nKiCad footprint: RF_Module:ESP32-C3-WROOM-02U\nKiCad symbol: Sensor_Motion:LIS3DH\nKiCad footprint: Package_LGA:LGA-16_3x3mm_P0.5mm_LayoutBorder3x5y\nKiCad symbol: Regulator_Linear:AP2112K-3.3\nKiCad footprint: Package_TO_SOT_SMD:SOT-23-5\nKiCad symbol: Switch:SW_Push\nKiCad footprint: Button_Switch_SMD:SW_SPST_TL3342\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Connector_Generic:Conn_01x04\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n完成可编辑项目、布局布线和全套制造文件，任何不满足的工程门禁必须如实阻断。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "intent-router",
+        "architect",
+        "parts-specialist",
+        "hardware-engineer:dispatch",
+        "hardware-engineer:temporal",
+        "reviewer",
+        "supervisor"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    },
+    {
+      "caseId": "golden.p10.single",
+      "title": "ESP32-C3 运动遥测节点",
+      "tier": "integrated",
+      "category": "eda_pipeline",
+      "arm": "single_agent",
+      "pairId": "golden.p10",
+      "verifiedAssetIds": [
+        "esp32-c3-wroom-02u",
+        "lis3dh-lga16",
+        "ap2112k-3v3-sot23-5",
+        "resistor-0805",
+        "capacitor-0805",
+        "led-0805",
+        "pushbutton-tl3342",
+        "pin-header-1x02",
+        "pin-header-1x04",
+        "mounting-hole-m2"
+      ],
+      "prompt": "请设计一块 ESP32-C3 运动遥测节点。两针 5 V 输入经 AP2112K-3.3 供电，ESP32-C3-WROOM-02U 连接 LIS3DH 的 I²C 接口，SDA/SCL 各 4.7 kΩ 上拉并引出 INT1；模块 EN 上拉并有复位键，GPIO9 设置启动键，另有状态 LED 和四针 UART 下载接口。所有电源入口和模块旁按资料去耦；天线净空区域禁止铜、走线和器件。双层板最大 55 mm × 40 mm，四角 M2 孔。精确 KiCad 绑定：\nKiCad symbol: RF_Module:ESP32-C3-WROOM-02U\nKiCad footprint: RF_Module:ESP32-C3-WROOM-02U\nKiCad symbol: Sensor_Motion:LIS3DH\nKiCad footprint: Package_LGA:LGA-16_3x3mm_P0.5mm_LayoutBorder3x5y\nKiCad symbol: Regulator_Linear:AP2112K-3.3\nKiCad footprint: Package_TO_SOT_SMD:SOT-23-5\nKiCad symbol: Switch:SW_Push\nKiCad footprint: Button_Switch_SMD:SW_SPST_TL3342\nKiCad symbol: Device:R\nKiCad footprint: Resistor_SMD:R_0805_2012Metric\nKiCad symbol: Device:C\nKiCad footprint: Capacitor_SMD:C_0805_2012Metric\nKiCad symbol: Device:LED\nKiCad footprint: LED_SMD:LED_0805_2012Metric\nKiCad symbol: Connector_Generic:Conn_01x04\nKiCad footprint: Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical\nKiCad symbol: Mechanical:MountingHole\nKiCad footprint: MountingHole:MountingHole_2.2mm_M2\n完成可编辑项目、布局布线和全套制造文件，任何不满足的工程门禁必须如实阻断。",
+      "expectedIntents": [
+        "build"
+      ],
+      "requiredPhases": [
+        "single-agent-eval"
+      ],
+      "requiredTools": [
+        "ratsnest_lookup_kicad_symbol",
+        "ratsnest_validate_kicad_binding",
+        "ratsnest_search_internal_knowledge",
+        "ratsnest_search_parts",
+        "ratsnest_temporal_hardware_workflow",
+        "ratsnest_review_kicad_project"
+      ],
+      "requiredArtifacts": [
+        "pipeline_result.json",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".dsn",
+        ".ses",
+        "_bom.csv",
+        "_cpl.csv"
+      ],
+      "expectedTerminal": "completed",
+      "expectReleaseReady": true,
+      "profileReference": "site-control-telemetry@1.1",
+      "timeoutSeconds": 36000
+    }
+  ]
+}

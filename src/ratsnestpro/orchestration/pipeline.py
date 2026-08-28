@@ -1,7 +1,9 @@
 """The fixed, industry-standard PCB pipeline framework.
 
-The process is *pinned*: a fixed, ordered sequence of steps that cannot be
-skipped or reordered. Every step has the same shape —
+The outer process is *pinned*: a fixed, ordered sequence of release stages that
+cannot be skipped. Inside a failed stage, a governed Skill agent may repair the
+candidate, retry a tool, re-check evidence, or dynamically revisit an earlier
+stage. Every release stage has the same shape —
 
     inject knowledge  ->  LLM structured proposal  ->  bottom-line check
 
@@ -25,21 +27,22 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
 import tempfile
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, ClassVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ratsnestpro import config
-from ratsnestpro.agents.llm import LlmError, LlmMode
+from ratsnestpro.agents.llm import LlmError, LlmMode, NonRetryableLlmError
 from ratsnestpro.domain.contracts import (
     ComponentIdentityConstraint,
     ContractModel,
@@ -49,6 +52,7 @@ from ratsnestpro.domain.contracts import (
 from ratsnestpro.eda import footprints, grounding, symbols
 from ratsnestpro.eda.adapter import kicad_cli_available, run_erc
 from ratsnestpro.eda.materialize import materialize_pinmapped
+from ratsnestpro.eda.vendor.library import register_library
 from ratsnestpro.knowledge import KnowledgeBase, build_default_kb
 from ratsnestpro.orchestration.ahe import (
     CapabilityGap,
@@ -57,6 +61,9 @@ from ratsnestpro.orchestration.ahe import (
     FailureEnvelope,
     FailureOrigin,
     Recoverability,
+    RecoveryAction,
+    RecoveryDecision,
+    RecoveryTurnRecord,
     RepairRecord,
     ReplanRecord,
     ahe_event,
@@ -80,6 +87,19 @@ from ratsnestpro.orchestration.connection_synthesis import (
     merge_connection_delta,
     new_connection_checkpoint,
     plan_connection_batches,
+)
+from ratsnestpro.orchestration.design_closure import (
+    ComponentClosureManifest,
+    build_component_closure_manifest,
+    design_ir_pin_net_set,
+    diff_pin_net_sets,
+    export_kicad_pin_net_set,
+    validate_component_closure_freshness,
+)
+from ratsnestpro.orchestration.entity_repairs import (
+    EntityRepairPlan,
+    RepairExecutionPolicy,
+    classify_kicad_report,
 )
 from ratsnestpro.orchestration.footprint_search import footprint_candidates
 from ratsnestpro.orchestration.pipeline_contracts import (
@@ -113,9 +133,18 @@ from ratsnestpro.orchestration.pipeline_contracts import (
 )
 from ratsnestpro.orchestration.placement_constraints import (
     allowed_origin_regions,
+    bind_zone_targets,
     compile_placement_constraints,
     placement_constraint_violations,
     write_placement_constraint_manifest,
+)
+from ratsnestpro.orchestration.release_invariants import (
+    audit_pcb_invariants,
+    build_release_invariant_manifest,
+    extract_requirement_invariants,
+    is_mounting_hole_part,
+    sha256_file,
+    validate_release_invariant_manifest,
 )
 from ratsnestpro.orchestration.requirement_identity import (
     extract_component_identity_constraints,
@@ -126,6 +155,7 @@ from ratsnestpro.orchestration.selection_grounding import (
     failed_symbol_candidates,
     requirement_symbol_hints,
 )
+from ratsnestpro.orchestration.skill_runtime import SkillMode, select_skill
 
 # --------------------------------------------------------------------------- #
 # The pinned step sequence
@@ -184,6 +214,7 @@ class CheckResult(ContractModel):
     origin: FailureOrigin | None = None
     reason_code: str = ""
     affected_refs: list[str] = []
+    evidence: dict[str, Any] = Field(default_factory=dict)
 
 
 class StepResult(ContractModel):
@@ -215,12 +246,15 @@ class PipelineState:
     revision: int = 0
     repair_history: list[RepairRecord] = field(default_factory=list)
     replan_history: list[ReplanRecord] = field(default_factory=list)
+    recovery_history: list[RecoveryTurnRecord] = field(default_factory=list)
     capability_gaps: list[CapabilityGap] = field(default_factory=list)
     resume_candidates: dict[PipelineStep, tuple[BaseModel, bool]] = field(
         default_factory=dict
     )
     connection_synthesis_checkpoint: ConnectionSynthesisCheckpoint | None = None
     connection_synthesis_report: ConnectionSynthesisReport | None = None
+    release_resume_step: PipelineStep | None = None
+    release_resume_token_digest: str = ""
 
     def artifact(self, step: PipelineStep) -> BaseModel | None:
         return self.artifacts.get(step)
@@ -359,9 +393,16 @@ class PipelineContext:
         SymbolOnlyPlaceholderSpec | dict[str, Any],
     ] = field(default_factory=dict)
     on_progress_checkpoint: Callable[[PipelineState], None] | None = None
+    # The outer workflow stays deterministic, while blocked engineering steps
+    # can delegate diagnosis, tool choice and rollback choice to the model.
+    # Runtime wiring enables this explicitly so offline/unit runs remain stable.
+    agentic_recovery_enabled: bool = False
+    max_agentic_recovery_turns_per_step: int = 6
+    max_total_agentic_recovery_turns: int = 24
 
 
 _MAX_REPAIR_ARTIFACT_CHARS = 80_000
+_ERC_EVIDENCE_CONTRACT_VERSION = 1
 
 
 def _artifact_fingerprint(artifact: BaseModel | None) -> str:
@@ -543,6 +584,8 @@ def propose_structured[T: BaseModel](
             before_attempt()
         try:
             raw = client.complete(system, prompt)  # type: ignore[attr-defined]
+        except NonRetryableLlmError:
+            raise
         except Exception as exc:
             last_exc = exc
             last_failure_was_output = False
@@ -569,6 +612,226 @@ def propose_structured[T: BaseModel](
             ) from last_exc
         raise LlmError(f"{model.__name__} proposal failed: {last_exc}") from last_exc
     return fallback(), False
+
+
+def _fallback_recovery_decision(
+    *,
+    result: StepResult,
+    allowed_targets: list[PipelineStep],
+    suggested_target: PipelineStep | None,
+    local_repair_available: bool,
+) -> RecoveryDecision:
+    """Return the safest executable move when reflection is unavailable.
+
+    This is an execution fallback, not a second diagnosis engine. It preserves
+    the existing deterministic recovery preference while ensuring an optional
+    reflection call can never turn an otherwise recoverable task into an LLM
+    provider failure.
+    """
+
+    failure_ids = [failure.failure_id for failure in result.failures]
+    if any(
+        failure.recoverability == Recoverability.HARD_CONFLICT
+        for failure in result.failures
+    ):
+        return RecoveryDecision(
+            failure_ids=failure_ids,
+            action=RecoveryAction.STOP,
+            strategy="preserve_immutable_constraint",
+            tool_name="stop_hard_conflict",
+            hypothesis="A deterministic hard-constraint gate reported a conflict.",
+            expected_observation="No candidate mutation is authorized.",
+        )
+    if any(
+        failure.origin == FailureOrigin.INFRASTRUCTURE
+        for failure in result.failures
+    ) or result.execution_blocked:
+        return RecoveryDecision(
+            failure_ids=failure_ids,
+            action=RecoveryAction.RETRY_TOOL,
+            target_step=result.step.value,
+            strategy="bounded_tool_retry",
+            tool_name="retry_current_step",
+            hypothesis="The authoritative tool execution may be incomplete or transient.",
+            expected_observation="A current, parseable tool result is produced.",
+        )
+    if suggested_target is not None and suggested_target in allowed_targets:
+        return RecoveryDecision(
+            failure_ids=failure_ids,
+            action=RecoveryAction.REPLAN_UPSTREAM,
+            target_step=suggested_target.value,
+            strategy="deterministic_owner_rollback",
+            tool_name="replan_upstream_step",
+            hypothesis="The failed downstream gate is owned by an upstream artifact.",
+            expected_observation="The failed gate score materially improves after replay.",
+        )
+    if local_repair_available:
+        return RecoveryDecision(
+            failure_ids=failure_ids,
+            action=RecoveryAction.LOCAL_REPAIR,
+            target_step=result.step.value,
+            strategy="step_local_repair",
+            tool_name="repair_current_step",
+            hypothesis="A project-local candidate change can address the failed gate.",
+            expected_observation="At least one failed check or diagnostic count decreases.",
+        )
+    if allowed_targets:
+        target = allowed_targets[-1]
+        return RecoveryDecision(
+            failure_ids=failure_ids,
+            action=RecoveryAction.REPLAN_UPSTREAM,
+            target_step=target.value,
+            strategy="nearest_mutable_owner_rollback",
+            tool_name="replan_upstream_step",
+            hypothesis="The nearest mutable upstream artifact should be reconsidered.",
+            expected_observation="The failed gate score materially improves after replay.",
+        )
+    if result.failures and all(
+        failure.origin == FailureOrigin.EXTERNAL_EVIDENCE
+        for failure in result.failures
+    ):
+        return RecoveryDecision(
+            failure_ids=failure_ids,
+            action=RecoveryAction.ASK_HUMAN,
+            strategy="request_missing_authority_or_evidence",
+            tool_name="request_human_input",
+            hypothesis="Required grounded evidence or substitution authority is absent.",
+            expected_observation="The missing evidence or explicit decision is supplied.",
+        )
+    return RecoveryDecision(
+        failure_ids=failure_ids,
+        action=RecoveryAction.INVESTIGATE_HARNESS,
+        target_step=result.step.value,
+        strategy="independent_gate_recheck",
+        tool_name="run_step_gate",
+        hypothesis="The failure origin is unresolved and requires another observation.",
+        expected_observation="Independent evidence distinguishes design from Harness failure.",
+    )
+
+
+def _plan_agentic_recovery(
+    *,
+    state: PipelineState,
+    ctx: PipelineContext,
+    result: StepResult,
+    artifact: BaseModel | None,
+    before_score: tuple[int, int, int],
+    allowed_targets: list[PipelineStep],
+    suggested_target: PipelineStep | None,
+    local_repair_available: bool,
+) -> tuple[RecoveryDecision, bool, str, str]:
+    """Ask the model for one bounded Plan/Act move from real observations."""
+
+    def fallback() -> RecoveryDecision:
+        return _fallback_recovery_decision(
+            result=result,
+            allowed_targets=allowed_targets,
+            suggested_target=suggested_target,
+            local_repair_available=local_repair_available,
+        )
+    skill_name = ""
+    skill_digest = ""
+    skill_instructions = ""
+    try:
+        selected_skills = []
+        for skill_mode in (SkillMode.REFLECT, SkillMode.EXECUTE):
+            try:
+                selected_skills.append(select_skill(result.step, mode=skill_mode))
+            except KeyError:
+                continue
+        skill_name = "+".join(skill.name for skill in selected_skills)
+        skill_digest = hashlib.sha256(
+            "\n".join(skill.digest for skill in selected_skills).encode("utf-8")
+        ).hexdigest()
+        skill_instructions = "\n\n".join(
+            skill.instructions for skill in selected_skills
+        )
+    except (FileNotFoundError, KeyError, ValueError):
+        # Packaged Skills are expected in production. A missing optional Skill
+        # must not erase the established deterministic recovery path.
+        pass
+
+    if (
+        not ctx.agentic_recovery_enabled
+        or ctx.mode == LlmMode.OFFLINE
+        or ctx.client is None
+    ):
+        return fallback(), False, skill_name, skill_digest
+
+    artifact_json = (
+        artifact.model_dump_json(exclude={"rationale"})
+        if artifact is not None
+        else "null"
+    )
+    if len(artifact_json) > 24_000:
+        artifact_json = (
+            artifact_json[:24_000]
+            + f"...<truncated {len(artifact_json) - 24_000} chars>"
+        )
+    prior_turns = [
+        {
+            "action": turn.decision.action.value,
+            "target_step": turn.decision.target_step,
+            "strategy": turn.decision.strategy,
+            "status": turn.status,
+            "before_score": turn.before_score,
+            "after_score": turn.after_score,
+            "expected_observation": turn.decision.expected_observation,
+            "observation": turn.observation[:1_500],
+        }
+        for turn in state.recovery_history
+        if turn.step == result.step.value
+    ][-6:]
+    observation = {
+        "project_name": state.project_name,
+        "current_step": result.step.value,
+        "immutable_requirement": state.requirement_text[:12_000],
+        "before_score": before_score,
+        "failed_checks": [
+            check.model_dump(mode="json") for check in result.error_checks
+        ],
+        "failure_envelopes": [
+            failure.model_dump(mode="json") for failure in result.failures
+        ],
+        "candidate_artifact_json": artifact_json,
+        "allowed_actions": [
+            RecoveryAction.LOCAL_REPAIR.value,
+            RecoveryAction.REPLAN_UPSTREAM.value,
+            RecoveryAction.RETRY_TOOL.value,
+            RecoveryAction.INVESTIGATE_HARNESS.value,
+            RecoveryAction.ASK_HUMAN.value,
+            RecoveryAction.STOP.value,
+        ],
+        "allowed_upstream_targets": [target.value for target in allowed_targets],
+        "suggested_deterministic_owner": (
+            suggested_target.value if suggested_target is not None else None
+        ),
+        "local_repair_available": local_repair_available,
+        "prior_recovery_turns": prior_turns,
+    }
+    system = (
+        "You are the recovery planner inside a governed PCB engineering agent. "
+        "You have diagnosis, planning, tool-choice, candidate-repair and rollback "
+        "authority, but you cannot waive requirements or determine that a gate "
+        "passed. Choose exactly one executable next action from the supplied "
+        "action and target lists. A repeated action with unchanged score must be "
+        "replaced by a different causal hypothesis. Put concise repair guidance "
+        "in tool_args.repair_instructions and the measurable expected result in "
+        "expected_observation. Return only the RecoveryDecision JSON contract; "
+        "do not expose hidden chain-of-thought.\n\n"
+        + skill_instructions[:16_000]
+    )
+    try:
+        decision, used_llm = propose_structured(
+            ctx,
+            model=RecoveryDecision,
+            system=system,
+            user=json.dumps(observation, ensure_ascii=False, default=str),
+            fallback=fallback,
+        )
+    except LlmError:
+        decision, used_llm = fallback(), False
+    return decision, used_llm, skill_name, skill_digest
 
 
 # --------------------------------------------------------------------------- #
@@ -627,6 +890,15 @@ class PipelineStepBase(ABC):
     ) -> BaseModel:
         """Refresh deterministic grounding before revalidating a checkpoint."""
         return artifact
+
+    def resume_artifact_is_current(
+        self,
+        state: PipelineState,
+        artifact: BaseModel,
+    ) -> bool:
+        """Return false when a persisted artifact must be rebuilt from scratch."""
+
+        return True
 
     def replan(
         self,
@@ -764,6 +1036,7 @@ class PipelineStepBase(ABC):
                     origin=check.origin,
                     reason_code=check.reason_code,
                     affected_refs=check.affected_refs,
+                    evidence=check.evidence,
                 )
                 for check in results
                 if not check.ok and check.severity == Severity.ERROR
@@ -794,20 +1067,26 @@ class PipelineStepBase(ABC):
             except Exception:  # noqa: BLE001 - observability must not break design
                 return
 
-        harness_recovery_scope = (
-            not ctx.artifact_first
-            or ctx.repair_release_issues
-            or execution_blocked
+        detected_failures = failures_for(checks)
+        proven_harness_failure = any(
+            failure.origin
+            in {FailureOrigin.HARNESS, FailureOrigin.INFRASTRUCTURE}
+            for failure in detected_failures
         )
+        harness_recovery_scope = not ctx.artifact_first or proven_harness_failure
         design_recovery_scope = (
             ctx.artifact_first
-            and not harness_recovery_scope
-            and self.allow_artifact_first_design_repair
-            and ctx.design_repair_attempts > 0
+            and not proven_harness_failure
+            and (
+                ctx.repair_release_issues
+                or (
+                    self.allow_artifact_first_design_repair
+                    and ctx.design_repair_attempts > 0
+                )
+            )
         )
         repair_scope = harness_recovery_scope or design_recovery_scope
         repair_kind = "design" if design_recovery_scope else "harness"
-        detected_failures = failures_for(checks)
         if repair_scope:
             for failure in detected_failures:
                 emit(
@@ -1034,12 +1313,28 @@ class PipelineStepBase(ABC):
                 and check.blocks_execution
                 for check in checks
             )
-            harness_recovery_scope = (
-                not ctx.artifact_first
-                or ctx.repair_release_issues
-                or execution_blocked
+            current_failures = failures_for(checks)
+            proven_harness_failure = any(
+                failure.origin
+                in {FailureOrigin.HARNESS, FailureOrigin.INFRASTRUCTURE}
+                for failure in current_failures
             )
-            if harness_recovery_scope:
+            harness_recovery_scope = (
+                not ctx.artifact_first or proven_harness_failure
+            )
+            design_recovery_scope = (
+                ctx.artifact_first
+                and not proven_harness_failure
+                and (
+                    ctx.repair_release_issues
+                    or (
+                        self.allow_artifact_first_design_repair
+                        and ctx.design_repair_attempts > 0
+                    )
+                )
+            )
+            repair_scope = harness_recovery_scope or design_recovery_scope
+            if proven_harness_failure:
                 # A design correction can reveal a real execution/capability
                 # failure. From this point it belongs to the Harness ledger
                 # and must no longer be hidden by the design-only event scope.
@@ -1086,11 +1381,11 @@ class PipelineStepBase(ABC):
             state.capability_gaps = unresolved
         upstream_replan_available = (
             blocked
-            and harness_recovery_scope
+            and repair_scope
             and ctx.ahe_enabled
             and self.rollback_target(state, artifact, checks) is not None
         )
-        if blocked and harness_recovery_scope and not upstream_replan_available:
+        if blocked and repair_scope and not upstream_replan_available:
             for failure in failures:
                 attribution = attribute_failure(failure)
                 event_name = {
@@ -1205,12 +1500,74 @@ class RequirementsStep(PipelineStepBase):
         return f"requirement '{artifact.project_name}' ({len(artifact.raw_text)} chars)"
 
 
+def _topology_implementation_kind(block: Any) -> str:
+    """Classify where a topology block must be physically realized."""
+
+    text = f"{block.name} {block.kind} {block.description}".casefold()
+    if (
+        any(token in text for token in ("gnd", "ground", "接地", "地平面"))
+        and any(token in text for token in ("plane", "pour", "zone", "铺铜", "覆铜"))
+    ):
+        return "copper_zone"
+    if (
+        ("mounting" in text and "hole" in text)
+        or any(token in text for token in ("安装孔", "固定孔", "mechanical"))
+    ):
+        return "mechanical_feature"
+    if any(
+        token in text
+        for token in (
+            "board outline",
+            "stackup",
+            "layer count",
+            "板框",
+            "层叠",
+            "板层",
+        )
+    ):
+        return "board_constraint"
+    declared = str(getattr(block, "implementation_kind", "auto"))
+    return declared if declared != "auto" else "component"
+
+
+def _normalize_topology_plan(plan: TopologyPlan) -> TopologyPlan:
+    """Attach typed ownership and stable explicit refs to topology blocks."""
+
+    normalized = []
+    for block in plan.blocks:
+        kind = _topology_implementation_kind(block)
+        refs = list(block.implementation_refs)
+        if not refs:
+            refs = [
+                match.group(0).upper()
+                for match in re.finditer(
+                    r"(?<![A-Za-z0-9])(?:J|P|CN|U|Q|D|R|C|L|H)\d+[A-Za-z]?"
+                    r"(?![A-Za-z0-9])",
+                    f"{block.name} {block.description}",
+                    re.IGNORECASE,
+                )
+            ]
+        normalized.append(block.model_copy(update={
+            "implementation_kind": kind,
+            "implementation_refs": list(dict.fromkeys(refs)),
+        }))
+    return plan.model_copy(update={"blocks": normalized})
+
+
 class TopologyStep(PipelineStepBase):
     step = PipelineStep.TOPOLOGY
     knowledge_role = "topology"
 
     def knowledge_query(self, state: PipelineState) -> str | None:
         return f"power tree and block topology for: {state.requirement_text}"
+
+    def prepare_resumed_artifact(
+        self,
+        state: PipelineState,
+        artifact: BaseModel,
+    ) -> BaseModel:
+        assert isinstance(artifact, TopologyPlan)
+        return _normalize_topology_plan(artifact)
 
     def propose(
         self, state: PipelineState, ctx: PipelineContext, knowledge: str
@@ -1228,13 +1585,18 @@ class TopologyStep(PipelineStepBase):
 
         system = (
             "You design a PCB block-level topology. Return JSON with blocks[] "
-            "(name, kind, description), rails[] (supply rail names), ground_net, "
-            "rationale. Use the provided design knowledge."
+            "(name, kind, description, implementation_kind, implementation_refs), "
+            "rails[] (supply rail names), ground_net, rationale. "
+            "implementation_kind is component, copper_zone, mechanical_feature, "
+            "or board_constraint. Put explicit designators such as J1 in "
+            "implementation_refs; never represent a copper zone as a BOM part. "
+            "Use the provided design knowledge."
         )
         user = f"Requirement:\n{state.requirement_text}\n\nKnowledge:\n{knowledge}"
-        return propose_structured(
+        proposal, used_llm = propose_structured(
             ctx, model=TopologyPlan, system=system, user=user, fallback=fallback
         )
+        return _normalize_topology_plan(proposal), used_llm
 
     def check(self, state: PipelineState, artifact: BaseModel) -> list[CheckResult]:
         assert isinstance(artifact, TopologyPlan)
@@ -1971,6 +2333,13 @@ def _identity_token(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
 
+def _role_is_reverse_polarity_protection(role: str) -> bool:
+    normalized = role.casefold()
+    return "reverse" in normalized and any(
+        token in normalized for token in ("polarity", "protection")
+    )
+
+
 def _specific_model_identity(value: str) -> str | None:
     identity = _identity_token(value)
     if (
@@ -2004,6 +2373,14 @@ def _model_token_is_contained(shorter: str, longer: str) -> bool:
 
 
 def _compatible_model_identity(first: str, second: str) -> bool:
+    # A generic installed primitive may intentionally keep its library value.
+    # Treat that as the same identity even when it has no numeric model token
+    # (for example ``D_Schottky``).  Concrete relabels such as ``SS14`` still
+    # require separately grounded device evidence and do not match here.
+    first_token = _identity_token(first)
+    second_token = _identity_token(second)
+    if first_token and first_token == second_token:
+        return True
     first_identity = _specific_model_identity(first)
     second_identity = _specific_model_identity(second)
     if first_identity is None or second_identity is None:
@@ -2082,7 +2459,7 @@ def _specific_component_identity_error(
         and "current_limit" not in role
         and "resistor" not in role
     )
-    is_critical_input_device = "reverse_polarity" in role
+    is_critical_input_device = _role_is_reverse_polarity_protection(role)
     generic_led = part.symbol == "Device:LED"
     identity_required = bool(expected_library) or (
         is_indicator_led and not generic_led
@@ -2892,22 +3269,70 @@ def _uncovered_topology_blocks(
     state: PipelineState,
     parts: list[SelectedPart],
 ) -> list[str]:
-    """Find functional blocks with no semantic evidence in the selected BOM."""
+    """Find component-owned blocks with no physical implementation.
+
+    Copper zones and board constraints belong to later physical stages.  They
+    must never be represented by fake BOM rows merely to satisfy Selection.
+    """
     topology = state.artifact(PipelineStep.TOPOLOGY)
     if not isinstance(topology, TopologyPlan):
         return []
+    selected_refs = {part.ref.upper() for part in parts}
     part_tokens = [
         _semantic_role_tokens(
             f"{part.role} {part.value} {part.symbol} {part.footprint}"
         )
         for part in parts
     ]
+    aliases = {
+        "pwr": "power",
+        "in": "input",
+        "conn": "connector",
+        "mount": "mounting",
+    }
     uncovered: list[str] = []
     for block in topology.blocks:
+        implementation_kind = _topology_implementation_kind(block)
+        if implementation_kind in {"copper_zone", "board_constraint"}:
+            continue
+        if implementation_kind == "mechanical_feature":
+            explicitly_required = (
+                extract_requirement_invariants(state.requirement_text)
+                .mounting_hole_count
+                is not None
+            )
+            if not explicitly_required:
+                # Optional mechanical conveniences invented by a topology
+                # proposal cannot create a downstream hard requirement.
+                continue
+            if not any(is_mounting_hole_part(part) for part in parts):
+                uncovered.append(block.name)
+            continue
+        explicit_refs = {
+            str(ref).upper()
+            for ref in block.implementation_refs
+        }
+        if not explicit_refs:
+            explicit_refs = {
+                match.group(0).upper()
+                for match in re.finditer(
+                    r"(?<![A-Za-z0-9])(?:J|P|CN|U|Q|D|R|C|L|H)\d+[A-Za-z]?"
+                    r"(?![A-Za-z0-9])",
+                    f"{block.name} {block.description}",
+                    re.IGNORECASE,
+                )
+            }
+        if explicit_refs and explicit_refs & selected_refs:
+            continue
         tokens = _semantic_role_tokens(
             f"{block.name} {block.kind} {block.description}"
         ) - _TOPOLOGY_COVERAGE_STOPWORDS
-        if tokens and not any(tokens & selected for selected in part_tokens):
+        tokens = {aliases.get(token, token) for token in tokens}
+        normalized_part_tokens = [
+            {aliases.get(token, token) for token in selected}
+            for selected in part_tokens
+        ]
+        if tokens and not any(tokens & selected for selected in normalized_part_tokens):
             uncovered.append(block.name)
     return uncovered
 
@@ -3524,7 +3949,7 @@ def _ground_selected_parts(
     parts: list[SelectedPart],
     requirement: str,
 ) -> None:
-    """Ground selected parts to installed libraries and trusted catalog data."""
+    """Ground device identity, then authoritatively bind physical footprints."""
     symbol_library_available = config.symbol_dir() is not None
     footprint_library_available = config.footprint_dir() is not None
     for part in parts:
@@ -3557,6 +3982,56 @@ def _ground_selected_parts(
         part.mpn = ""
         part.lcsc = ""
     _ground_mpns(parts)
+    _bind_selected_footprints(parts)
+
+
+def _bind_selected_footprints(parts: list[SelectedPart]) -> None:
+    """Freeze footprint choices only after component selection is grounded.
+
+    ``SelectedPart.footprint`` is an untrusted package hint until this pass.
+    The binding is accepted only when both live KiCad assets exist, their
+    electrical pin/pad numbering is compatible, and their package families do
+    not contradict the selected component role.
+    """
+
+    for part in parts:
+        part.footprint_binding_status = "unresolved"
+        part.footprint_binding_basis = ""
+        pin_rows = symbols.symbol_pins(part.symbol)
+        pad_rows = footprints.footprint_pads(part.footprint) if part.footprint else None
+        if pin_rows is None or pad_rows is None:
+            continue
+        pin_numbers = {
+            str(row.get("number", "")).strip()
+            for row in pin_rows
+            if str(row.get("number", "")).strip()
+        }
+        pad_numbers = {
+            str(row.get("number", "")).strip()
+            for row in pad_rows
+            if str(row.get("number", "")).strip()
+        }
+        connector = part.symbol.startswith(("Connector:", "Connector_Generic:"))
+        mechanical = (
+            not pin_numbers
+            and not pad_numbers
+            and part.symbol.partition(":")[0].casefold() == "mechanical"
+            and part.footprint.partition(":")[0].casefold() == "mountinghole"
+        )
+        numbering_compatible = (
+            pin_numbers == pad_numbers
+            or (connector and bool(pin_numbers) and pin_numbers.issubset(pad_numbers))
+            or mechanical
+        )
+        if not numbering_compatible or not _footprint_matches_part_family(
+            part,
+            part.footprint,
+        ):
+            continue
+        part.footprint_binding_status = "verified_installed"
+        part.footprint_binding_basis = (
+            "live_kicad_symbol+footprint_pin_pad_and_family"
+        )
 
 
 def _apply_selection_patch(
@@ -3606,6 +4081,130 @@ def _apply_selection_patch(
     return SelectionPlan(
         parts=parts,
         rationale=patch.rationale or plan.rationale,
+    )
+
+
+def _bounded_selection_patch(
+    state: PipelineState,
+    plan: SelectionPlan,
+    patch: SelectionPatch,
+    checks: Iterable[CheckResult],
+) -> SelectionPatch:
+    """Remove model-proposed edits that exceed the failed-check repair scope.
+
+    Selection AHE is intentionally a delta editor.  A locally attractive
+    candidate must not delete a user-fixed device or satisfy a library error by
+    removing required mechanics.  Missing physical implementations may still
+    be added, but only while their owning coverage gate is actually failing.
+    """
+
+    checks = tuple(checks)
+    failed_refs = _repairable_selection_refs(plan, checks)
+    existing = {part.ref.upper(): part for part in plan.parts}
+    protected = {
+        part.ref.upper()
+        for part in plan.parts
+        if (
+            (constraint := identity_constraint_for_part(
+                part,
+                _state_identity_constraints(state),
+            ))
+            is not None
+            and constraint.mode == "fixed_exact"
+        )
+    }
+    topology = state.artifact(PipelineStep.TOPOLOGY)
+    if isinstance(topology, TopologyPlan):
+        for block in topology.blocks:
+            if _topology_implementation_kind(block) != "component":
+                continue
+            explicit_refs = {
+                str(ref).upper()
+                for ref in block.implementation_refs
+            }
+            if not explicit_refs:
+                explicit_refs = {
+                    match.group(0).upper()
+                    for match in re.finditer(
+                        r"(?<![A-Za-z0-9])"
+                        r"(?:J|P|CN|U|Q|D|R|C|L|H)\d+[A-Za-z]?"
+                        r"(?![A-Za-z0-9])",
+                        f"{block.name} {block.description}",
+                        re.IGNORECASE,
+                    )
+                }
+            protected.update(explicit_refs & set(existing))
+            block_tokens = _semantic_role_tokens(
+                f"{block.name} {block.kind} {block.description}"
+            ) - _TOPOLOGY_COVERAGE_STOPWORDS
+            semantic_matches = [
+                ref
+                for ref, part in existing.items()
+                if block_tokens
+                & _semantic_role_tokens(
+                    f"{part.role} {part.value} {part.symbol} {part.footprint}"
+                )
+            ]
+            if len(semantic_matches) == 1:
+                protected.add(semantic_matches[0])
+    required_holes = extract_requirement_invariants(
+        state.requirement_text
+    ).mounting_hole_count
+    if required_holes:
+        mounting_refs = sorted(
+            (
+                part.ref.upper()
+                for part in plan.parts
+                if is_mounting_hole_part(part)
+            ),
+            key=lambda ref: (
+                re.sub(r"\d+", "", ref),
+                int((re.search(r"\d+", ref) or re.match(r"0", "0")).group(0)),
+                ref,
+            ),
+        )
+        protected.update(mounting_refs[:required_holes])
+
+    failed_names = {
+        check.name
+        for check in checks
+        if not check.ok and check.severity == Severity.ERROR
+    }
+    may_add_topology = "topology_blocks_covered" in failed_names
+    may_add_mechanics = "required_mounting_holes_present" in failed_names
+    safe_removals = [
+        ref
+        for ref in patch.remove_refs
+        if ref.upper() in failed_refs and ref.upper() not in protected
+    ]
+    safe_upserts: list[SelectedPart] = []
+    for part in patch.upsert_parts:
+        ref = part.ref.upper()
+        if ref in existing:
+            if ref in failed_refs:
+                safe_upserts.append(part)
+            continue
+        if ref in failed_refs:
+            safe_upserts.append(part)
+            continue
+        if may_add_mechanics and is_mounting_hole_part(part):
+            safe_upserts.append(part)
+            continue
+        if may_add_topology:
+            # The normal Selection check remains authoritative for semantic
+            # coverage; this branch only permits creation while that gate owns
+            # the failure, never during an unrelated repair.
+            safe_upserts.append(part)
+
+    return patch.model_copy(
+        update={
+            "remove_refs": safe_removals,
+            "upsert_parts": safe_upserts,
+            "rationale": (
+                f"{patch.rationale}; bounded to failed refs and frozen "
+                "requirement invariants"
+            ).strip("; "),
+        }
     )
 
 
@@ -3669,6 +4268,84 @@ def _close_component_libraries(
             ctx is not None and ctx.artifact_first
         ),
     )
+
+
+def _persist_component_closure(
+    plan: SelectionPlan,
+    closure: LibraryClosureResult,
+    ctx: PipelineContext,
+) -> SelectionPlan:
+    """Bind a grounded BOM to content-addressed installed library evidence."""
+
+    if not plan.parts:
+        return plan.model_copy(update={"component_closure_path": ""})
+    out_dir = (
+        Path(ctx.out_dir)
+        if ctx.out_dir
+        else Path(tempfile.mkdtemp(prefix="rnp_component_closure_"))
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "component-closure.json"
+    manifest = build_component_closure_manifest(plan, closure)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+    temporary.replace(path)
+    return plan.model_copy(update={"component_closure_path": str(path)})
+
+
+def _component_closure_manifest_check(plan: SelectionPlan) -> CheckResult:
+    path = Path(plan.component_closure_path) if plan.component_closure_path else None
+    if path is None or not path.is_file():
+        return CheckResult(
+            name="component_closure_manifest",
+            ok=False,
+            message="content-addressed component closure manifest is missing",
+            blocks_execution=True,
+            reason_code="component_closure_manifest_missing",
+            affected_refs=[part.ref for part in plan.parts],
+        )
+    try:
+        manifest = ComponentClosureManifest.model_validate_json(
+            path.read_text(encoding="utf-8")
+        )
+        freshness = validate_component_closure_freshness(manifest)
+        expected_refs = {part.ref for part in plan.parts}
+        manifest_refs = {component.ref for component in manifest.components}
+        blockers = [*manifest.blockers, *freshness.stale_evidence]
+        if manifest_refs != expected_refs:
+            blockers.append(
+                "selection_refs_changed:"
+                f"expected={sorted(expected_refs)},manifest={sorted(manifest_refs)}"
+            )
+        affected_refs = sorted({
+            blocker.partition(":")[0]
+            for blocker in blockers
+            if blocker.partition(":")[0] in expected_refs
+        })
+        return CheckResult(
+            name="component_closure_manifest",
+            ok=manifest.release_ready and freshness.current and not blockers,
+            message=(
+                "component identities, pin-pad mappings, and installed library "
+                "files are content-addressed and current"
+                if manifest.release_ready and freshness.current and not blockers
+                else f"component closure blockers: {blockers}"
+            ),
+            blocks_execution=bool(blockers) or not manifest.release_ready,
+            reason_code=(
+                "" if not blockers else "component_closure_contract_failed"
+            ),
+            affected_refs=affected_refs,
+        )
+    except Exception as exc:  # noqa: BLE001 - invalid evidence fails closed
+        return CheckResult(
+            name="component_closure_manifest",
+            ok=False,
+            message=f"component closure manifest is invalid: {type(exc).__name__}: {exc}",
+            blocks_execution=True,
+            reason_code="component_closure_manifest_invalid",
+            affected_refs=[part.ref for part in plan.parts],
+        )
 
 
 def _library_closure_diagnostics(
@@ -3756,13 +4433,18 @@ def _library_closure_check(closure: LibraryClosureResult) -> CheckResult:
                 )
             )[:8_000]
         ),
-        blocks_execution=bool(blockers),
+        blocks_execution=not closure_ok,
         # A mixed selection closure remains a domain/evidence result. Proven
         # deterministic Harness contradictions are emitted as separate checks.
         origin=None,
         reason_code=(
             "component_resolution_incomplete" if not closure_ok else ""
         ),
+        affected_refs=[
+            item.ref
+            for item in closure.resolutions
+            if not item.release_ready
+        ],
     )
 
 
@@ -3780,6 +4462,12 @@ def _repairable_selection_refs(
         and check.severity == Severity.ERROR
         and ":" in check.name
     }
+    failed_refs.update(
+        ref.upper()
+        for check in checks
+        if not check.ok and check.severity == Severity.ERROR
+        for ref in check.affected_refs
+    )
     if any(
         not check.ok
         and check.severity == Severity.ERROR
@@ -3867,7 +4555,10 @@ class SelectionStep(PipelineStepBase):
         system = (
             "You choose real components for the design. Return JSON with parts[] "
             "(ref, symbol as 'Lib:Name', value, footprint as 'Lib:Name', role) and "
-            "rationale. Use only real KiCad symbols/footprints; do not invent MPNs. "
+            "rationale. Treat footprint as a package hint only: after component "
+            "identity selection the Harness independently resolves and freezes "
+            "the binding against the live KiCad libraries. Use only real KiCad "
+            "symbols/footprints; do not invent MPNs. "
             f"Keep the response bounded: select at most {_MAX_SELECTION_PARTS} "
             "physical parts, include "
             "exactly ref/symbol/value/footprint/role per part, and keep rationale "
@@ -3929,7 +4620,10 @@ class SelectionStep(PipelineStepBase):
             "A downstream netlist error is normally repaired by changing nets, not "
             "by inventing more physical support parts. "
             "Every topology block listed below must have a physical implementation "
-            "in parts[]. "
+            "in parts[] when its implementation_kind is component or an explicitly "
+            "requested mechanical_feature. Copper zones and board constraints are "
+            "not BOM parts. For explicitly requested mounting holes, select exactly "
+            "the requested count as separate real mechanical symbol/footprint refs. "
             "Prefer the installed symbol candidates listed below over an unlisted "
             "alternative, and pair every symbol with a footprint having exactly the "
             "same electrical pin/pad numbers. Connector footprints may additionally "
@@ -3955,12 +4649,12 @@ class SelectionStep(PipelineStepBase):
         # Ground names and procurement data exactly as later selection deltas
         # are grounded before they can be merged into this plan.
         _ground_selected_parts(plan.parts, state.requirement_text)
-        _close_component_libraries(
+        closure = _close_component_libraries(
             plan,
             ctx,
             identity_constraints=_state_identity_constraints(state),
         )
-        return plan, used
+        return _persist_component_closure(plan, closure, ctx), used
 
     def replan(
         self,
@@ -4013,13 +4707,13 @@ class SelectionStep(PipelineStepBase):
             parts=list(by_ref.values()),
             rationale=candidate.rationale or artifact.rationale,
         )
-        _close_component_libraries(
+        closure = _close_component_libraries(
             replanned,
             ctx,
             preserve_requested_identities=True,
             identity_constraints=_state_identity_constraints(state),
         )
-        return replanned, used
+        return _persist_component_closure(replanned, closure, ctx), used
 
     def repair(
         self,
@@ -4098,14 +4792,15 @@ class SelectionStep(PipelineStepBase):
         finally:
             ctx.repair_feedback = base_feedback
         _ground_selected_parts(patch.upsert_parts, state.requirement_text)
+        patch = _bounded_selection_patch(state, artifact, patch, checks)
         repaired = _apply_selection_patch(artifact, patch)
-        _close_component_libraries(
+        closure = _close_component_libraries(
             repaired,
             ctx,
             preserve_requested_identities=True,
             identity_constraints=_state_identity_constraints(state),
         )
-        return repaired, used
+        return _persist_component_closure(repaired, closure, ctx), used
 
     def check(self, state: PipelineState, artifact: BaseModel) -> list[CheckResult]:
         assert isinstance(artifact, SelectionPlan)
@@ -4124,6 +4819,27 @@ class SelectionStep(PipelineStepBase):
                 ),
             ),
         ]
+        unbound_footprints = [
+            part.ref
+            for part in artifact.parts
+            if part.footprint_binding_status != "verified_installed"
+        ]
+        checks.append(CheckResult(
+            name="footprints_bound_after_selection",
+            ok=not unbound_footprints,
+            message=(
+                "all selected component identities have deterministic installed "
+                "footprint bindings"
+                if not unbound_footprints
+                else "post-selection footprint binding is unresolved for refs: "
+                f"{unbound_footprints}"
+            ),
+            blocks_execution=bool(unbound_footprints),
+            reason_code=(
+                "" if not unbound_footprints else "footprint_binding_unverified"
+            ),
+            affected_refs=unbound_footprints,
+        ))
         identity_constraints = _state_identity_constraints(state)
         missing_identities = missing_fixed_identities(
             artifact.parts,
@@ -4152,11 +4868,15 @@ class SelectionStep(PipelineStepBase):
             blockers = closure.execution_blockers
             checks.append(_library_closure_check(closure))
             checks.extend(_generic_capability_closure_success_checks(closure))
-            if blockers:
+            manifest_check = _component_closure_manifest_check(artifact)
+            checks.append(manifest_check)
+            if blockers or not manifest_check.ok:
                 # Do not derive topology, connectivity, or package symptoms
                 # from a BOM whose component library is not closed.
                 checks.extend(_library_closure_diagnostics(closure))
                 return checks
+        elif artifact.parts:
+            checks.append(_component_closure_manifest_check(artifact))
         speculative = _unjustified_speculative_support_parts(
             state.requirement_text,
             artifact.parts,
@@ -4183,6 +4903,23 @@ class SelectionStep(PipelineStepBase):
                 f"topology blocks: {uncovered_blocks}"
             ),
         ))
+        required_holes = extract_requirement_invariants(
+            state.requirement_text
+        ).mounting_hole_count
+        mounting_parts = [
+            part for part in artifact.parts if is_mounting_hole_part(part)
+        ]
+        if required_holes is not None:
+            checks.append(CheckResult(
+                name="required_mounting_holes_present",
+                ok=len(mounting_parts) == required_holes,
+                message=(
+                    f"requirement needs exactly {required_holes} mounting-hole "
+                    f"parts; selected {len(mounting_parts)}: "
+                    f"{[part.ref for part in mounting_parts]}"
+                ),
+                affected_refs=[part.ref for part in mounting_parts],
+            ))
         requested_mcus = _mcu_models(state.requirement_text)
         matched_mcu_parts: list[SelectedPart] = []
         if requested_mcus:
@@ -4373,7 +5110,7 @@ class SelectionStep(PipelineStepBase):
                         ))
                     role = p.role.lower()
                     input_facing = (
-                        "reverse_polarity" in role
+                        _role_is_reverse_polarity_protection(role)
                         or (
                             p.ref.upper().startswith("U")
                             and "dc_dc" in role
@@ -8790,6 +9527,7 @@ def _mcu_control_topology_checks(
             part for part in view.parts.values()
             if (
                 any(token in part.role.lower() for token in ("reset", "en_"))
+                and "resettable" not in part.role.lower()
                 and not any(
                     domain in part.role.lower()
                     for domain in (
@@ -9396,10 +10134,7 @@ def _external_input_protection_topology_checks(
         part for part in view.parts.values()
         if (
             ("fuse" in part.role.lower() and "input" in part.role.lower())
-            or (
-                "reverse" in part.role.lower()
-                and "polarity" in part.role.lower()
-            )
+            or _role_is_reverse_polarity_protection(part.role)
             or (
                 "input" in part.role.lower()
                 and "filter" in part.role.lower()
@@ -9793,6 +10528,242 @@ _SHEET_COLS = 6
 _SYMBOL_HALF_MM = 6.0
 _SHEET_CLEARANCE_MM = 5.08
 _SHEET_PACK_GAP_MM = 2 * _SHEET_CLEARANCE_MM
+_SCHEMATIC_CONNECTION_GRID_MM = 1.27
+_LIBRARY_BINDING_LOCK = "library-bindings.lock.json"
+
+
+def _portable_library_uri(
+    source: Path,
+    project_dir: Path,
+    *,
+    env_name: str,
+) -> str:
+    """Describe a resolved library source without binding evidence to a host path."""
+
+    resolved = source.resolve(strict=False)
+    project_root = project_dir.resolve(strict=False)
+    try:
+        return "${KIPRJMOD}/" + resolved.relative_to(project_root).as_posix()
+    except ValueError:
+        roots = [
+            Path(value).resolve(strict=False)
+            for value in os.environ.get(env_name, "").split(os.pathsep)
+            if value
+        ]
+        if len(roots) == 1:
+            try:
+                return f"${{{env_name}}}/" + resolved.relative_to(roots[0]).as_posix()
+            except ValueError:
+                pass
+    return str(resolved)
+
+
+def _vendor_library_source(
+    project_dir: Path,
+    *,
+    kind: str,
+    nickname: str,
+    source: Path,
+    refresh: bool,
+) -> tuple[Path, Path]:
+    """Copy the exact resolved definition into the delivered KiCad project."""
+
+    bundle = project_dir / ".ratsnest-libs"
+    if kind == "sym":
+        if source.parent.name == f"{nickname}.kicad_symdir":
+            table_target = bundle / "symbols" / source.parent.name
+            source_target = table_target / source.name
+            if refresh:
+                if table_target.is_dir():
+                    shutil.rmtree(table_target)
+                shutil.copytree(source.parent, table_target)
+        else:
+            table_target = bundle / "symbols" / f"{nickname}.kicad_sym"
+            source_target = table_target
+    elif kind == "fp":
+        table_target = bundle / "footprints" / f"{nickname}.pretty"
+        source_target = table_target / source.name
+    else:
+        raise ValueError("kind must be 'sym' or 'fp'")
+
+    if not source_target.is_file():
+        source_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, source_target)
+    elif not (kind == "sym" and source.parent.name == f"{nickname}.kicad_symdir"):
+        shutil.copy2(source, source_target)
+    return table_target, source_target
+
+
+def _library_tree_evidence(
+    table_target: Path,
+    project_dir: Path,
+) -> list[dict[str, Any]]:
+    files = (
+        sorted(path for path in table_target.rglob("*") if path.is_file())
+        if table_target.is_dir()
+        else [table_target]
+    )
+    return [
+        {
+            "uri": "${KIPRJMOD}/" + path.relative_to(project_dir).as_posix(),
+            "sha256": sha256_file(path),
+            "size_bytes": path.stat().st_size,
+        }
+        for path in files
+    ]
+
+
+def _write_library_binding_lock(
+    project_dir: Path,
+    *,
+    kind: str,
+    entries: list[dict[str, Any]],
+) -> None:
+    """Persist the exact source digest behind each project library-table entry."""
+
+    lock_path = project_dir / _LIBRARY_BINDING_LOCK
+    existing: list[dict[str, Any]] = []
+    if lock_path.is_file():
+        try:
+            payload = json.loads(lock_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("bindings"), list):
+                existing = [
+                    item for item in payload["bindings"]
+                    if isinstance(item, dict) and item.get("kind") != kind
+                ]
+        except (OSError, json.JSONDecodeError):
+            existing = []
+    bindings = sorted(
+        [*existing, *entries],
+        key=lambda item: (str(item.get("kind", "")), str(item.get("lib_id", ""))),
+    )
+    lock_path.write_text(
+        json.dumps(
+            {"schema_version": 1, "bindings": bindings},
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _register_project_library_bindings(
+    project_dir: Path,
+    lib_ids: Iterable[str],
+    *,
+    kind: str,
+) -> list[str]:
+    """Write exact project-local KiCad library bindings used by an artifact.
+
+    Headless KiCad installations often have the library files available but
+    no user-global library table.  Embedded schematic graphics are not enough
+    for ERC provenance checks, so bind only the libraries actually resolved by
+    this process.  Missing IDs remain missing; this function never fabricates
+    a table entry.
+    """
+
+    registered: list[str] = []
+    binding_evidence: list[dict[str, Any]] = []
+    prepared_sources: set[tuple[str, str, str]] = set()
+    delivered_tables: dict[str, Path] = {}
+    nickname_sources: dict[tuple[str, str], Path] = {}
+    for lib_id in dict.fromkeys(str(item) for item in lib_ids):
+        nickname, separator, _name = lib_id.partition(":")
+        if not separator or not nickname:
+            continue
+        if kind == "sym":
+            resolved = symbols.resolve_symbol(lib_id)
+            if resolved is None:
+                continue
+        elif kind == "fp":
+            resolved = footprints.footprint_path(lib_id)
+            if resolved is None:
+                continue
+        else:
+            raise ValueError("kind must be 'sym' or 'fp'")
+        source_root = (
+            resolved.parent
+            if kind == "fp"
+            or (kind == "sym" and resolved.parent.name == f"{nickname}.kicad_symdir")
+            else resolved
+        )
+        nickname_key = (kind, nickname)
+        prior_source = nickname_sources.get(nickname_key)
+        resolved_source_root = source_root.resolve(strict=False)
+        if prior_source is not None and prior_source != resolved_source_root:
+            raise ValueError(
+                f"library nickname {nickname!r} resolved from multiple roots"
+            )
+        nickname_sources[nickname_key] = resolved_source_root
+        source_key = (kind, nickname, str(source_root.resolve(strict=False)))
+        table_source, delivered_source = _vendor_library_source(
+            project_dir,
+            kind=kind,
+            nickname=nickname,
+            source=resolved,
+            refresh=source_key not in prepared_sources,
+        )
+        prepared_sources.add(source_key)
+        env_name = "KICAD_SYMBOL_DIR" if kind == "sym" else "KICAD_FOOTPRINT_DIR"
+        portable_uri = _portable_library_uri(
+            table_source,
+            project_dir,
+            env_name=env_name,
+        )
+        register_library(
+            kind,
+            nickname,
+            portable_uri,
+            project_dir=str(project_dir),
+        )
+        registered.append(nickname)
+        delivered_digest = sha256_file(delivered_source)
+        binding_evidence.append({
+            "kind": kind,
+            "lib_id": lib_id,
+            "table_uri": portable_uri,
+            "source_uri": _portable_library_uri(
+                delivered_source,
+                project_dir,
+                env_name=env_name,
+            ),
+            "source_sha256": delivered_digest,
+            "source_size_bytes": delivered_source.stat().st_size,
+            "vendored": True,
+        })
+        delivered_tables[portable_uri] = table_source
+    for entry in binding_evidence:
+        entry["library_files"] = _library_tree_evidence(
+            delivered_tables[str(entry["table_uri"])],
+            project_dir,
+        )
+    _write_library_binding_lock(
+        project_dir,
+        kind=kind,
+        entries=binding_evidence,
+    )
+    return registered
+
+
+def _ensure_kicad_project_context(schematic_path: Path) -> Path:
+    """Create the minimal project file needed to load local library tables."""
+
+    project_path = schematic_path.with_suffix(".kicad_pro")
+    if not project_path.exists():
+        project_path.write_text("{}\n", encoding="utf-8")
+    return project_path
+
+
+def _snap_sheet_placement(placement: SheetPlacement) -> SheetPlacement:
+    """Align a symbol origin and orientation to KiCad's connection grid."""
+
+    grid = _SCHEMATIC_CONNECTION_GRID_MM
+    return placement.model_copy(update={
+        "x": round(placement.x / grid) * grid,
+        "y": round(placement.y / grid) * grid,
+        "rotation": (round(placement.rotation / 90.0) * 90.0) % 360.0,
+    })
 
 
 def _symbol_half_extents(symbol: str | None, rotation: float = 0.0) -> tuple[float, float]:
@@ -9855,12 +10826,12 @@ def _reflow_sheet_placements(
         x_cursor = _SHEET_PACK_GAP_MM
         for item, (half_width, _) in zip(row, extents, strict=True):
             center_x = x_cursor + half_width
-            result.append(SheetPlacement(
+            result.append(_snap_sheet_placement(SheetPlacement(
                 ref=item.ref,
                 x=center_x,
                 y=center_y,
                 rotation=item.rotation,
-            ))
+            )))
             x_cursor = center_x + half_width + _SHEET_PACK_GAP_MM
         y_cursor = center_y + row_half_height + _SHEET_PACK_GAP_MM
     return result
@@ -9920,7 +10891,18 @@ class SchLayoutStep(PipelineStepBase):
         plan, used = propose_structured(
             ctx, model=SchLayoutPlan, system=system, user=user, fallback=fallback
         )
-        # Keep the LLM's grouping/rotation choices, but reflow unsafe geometry.
+        # Keep the LLM's grouping choices, but normalize every origin and
+        # orientation onto KiCad's electrical connection grid.  Labels are
+        # placed at transformed pin coordinates; an off-grid component origin
+        # therefore creates real endpoint_off_grid ERC findings even when the
+        # label and pin appear to share the same floating-point coordinate.
+        if isinstance(plan, SchLayoutPlan):
+            plan.placements = [
+                _snap_sheet_placement(placement)
+                for placement in plan.placements
+            ]
+        # Reflow unsafe geometry after snapping because normalization can move
+        # two close origins towards one another.
         # Real KiCad symbols can extend tens of millimetres beyond their origin;
         # checking only origin distance can put pins from different nets at the
         # same coordinate and create a real electrical short.
@@ -9944,6 +10926,33 @@ class SchLayoutStep(PipelineStepBase):
                 name="all_parts_placed", ok=not missing,
                 message=f"unplaced components: {missing}",
             ))
+        grid = _SCHEMATIC_CONNECTION_GRID_MM
+        off_grid = sorted(
+            placement.ref
+            for placement in artifact.placements
+            if (
+                not math.isclose(
+                    placement.x / grid,
+                    round(placement.x / grid),
+                    abs_tol=1e-7,
+                )
+                or not math.isclose(
+                    placement.y / grid,
+                    round(placement.y / grid),
+                    abs_tol=1e-7,
+                )
+                or not math.isclose(
+                    placement.rotation / 90.0,
+                    round(placement.rotation / 90.0),
+                    abs_tol=1e-7,
+                )
+            )
+        )
+        checks.append(CheckResult(
+            name="schematic_connection_grid",
+            ok=not off_grid,
+            message=f"off-grid or non-orthogonal symbols: {off_grid}",
+        ))
         # No symbol overlaps on the sheet.
         overlaps = _sheet_overlaps(artifact.placements, self._symbol_by_ref(state))
         checks.append(CheckResult(
@@ -10045,7 +11054,27 @@ class SchMaterializeStep(PipelineStepBase):
 
         out_dir = Path(ctx.out_dir) if ctx.out_dir else Path(tempfile.mkdtemp(prefix="rnp_sch_"))
         out_dir.mkdir(parents=True, exist_ok=True)
+        _register_project_library_bindings(
+            out_dir,
+            [
+                *(str(component["symbol"]) for component in components),
+                "power:PWR_FLAG",
+            ],
+            kind="sym",
+        )
+        _register_project_library_bindings(
+            out_dir,
+            (
+                str(component["footprint"])
+                for component in components
+                if component.get("footprint")
+            ),
+            kind="fp",
+        )
         sch_path = out_dir / f"{state.project_name}.kicad_sch"
+        # kicad-cli only treats the sibling sym-lib-table as the current
+        # project configuration when a same-stem project file exists.
+        _ensure_kicad_project_context(sch_path)
         doc.save(sch_path)
         pm = state.artifact(PipelineStep.SCH_PINMAP)
         label_count = sum(len(n.pins) for n in pm.nets) if isinstance(pm, PinMapPlan) else 0
@@ -10139,9 +11168,44 @@ class ErcStep(PipelineStepBase):
         shorted = doc.shorted_nets()
         single = [name for name, coords in doc.label_netlist().items() if len(coords) < 2]
         erc = run_erc(mat.sch_path)
+        connectivity_checked = False
+        connectivity_matches = False
+        connectivity_netlist_path = ""
+        connectivity_missing: list[str] = []
+        connectivity_extra: list[str] = []
+        connectivity_ambiguous: list[str] = []
+        connectivity_error = ""
+        pinmap = state.artifact(PipelineStep.SCH_PINMAP)
+        cli = kicad_cli_available()
+        if cli and isinstance(pinmap, PinMapPlan):
+            netlist_path = Path(mat.sch_path).with_suffix(".netlist.xml")
+            try:
+                expected = design_ir_pin_net_set(pinmap)
+                actual = export_kicad_pin_net_set(
+                    Path(mat.sch_path),
+                    netlist_path,
+                    cli_path=cli,
+                )
+                diff = diff_pin_net_sets(expected, actual)
+                connectivity_checked = True
+                connectivity_matches = diff.matches
+                connectivity_netlist_path = str(netlist_path)
+                connectivity_missing = [
+                    f"{fact.ref}.{fact.pin}@{fact.net}" for fact in diff.missing
+                ]
+                connectivity_extra = [
+                    f"{fact.ref}.{fact.pin}@{fact.net}" for fact in diff.extra
+                ]
+                connectivity_ambiguous = [
+                    f"{item.ref}.{item.pin}@{item.nets}"
+                    for item in diff.ambiguous
+                ]
+            except Exception as exc:  # noqa: BLE001 - gate fails closed below
+                connectivity_error = f"{type(exc).__name__}: {exc}"
         return (
             ErcSummary(
                 sch_path=mat.sch_path,
+                evidence_contract_version=_ERC_EVIDENCE_CONTRACT_VERSION,
                 shorted_nets=shorted,
                 single_pin_nets=single,
                 cli_available=erc.available,
@@ -10154,8 +11218,32 @@ class ErcStep(PipelineStepBase):
                     if violation.severity == "error"
                 ],
                 cli_report_path=erc.report_path or "",
+                connectivity_checked=connectivity_checked,
+                connectivity_matches=connectivity_matches,
+                connectivity_netlist_path=connectivity_netlist_path,
+                connectivity_missing=connectivity_missing,
+                connectivity_extra=connectivity_extra,
+                connectivity_ambiguous=connectivity_ambiguous,
+                connectivity_error=connectivity_error,
             ),
             False,
+        )
+
+    def resume_artifact_is_current(
+        self,
+        state: PipelineState,
+        artifact: BaseModel,
+    ) -> bool:
+        """Reject cached ERC evidence produced by an older verifier contract."""
+
+        materialized = state.artifact(PipelineStep.SCH_MATERIALIZE)
+        return (
+            isinstance(artifact, ErcSummary)
+            and artifact.evidence_contract_version
+            == _ERC_EVIDENCE_CONTRACT_VERSION
+            and isinstance(materialized, MaterializeResult)
+            and artifact.sch_path == materialized.sch_path
+            and Path(artifact.sch_path).is_file()
         )
 
     def check(self, state: PipelineState, artifact: BaseModel) -> list[CheckResult]:
@@ -10166,16 +11254,82 @@ class ErcStep(PipelineStepBase):
                 message="no materialized schematic to check",
                 blocks_execution=True,
             )]
+        pinmap = state.artifact(PipelineStep.SCH_PINMAP)
+        problem_nets = {
+            *artifact.single_pin_nets,
+            *(name for group in artifact.shorted_nets for name in group),
+        }
+        logical_refs = sorted({
+            pin.ref
+            for net in pinmap.nets
+            for pin in net.pins
+            if isinstance(pinmap, PinMapPlan) and net.name in problem_nets
+        }) if isinstance(pinmap, PinMapPlan) else []
+        entity_plans = _bounded_entity_repair_plans(
+            Path(artifact.cli_report_path)
+        ) if artifact.cli_report_path else []
+        cli_refs = _entity_repair_refs(entity_plans)
+        connectivity_refs = sorted({
+            item.partition(".")[0]
+            for item in (
+                *artifact.connectivity_missing,
+                *artifact.connectivity_extra,
+                *artifact.connectivity_ambiguous,
+            )
+            if item.partition(".")[0]
+        })
         checks = [
             CheckResult(
                 name="no_shorted_nets", ok=not artifact.shorted_nets,
                 message=f"shorted nets: {artifact.shorted_nets}",
+                reason_code="schematic_net_short",
+                affected_refs=logical_refs,
             ),
             CheckResult(
                 name="no_single_pin_nets", ok=not artifact.single_pin_nets,
                 message=f"single-pin nets: {artifact.single_pin_nets}",
+                reason_code="schematic_single_pin_net",
+                affected_refs=logical_refs,
             ),
         ]
+        if not artifact.cli_available:
+            checks.append(CheckResult(
+                name="design_ir_matches_kicad_netlist",
+                ok=False,
+                severity=Severity.WARNING,
+                message=(
+                    "kicad-cli unavailable; physical pin/net topology export "
+                    "was skipped (not a pass)"
+                ),
+                reason_code="kicad_netlist_export_unavailable",
+            ))
+        else:
+            checks.append(CheckResult(
+                name="design_ir_matches_kicad_netlist",
+                ok=(
+                    artifact.connectivity_checked
+                    and artifact.connectivity_matches
+                    and not artifact.connectivity_error
+                ),
+                message=(
+                    "KiCad-exported pin/net topology matches the DesignIR"
+                    if artifact.connectivity_matches
+                    else "KiCad-exported pin/net topology differs from DesignIR: "
+                    f"missing={artifact.connectivity_missing}, "
+                    f"extra={artifact.connectivity_extra}, "
+                    f"ambiguous={artifact.connectivity_ambiguous}, "
+                    f"error={artifact.connectivity_error!r}"
+                ),
+                blocks_execution=True,
+                reason_code="schematic_entity_topology_mismatch",
+                affected_refs=connectivity_refs,
+                evidence={
+                    "missing": artifact.connectivity_missing,
+                    "extra": artifact.connectivity_extra,
+                    "ambiguous": artifact.connectivity_ambiguous,
+                    "netlist_path": artifact.connectivity_netlist_path,
+                },
+            ))
         # kicad-cli ERC: unavailable is a warning (never a pass); real ERC
         # errors are authoritative and must stop the production pipeline.
         if not artifact.cli_available:
@@ -10194,6 +11348,19 @@ class ErcStep(PipelineStepBase):
                         else ""
                     )
                 ),
+                reason_code=(
+                    "entity_repair:"
+                    + ",".join(sorted({plan.strategy for plan in entity_plans}))
+                    if entity_plans
+                    else "erc_error_without_bounded_entity_plan"
+                ),
+                affected_refs=cli_refs,
+                evidence={
+                    "entity_repair_plans": [
+                        plan.model_dump(mode="json") for plan in entity_plans
+                    ],
+                    "erc_report_path": artifact.cli_report_path,
+                },
             ))
         return checks
 
@@ -10203,11 +11370,19 @@ class ErcStep(PipelineStepBase):
         artifact: BaseModel,
         checks: list[CheckResult],
     ) -> PipelineStep | None:
-        if any(
-            not check.ok and check.severity == Severity.ERROR
+        failed_names = {
+            check.name
             for check in checks
-        ):
+            if not check.ok and check.severity == Severity.ERROR
+        }
+        if failed_names & {"no_shorted_nets", "no_single_pin_nets"}:
             return PipelineStep.SCH_CONNECTIONS
+        if "design_ir_matches_kicad_netlist" in failed_names:
+            return PipelineStep.SCH_MATERIALIZE
+        if isinstance(artifact, ErcSummary) and artifact.cli_report_path:
+            return _earliest_entity_rollback(
+                _bounded_entity_repair_plans(Path(artifact.cli_report_path))
+            )
         return None
 
     def summarize(self, artifact: BaseModel) -> str:
@@ -10223,10 +11398,25 @@ class LayoutPartitionStep(PipelineStepBase):
     """Board outline + functional zones. Bottom-line: zones lie within the board."""
 
     step = PipelineStep.LAYOUT_PARTITION
+    allow_artifact_first_design_repair = True
     knowledge_role = "layout"
 
     def knowledge_query(self, state: PipelineState) -> str | None:
         return f"board partitioning and functional zones for: {state.requirement_text}"
+
+    def prepare_resumed_artifact(
+        self,
+        state: PipelineState,
+        artifact: BaseModel,
+    ) -> BaseModel:
+        assert isinstance(artifact, BoardPartition)
+        bound = bind_zone_targets(artifact, _roles(state))
+        compiled = compile_placement_constraints(
+            bound,
+            _roles(state),
+            state.requirement_text,
+        )
+        return bound.model_copy(update={"placement_constraints": compiled})
 
     def propose(
         self, state: PipelineState, ctx: PipelineContext, knowledge: str
@@ -10244,14 +11434,17 @@ class LayoutPartitionStep(PipelineStepBase):
 
         system = (
             "You partition a PCB into functional zones. Return JSON: board_width, "
-            "board_height (mm), zones[] ({name, kind, x1, y1, x2, y2}), rationale. "
-            "Zones must fit inside the board."
+            "board_height (mm), zones[] ({name, kind, target_ref, x1, y1, x2, "
+            "y2}), rationale. Set target_ref when a zone belongs to one exact "
+            "physical reference. Repeated mechanical zones must bind one-to-one "
+            "to their real refs. Zones must fit inside the board."
         )
         user = f"Requirement:\n{state.requirement_text}\n\nKnowledge:\n{knowledge}"
         artifact, used_llm = propose_structured(
             ctx, model=BoardPartition, system=system, user=user, fallback=fallback
         )
         assert isinstance(artifact, BoardPartition)
+        artifact = bind_zone_targets(artifact, _roles(state))
         compiled = compile_placement_constraints(
             artifact,
             _roles(state),
@@ -10266,6 +11459,23 @@ class LayoutPartitionStep(PipelineStepBase):
             z.name for z in artifact.zones
             if z.x1 < 0 or z.y1 < 0 or z.x2 > w or z.y2 > h
         ]
+        targets = [zone.target_ref for zone in artifact.zones if zone.target_ref]
+        unknown_targets = sorted(set(targets) - set(_roles(state)))
+        duplicate_targets = sorted({ref for ref in targets if targets.count(ref) > 1})
+        invariants = extract_requirement_invariants(state.requirement_text)
+        mounting_refs = {
+            part.ref
+            for part in (
+                state.artifact(PipelineStep.SELECTION).parts
+                if isinstance(
+                    state.artifact(PipelineStep.SELECTION),
+                    SelectionPlan,
+                )
+                else []
+            )
+            if is_mounting_hole_part(part)
+        }
+        missing_mounting_targets = sorted(mounting_refs - set(targets))
         return [
             CheckResult(
                 name="has_board_outline", ok=w > 0 and h > 0,
@@ -10274,6 +11484,41 @@ class LayoutPartitionStep(PipelineStepBase):
             CheckResult(
                 name="zones_within_board", ok=not out_of_bounds,
                 message=f"zones outside the board outline: {out_of_bounds}",
+            ),
+            CheckResult(
+                name="zone_target_refs_valid",
+                ok=not unknown_targets and not duplicate_targets,
+                message=(
+                    f"unknown zone targets={unknown_targets}; duplicate zone "
+                    f"targets={duplicate_targets}"
+                ),
+            ),
+            CheckResult(
+                name="requested_board_size_preserved",
+                ok=(
+                    (
+                        invariants.max_board_width_mm is None
+                        or w <= invariants.max_board_width_mm + 1e-9
+                    )
+                    and (
+                        invariants.max_board_height_mm is None
+                        or h <= invariants.max_board_height_mm + 1e-9
+                    )
+                ),
+                message=(
+                    f"partition is {w}x{h} mm; explicit maximum is "
+                    f"{invariants.max_board_width_mm}x"
+                    f"{invariants.max_board_height_mm} mm"
+                ),
+            ),
+            CheckResult(
+                name="mechanical_zone_targets_complete",
+                ok=not missing_mounting_targets,
+                message=(
+                    "mounting references lack one-to-one physical zones: "
+                    f"{missing_mounting_targets}"
+                ),
+                affected_refs=missing_mounting_targets,
             ),
         ]
 
@@ -10294,6 +11539,17 @@ _LOCAL_SUPPORT_NEAR_MM = 35.0
 _PLACE_SPACING_MM = 10.0
 _PLACE_MARGIN_MM = 5.0
 _PLACEMENT_TARGET_WEIGHT = 2.0
+
+
+def _decoupling_near_mm(state: PipelineState) -> float:
+    """Return the explicit user limit, falling back to the profile default."""
+
+    return (
+        extract_requirement_invariants(
+            state.requirement_text
+        ).decoupling_max_distance_mm
+        or _DECOUPLE_NEAR_MM
+    )
 
 
 def _roles(state: PipelineState) -> dict[str, str]:
@@ -10691,6 +11947,99 @@ def _functional_anchor_target(
     return targets.get(anchor_ref) if anchor_ref is not None else None
 
 
+def _decoupling_pad_target(
+    state: PipelineState,
+    placements: dict[str, PcbPlacement],
+    ref: str,
+) -> tuple[tuple[float, float], float] | None:
+    """Return desired capacitor origin and current real power-pad distance."""
+
+    pinmap = state.artifact(PipelineStep.SCH_PINMAP)
+    current = placements.get(ref)
+    if not isinstance(pinmap, PinMapPlan) or current is None:
+        return None
+    footprint_ids = _footprints_of(state)
+    eligible_anchors = _functional_anchor_refs(state)
+    roles = _roles(state)
+    placement_targets = {
+        placed_ref: (placement.x, placement.y)
+        for placed_ref, placement in placements.items()
+    }
+    owner_ref = _functional_anchor_ref(
+        ref,
+        roles.get(ref, ""),
+        roles,
+        placement_targets,
+        connected_refs=_connected_refs_by_ref(state),
+        allow_connectors=True,
+        eligible_anchor_refs=eligible_anchors,
+    )
+
+    def offset(component_ref: str, number: str) -> tuple[float, float] | None:
+        placement = placements.get(component_ref)
+        pads = footprints.footprint_pads(
+            footprint_ids.get(component_ref, "")
+        ) or []
+        pad = next(
+            (item for item in pads if str(item.get("number")) == str(number)),
+            None,
+        )
+        if placement is None or pad is None:
+            return None
+        radians = math.radians(placement.rotation)
+        x = float(pad["x"])
+        y = float(pad["y"])
+        return (
+            x * math.cos(radians) - y * math.sin(radians),
+            x * math.sin(radians) + y * math.cos(radians),
+        )
+
+    candidates: list[tuple[float, tuple[float, float]]] = []
+    for net in pinmap.nets:
+        if (
+            net.kind.casefold() not in {"power", "supply"}
+            and _classify_net(net.name) != "power"
+        ):
+            continue
+        cap_pins = [pin for pin in net.pins if pin.ref == ref]
+        anchor_pins = [
+            pin
+            for pin in net.pins
+            if pin.ref != ref
+            and pin.ref in placements
+            and pin.ref in eligible_anchors
+            and (owner_ref is None or pin.ref == owner_ref)
+        ]
+        for cap_pin in cap_pins:
+            cap_offset = offset(ref, cap_pin.number)
+            if cap_offset is None:
+                continue
+            cap_position = (
+                current.x + cap_offset[0],
+                current.y + cap_offset[1],
+            )
+            for anchor_pin in anchor_pins:
+                anchor_offset = offset(anchor_pin.ref, anchor_pin.number)
+                if anchor_offset is None:
+                    continue
+                anchor_placement = placements[anchor_pin.ref]
+                anchor_position = (
+                    anchor_placement.x + anchor_offset[0],
+                    anchor_placement.y + anchor_offset[1],
+                )
+                candidates.append((
+                    math.dist(cap_position, anchor_position),
+                    (
+                        anchor_position[0] - cap_offset[0],
+                        anchor_position[1] - cap_offset[1],
+                    ),
+                ))
+    if not candidates:
+        return None
+    distance, desired = min(candidates, key=lambda item: item[0])
+    return desired, distance
+
+
 class LayoutCriticalStep(PipelineStepBase):
     """Place strongly-constrained parts: MCU central, its crystal/decoupling
     clustered next to it, connectors on the edge. Parts occupy distinct grid
@@ -10698,6 +12047,7 @@ class LayoutCriticalStep(PipelineStepBase):
     proximity/edge constraints hold."""
 
     step = PipelineStep.LAYOUT_CRITICAL
+    allow_artifact_first_design_repair = True
     knowledge_role = "layout"
     repair_is_deterministic = True
     repair_strategy_id = "functional_anchor_target_rebuild"
@@ -10731,7 +12081,8 @@ class LayoutCriticalStep(PipelineStepBase):
             _PLACE_SPACING_MM,
             max(
                 0.5,
-                _DECOUPLE_NEAR_MM / (math.sqrt(max(proximity_count, 1)) + 1.0),
+                _decoupling_near_mm(state)
+                / (math.sqrt(max(proximity_count, 1)) + 1.0),
             ),
         )
         cells = _grid_cells(w, h, spacing=target_spacing)
@@ -10845,6 +12196,10 @@ class LayoutCriticalStep(PipelineStepBase):
         def near_functional_anchor(ref: str) -> float:
             placement = by_ref[ref]
             role = roles[ref]
+            if _is_decoupling_role(role):
+                pad_target = _decoupling_pad_target(state, by_ref, ref)
+                if pad_target is not None:
+                    return pad_target[1]
             use_connectivity = (
                 _is_local_support_role(role)
                 or _is_decoupling_role(role)
@@ -10882,7 +12237,7 @@ class LayoutCriticalStep(PipelineStepBase):
         far_dec = [
             ref for ref, role in roles.items()
             if _is_decoupling_role(role) and ref in by_ref
-            and near_functional_anchor(ref) > _DECOUPLE_NEAR_MM
+            and near_functional_anchor(ref) > _decoupling_near_mm(state)
         ]
         far_memory = [
             ref for ref, role in roles.items()
@@ -10909,9 +12264,14 @@ class LayoutCriticalStep(PipelineStepBase):
         artifact: BaseModel,
         checks: list[CheckResult],
     ) -> tuple[BaseModel, bool]:
-        # Critical placement is a target plan rather than a materialized PCB.
-        # Rebuilding it from the current role/connectivity graph is bounded and
-        # safer than trying to move stale targets one at a time.
+        assert isinstance(artifact, PcbPlacementPlan)
+        if any(
+            not check.ok and check.name == "decoupling_near_mcu"
+            for check in checks
+        ):
+            return _repair_proximity_placements(state, artifact), False
+        # Other critical-placement failures normally indicate stale target
+        # ownership; rebuild those from the current connectivity graph.
         return self.propose(state, ctx, knowledge)
 
     def summarize(self, artifact: BaseModel) -> str:
@@ -10954,6 +12314,8 @@ def _rotated_bbox(
 
 def _role_group(role: str) -> str:
     text = role.lower()
+    if "mounting" in text and "hole" in text:
+        return "mounting"
     if "mcu" in text:
         return "digital"
     if "usb" in text:
@@ -11000,6 +12362,7 @@ def _resolved_zone_targets(
     targets: dict[str, tuple[float, float]] = {}
     ambiguities: dict[str, list[str]] = {}
     aliases = {
+        "mounting": ("mounting", "hole", "mechanical"),
         "digital": ("digital", "mcu"),
         "usb": ("usb",),
         "can": ("can",),
@@ -11010,7 +12373,24 @@ def _resolved_zone_targets(
         "connector": ("connector",),
         "power": ("power",),
     }
+    partition = bind_zone_targets(partition, roles)
+    zones = partition.zones
     for ref, role in roles.items():
+        explicitly_bound = [
+            zone
+            for zone in zones
+            if zone.target_ref.strip().casefold() == ref.strip().casefold()
+        ]
+        if len(explicitly_bound) == 1:
+            zone = explicitly_bound[0]
+            targets[ref] = (
+                (zone.x1 + zone.x2) / 2,
+                (zone.y1 + zone.y2) / 2,
+            )
+            continue
+        if len(explicitly_bound) > 1:
+            ambiguities[ref] = [zone.name for zone in explicitly_bound]
+            continue
         exact = [
             zone
             for zone in zones
@@ -11063,10 +12443,8 @@ def _placement_constraints(state: PipelineState):
             {},
             state.requirement_text,
         )
-    constraints = partition.placement_constraints
-    if constraints.constraint_digest:
-        return constraints
-    return compile_placement_constraints(partition, _roles(state), state.requirement_text)
+    bound = bind_zone_targets(partition, _roles(state))
+    return compile_placement_constraints(bound, _roles(state), state.requirement_text)
 
 
 def _exact_reference_zones(state: PipelineState) -> dict[str, BoardZone]:
@@ -11074,14 +12452,20 @@ def _exact_reference_zones(state: PipelineState) -> dict[str, BoardZone]:
     if not isinstance(partition, BoardPartition):
         return {}
     selected_refs = set(_roles(state))
+    explicitly_bound = {
+        zone.target_ref: zone
+        for zone in partition.zones
+        if zone.target_ref in selected_refs
+    }
     by_name: dict[str, list[BoardZone]] = {}
     for zone in partition.zones:
         by_name.setdefault(zone.name.strip().casefold(), []).append(zone)
-    return {
+    by_exact_name = {
         ref: matches[0]
         for ref in selected_refs
         if len(matches := by_name.get(ref.strip().casefold(), [])) == 1
     }
+    return {**by_exact_name, **explicitly_bound}
 
 
 def _prune_free_rectangles(
@@ -11152,6 +12536,7 @@ def _maxrect_pack(
     edge_refs: set[str] | None = None,
     fixed_target_refs: set[str] | None = None,
     allowed_regions: dict[str, tuple[float, float, float, float]] | None = None,
+    dependency: dict[str, str] | None = None,
 ) -> tuple[list[PcbPlacement], list[str]]:
     """Pack real footprint courtyards inside the fixed board outline."""
     targets = targets or {}
@@ -11159,6 +12544,7 @@ def _maxrect_pack(
     edge_refs = edge_refs or set()
     fixed_target_refs = fixed_target_refs or set()
     allowed_regions = allowed_regions or {}
+    dependency = dependency or {}
     edge = max(config.process_capability().min_board_edge_clearance, 0.5)
     available_pitch = math.sqrt(
         board_width * board_height / max(len(order), 1)
@@ -11173,7 +12559,7 @@ def _maxrect_pack(
     )]
     boxes = {ref: _placement_bbox(fps.get(ref, "")) for ref in order}
     order_index = {ref: index for index, ref in enumerate(order)}
-    packed_order = sorted(
+    ranked_order = sorted(
         order,
         key=lambda ref: (
             0 if ref in priority_refs else 1,
@@ -11196,6 +12582,31 @@ def _maxrect_pack(
             order_index[ref],
         ),
     )
+    # Size sorting alone can place a large dependent (for example an LDO bulk
+    # capacitor) before the IC it serves.  Its soft target then points at an
+    # anchor that has not been placed yet, and later local repair cannot recover
+    # once unrelated parts occupy the functional cluster.  Preserve the normal
+    # packing rank, but emit each dependency ancestor immediately before the
+    # first dependent that needs it.  The dependency graph is grounded in role
+    # semantics plus verified electrical connectivity; it is not reference- or
+    # board-specific.
+    packed_order: list[str] = []
+    emitted: set[str] = set()
+
+    def emit_with_anchor(ref: str, visiting: set[str]) -> None:
+        if ref in emitted:
+            return
+        if ref in visiting:
+            # Malformed/cyclic metadata must not make packing non-terminating.
+            return
+        anchor_ref = dependency.get(ref)
+        if anchor_ref in order and anchor_ref not in emitted:
+            emit_with_anchor(anchor_ref, {*visiting, ref})
+        emitted.add(ref)
+        packed_order.append(ref)
+
+    for ref in ranked_order:
+        emit_with_anchor(ref, set())
     placements: list[PcbPlacement] = []
     unplaced: list[str] = []
     diagonal = max(math.hypot(board_width, board_height), 1.0)
@@ -11613,7 +13024,7 @@ def _repair_proximity_placements(
         if _is_crystal_role(role):
             return _CRYSTAL_NEAR_MM
         if _is_decoupling_role(role):
-            return _DECOUPLE_NEAR_MM
+            return _decoupling_near_mm(state)
         if _is_close_memory_role(role):
             return 20.0
         if _is_local_support_role(role):
@@ -11642,7 +13053,16 @@ def _repair_proximity_placements(
             allow_connectors=use_connectivity,
             eligible_anchor_refs=eligible_anchor_refs,
         )
-        if anchor is None or math.dist((current.x, current.y), anchor) <= limit:
+        actual_distance = (
+            math.dist((current.x, current.y), anchor)
+            if anchor is not None
+            else math.inf
+        )
+        if _is_decoupling_role(role):
+            pad_target = _decoupling_pad_target(state, placements, ref)
+            if pad_target is not None:
+                anchor, actual_distance = pad_target
+        if anchor is None or actual_distance <= limit:
             continue
 
         candidates: list[tuple[tuple[float, float], PcbPlacement]] = []
@@ -11906,6 +13326,7 @@ class LayoutGeneralStep(PipelineStepBase):
     normalize rotation. Bottom-line: all parts placed, on-grid, legal orient."""
 
     step = PipelineStep.LAYOUT_GENERAL
+    allow_artifact_first_design_repair = True
     repair_is_deterministic = True
     knowledge_role = "layout"
     repair_strategy_id = "functional_anchor_local_search"
@@ -11991,19 +13412,67 @@ class LayoutGeneralStep(PipelineStepBase):
             for ref, role in roles.items()
             if _is_mounting_hole_role(role)
         ]
-        corner_margin = max(_EDGE_MARGIN_MM / 2, 3.0)
+        # Mounting holes are mechanical corner anchors, not interface
+        # connectors.  Reusing the connector edge margin here moved a 40x30
+        # board's holes to 6 mm from each edge and contradicted exact corner
+        # zones.  Exact hard regions own the target when present; 3 mm is only
+        # the safe fallback for requirements without explicit mounting zones.
+        corner_margin = 3.0
         corners = (
             (corner_margin, corner_margin),
             (w - corner_margin, corner_margin),
             (corner_margin, h - corner_margin),
             (w - corner_margin, h - corner_margin),
         )
-        for ref, target in zip(mounting_refs, corners, strict=False):
+        mounting_targets: dict[str, tuple[float, float]] = {}
+        for ref, fallback in zip(mounting_refs, corners, strict=False):
+            region = allowed_regions.get(ref)
+            target = (
+                ((region[0] + region[2]) / 2, (region[1] + region[3]) / 2)
+                if region is not None
+                else fallback
+            )
+            mounting_targets[ref] = target
             targets[ref] = target
-        fixed_mounting_placements = [
-            PcbPlacement(ref=ref, x=target[0], y=target[1])
-            for ref, target in zip(mounting_refs, corners, strict=False)
-        ]
+        # The shape-packer seeds mounting holes before packing the electrical
+        # parts.  Clamp those seeds against the *real* footprint courtyard;
+        # otherwise an origin can be inside its corner zone while the physical
+        # footprint still crosses Edge.Cuts.  Intersecting both ranges keeps
+        # the architectural zone and the deterministic fabrication gate true.
+        board_edge = max(
+            config.process_capability().min_board_edge_clearance,
+            0.5,
+        )
+        fixed_mounting_placements: list[PcbPlacement] = []
+        for ref, target in mounting_targets.items():
+            local_shape = _placement_shape(fps.get(ref, ""))
+            min_local_x = min(rectangle[0] for rectangle in local_shape)
+            min_local_y = min(rectangle[1] for rectangle in local_shape)
+            max_local_x = max(rectangle[2] for rectangle in local_shape)
+            max_local_y = max(rectangle[3] for rectangle in local_shape)
+            min_x = board_edge - min_local_x
+            min_y = board_edge - min_local_y
+            max_x = w - board_edge - max_local_x
+            max_y = h - board_edge - max_local_y
+            region = allowed_regions.get(ref)
+            if region is not None:
+                min_x = max(min_x, region[0])
+                min_y = max(min_y, region[1])
+                max_x = min(max_x, region[2])
+                max_y = min(max_y, region[3])
+            if min_x > max_x or min_y > max_y:
+                # An impossible zone/footprint combination must remain visible
+                # to the normal pack/check/repair path; never fabricate a
+                # supposedly fixed but illegal placement.
+                continue
+            legal_target = (
+                min(max(target[0], min_x), max_x),
+                min(max(target[1], min_y), max_y),
+            )
+            targets[ref] = legal_target
+            fixed_mounting_placements.append(
+                PcbPlacement(ref=ref, x=legal_target[0], y=legal_target[1])
+            )
         for ref, role in roles.items():
             if not _is_proximity_sensitive_role(role):
                 continue
@@ -12024,6 +13493,34 @@ class LayoutGeneralStep(PipelineStepBase):
             )
             if anchor is not None:
                 targets[ref] = anchor
+
+        def functional_dependencies(
+            target_map: dict[str, tuple[float, float]],
+        ) -> dict[str, str]:
+            result: dict[str, str] = {}
+            for dependent_ref, dependent_role in roles.items():
+                if not _is_proximity_sensitive_role(dependent_role):
+                    continue
+                use_connectivity = (
+                    _is_local_support_role(dependent_role)
+                    or _is_decoupling_role(dependent_role)
+                )
+                anchor_ref = _functional_anchor_ref(
+                    dependent_ref,
+                    dependent_role,
+                    roles,
+                    target_map,
+                    connected_refs=(
+                        connected_refs if use_connectivity else None
+                    ),
+                    allow_connectors=use_connectivity,
+                    eligible_anchor_refs=eligible_anchor_refs,
+                )
+                if anchor_ref is not None and anchor_ref != dependent_ref:
+                    result[dependent_ref] = anchor_ref
+            return result
+
+        dependency = functional_dependencies(targets)
         placements, _unplaced = _maxrect_pack(
             order,
             fps,
@@ -12035,6 +13532,7 @@ class LayoutGeneralStep(PipelineStepBase):
             edge_refs,
             set(mounting_refs),
             allowed_regions,
+            dependency,
         )
         # Critical-plan coordinates are targets, not the final packed
         # coordinates.  Refine dependent targets from the first pass so a
@@ -12066,6 +13564,7 @@ class LayoutGeneralStep(PipelineStepBase):
             )
             if anchor is not None:
                 refined_targets[ref] = anchor
+        dependency = functional_dependencies(refined_targets)
         placements, _unplaced = _maxrect_pack(
             order,
             fps,
@@ -12077,8 +13576,20 @@ class LayoutGeneralStep(PipelineStepBase):
             edge_refs,
             set(mounting_refs),
             allowed_regions,
+            dependency,
         )
-        if _unplaced:
+        packed_plan = PcbPlacementPlan(
+            board_width=w,
+            board_height=h,
+            placements=placements,
+            rationale="dependency-ordered MaxRects placement candidate",
+        )
+        strict_packing_errors = sum(
+            1
+            for check in self.check(state, packed_plan)
+            if not check.ok and check.severity == Severity.ERROR
+        )
+        if _unplaced or strict_packing_errors:
             diagonal = max(math.hypot(w, h), 1.0)
             shape_areas = {
                 ref: sum(
@@ -12088,27 +13599,6 @@ class LayoutGeneralStep(PipelineStepBase):
                 )
                 for ref in order
             }
-            dependency: dict[str, str] = {}
-            for ref, role in roles.items():
-                if not _is_proximity_sensitive_role(role):
-                    continue
-                use_connectivity = (
-                    _is_local_support_role(role)
-                    or _is_decoupling_role(role)
-                )
-                anchor_ref = _functional_anchor_ref(
-                    ref,
-                    role,
-                    roles,
-                    refined_targets,
-                    connected_refs=(
-                        connected_refs if use_connectivity else None
-                    ),
-                    allow_connectors=use_connectivity,
-                    eligible_anchor_refs=eligible_anchor_refs,
-                )
-                if anchor_ref is not None and anchor_ref != ref:
-                    dependency[ref] = anchor_ref
             children: dict[str, list[str]] = {}
             for ref, anchor_ref in dependency.items():
                 children.setdefault(anchor_ref, []).append(ref)
@@ -12152,7 +13642,7 @@ class LayoutGeneralStep(PipelineStepBase):
                 emit_group(ref)
             shape_candidates: list[
                 tuple[
-                    tuple[int, float],
+                    tuple[int, int, float],
                     list[PcbPlacement],
                     list[str],
                 ]
@@ -12182,9 +13672,21 @@ class LayoutGeneralStep(PipelineStepBase):
                         allowed_regions=allowed_regions,
                     )
                 )
+                candidate_plan = PcbPlacementPlan(
+                    board_width=w,
+                    board_height=h,
+                    placements=candidate_placements,
+                    rationale="dependency-aware courtyard shape candidate",
+                )
+                candidate_error_count = sum(
+                    1
+                    for check in self.check(state, candidate_plan)
+                    if not check.ok and check.severity == Severity.ERROR
+                )
                 shape_candidates.append((
                     (
                         len(candidate_unplaced),
+                        candidate_error_count,
                         _shape_target_error(
                             candidate_placements,
                             refined_targets,
@@ -12194,8 +13696,6 @@ class LayoutGeneralStep(PipelineStepBase):
                     candidate_placements,
                     candidate_unplaced,
                 ))
-                if not candidate_unplaced:
-                    break
             _, placements, _unplaced = min(
                 shape_candidates,
                 key=lambda candidate: candidate[0],
@@ -12333,7 +13833,18 @@ class LayoutGeneralStep(PipelineStepBase):
             # fragmented interface cluster, so rerun the bounded deterministic
             # dependency packer before proximity repair.
             return self.propose(state, ctx, knowledge)
-        return _repair_proximity_placements(state, artifact), False
+        repaired = _repair_proximity_placements(state, artifact)
+        if any(
+            not check.ok and check.severity == Severity.ERROR
+            for check in self.check(state, repaired)
+        ):
+            # A single-body move cannot recover a functional cluster when
+            # already placed neighbours occupy every legal position around the
+            # verified anchor.  Repack from the same layout checkpoint with the
+            # dependency-aware order; this preserves upstream electrical work
+            # while allowing the cluster to reserve real courtyard space.
+            return self.propose(state, ctx, knowledge)
+        return repaired, False
 
     def summarize(self, artifact: BaseModel) -> str:
         assert isinstance(artifact, PcbPlacementPlan)
@@ -12414,6 +13925,11 @@ class LayoutWriteStep(PipelineStepBase):
 
         out_dir = Path(ctx.out_dir) if ctx.out_dir else Path(tempfile.mkdtemp(prefix="rnp_pcb_"))
         out_dir.mkdir(parents=True, exist_ok=True)
+        _register_project_library_bindings(
+            out_dir,
+            (footprint for footprint in fps.values() if footprint),
+            kind="fp",
+        )
         pcb_path = out_dir / f"{state.project_name}.kicad_pcb"
         board = PcbBoard.blank()
         board.set_board_outline(0.0, 0.0, w, h)
@@ -12543,6 +14059,7 @@ def _layer_count_mentions(text: str) -> list[tuple[int, int, int]]:
     chinese_counts = {
         "二层": 2,
         "两层": 2,
+        "双层": 2,
         "四层": 4,
         "六层": 6,
         "八层": 8,
@@ -12573,18 +14090,38 @@ def _layer_mention_is_preference(text: str, start: int, end: int) -> bool:
 
 
 def _explicit_requested_layer_count(requirement: str) -> int | None:
-    text = requirement.lower()
+    source = _original_requirement(requirement)
+    text = "\n".join(
+        line
+        for line in source.splitlines()
+        if not line.lstrip().startswith("DECISION:")
+    ).lower()
     candidates = [
         (start, count)
         for start, end, count in _layer_count_mentions(text)
         if not _model_mention_is_negated(text, start)
         and not _layer_mention_is_preference(text, start, end)
     ]
-    return max(candidates)[1] if candidates else None
+    if candidates:
+        return max(candidates)[1]
+    decision_text = "\n".join(
+        line
+        for line in source.splitlines()
+        if line.lstrip().startswith("DECISION: layer_count=")
+    ).lower()
+    decision_candidates = [
+        (start, count)
+        for start, _end, count in _layer_count_mentions(decision_text)
+    ]
+    return max(decision_candidates)[1] if decision_candidates else None
 
 
 def _preferred_layer_count(requirement: str) -> int | None:
-    text = requirement.lower()
+    text = "\n".join(
+        line
+        for line in _original_requirement(requirement).splitlines()
+        if not line.lstrip().startswith("DECISION:")
+    ).lower()
     candidates = [
         (start, count)
         for start, end, count in _layer_count_mentions(text)
@@ -12797,6 +14334,74 @@ class RoutePlanStep(PipelineStepBase):
         return f"{artifact.layers}-layer, {len(artifact.net_classes)} net classes"
 
 
+def _normalize_plane_plan(state: PipelineState, plan: PlanePlan) -> PlanePlan:
+    """Constrain an LLM plane proposal to nets and layers that really exist."""
+
+    pinmap = state.artifact(PipelineStep.SCH_PINMAP)
+    route_plan = state.artifact(PipelineStep.ROUTE_PLAN)
+    if not isinstance(pinmap, PinMapPlan):
+        return plan
+    layer_count = route_plan.layers if isinstance(route_plan, RoutePlan) else 2
+    actual = {
+        net.name.casefold(): net
+        for net in pinmap.nets
+        if len(net.pins) >= 2
+    }
+    ground = next(
+        (
+            net.name
+            for net in pinmap.nets
+            if len(net.pins) >= 2
+            and (
+                net.kind.casefold() in {"ground", "gnd"}
+                or net.name.upper() in {"GND", "AGND", "DGND", "PGND"}
+            )
+        ),
+        plan.ground_net,
+    )
+    invariants = extract_requirement_invariants(state.requirement_text)
+    ground_layer = invariants.ground_plane_layer or "B.Cu"
+    planes = [f"{ground_layer}:{ground}"]
+    for declaration in plan.planes:
+        raw_layer, separator, raw_net = str(declaration).partition(":")
+        if not separator:
+            continue
+        net = actual.get(raw_net.strip().casefold())
+        layer = raw_layer.strip()
+        if net is None or not re.fullmatch(r"(?:F|B|In\d+)\.Cu", layer):
+            continue
+        if layer.startswith("In"):
+            inner = int(re.search(r"\d+", layer).group(0))
+            if inner > max(0, layer_count - 2):
+                continue
+        entry = f"{layer}:{net.name}"
+        if entry not in planes:
+            planes.append(entry)
+    critical = [
+        name
+        for name in dict.fromkeys(plan.critical_nets)
+        if name.casefold() in actual
+    ]
+    for net in pinmap.nets:
+        if (
+            len(net.pins) >= 2
+            and net.kind.casefold() in {"clock", "power", "supply"}
+            and net.name not in critical
+        ):
+            critical.append(net.name)
+    return plan.model_copy(
+        update={
+            "ground_net": ground,
+            "planes": planes,
+            "critical_nets": critical,
+            "rationale": (
+                "Plane declarations normalized against the physical pin-map, "
+                f"{layer_count}-layer stackup, and frozen requirement invariants."
+            ),
+        }
+    )
+
+
 class RoutePlanesStep(PipelineStepBase):
     """Power/ground planes + critical-net priority. Bottom-line: a ground plane
     exists and the critical nets are known."""
@@ -12806,6 +14411,14 @@ class RoutePlanesStep(PipelineStepBase):
 
     def knowledge_query(self, state: PipelineState) -> str | None:
         return "power and ground planes, return paths, critical net routing first"
+
+    def prepare_resumed_artifact(
+        self,
+        state: PipelineState,
+        artifact: BaseModel,
+    ) -> BaseModel:
+        assert isinstance(artifact, PlanePlan)
+        return _normalize_plane_plan(state, artifact)
 
     def propose(
         self, state: PipelineState, ctx: PipelineContext, knowledge: str
@@ -12827,14 +14440,47 @@ class RoutePlanesStep(PipelineStepBase):
             "ground_net, planes[] ('Layer:NET'), critical_nets[], rationale."
         )
         user = f"Ground net: {ground}\n\nKnowledge:\n{knowledge}"
-        return propose_structured(ctx, model=PlanePlan, system=system, user=user, fallback=fallback)
+        plan, used = propose_structured(
+            ctx,
+            model=PlanePlan,
+            system=system,
+            user=user,
+            fallback=fallback,
+        )
+        assert isinstance(plan, PlanePlan)
+        return _normalize_plane_plan(state, plan), used
 
     def check(self, state: PipelineState, artifact: BaseModel) -> list[CheckResult]:
         assert isinstance(artifact, PlanePlan)
-        has_gnd_plane = any(artifact.ground_net in p for p in artifact.planes)
+        pinmap = state.artifact(PipelineStep.SCH_PINMAP)
+        actual_nets = {
+            net.name.casefold()
+            for net in pinmap.nets
+            if isinstance(pinmap, PinMapPlan) and len(net.pins) >= 2
+        } if isinstance(pinmap, PinMapPlan) else set()
+        unknown_critical = sorted(
+            name for name in artifact.critical_nets
+            if name.casefold() not in actual_nets
+        )
+        invariants = extract_requirement_invariants(state.requirement_text)
+        required_layer = invariants.ground_plane_layer
+        has_gnd_plane = any(
+            declaration.partition(":")[2].casefold()
+            == artifact.ground_net.casefold()
+            and (
+                not required_layer
+                or declaration.partition(":")[0] == required_layer
+            )
+            for declaration in artifact.planes
+        )
         return [
             CheckResult(name="ground_plane_present", ok=has_gnd_plane,
                         message=f"no ground plane for {artifact.ground_net!r}"),
+            CheckResult(
+                name="critical_nets_grounded_in_pinmap",
+                ok=not unknown_critical,
+                message=f"plane plan contains nonexistent nets: {unknown_critical}",
+            ),
         ]
 
     def summarize(self, artifact: BaseModel) -> str:
@@ -12854,7 +14500,7 @@ class _DrcEndpoint:
     x: float
     y: float
     net: str
-    layer: str
+    layer: str | None
     ref: str | None = None
     pad_number: str | None = None
 
@@ -12870,11 +14516,15 @@ class _DrcSnapshot:
     findings: tuple[str, ...]
     non_connectivity_errors: tuple[str, ...]
     gaps: tuple[_DrcGap, ...]
+    reported_unconnected: int = 0
     parse_error: bool = False
 
     @property
     def unconnected(self) -> int:
-        return len(self.gaps)
+        # KiCad omits a concrete copper layer for through-hole pads. Such a
+        # finding is still an authoritative open connection even when it
+        # cannot be converted into an automatic repair candidate.
+        return max(self.reported_unconnected, len(self.gaps))
 
 
 def _routing_seed(
@@ -12900,11 +14550,7 @@ def _endpoint_from_drc_item(item: Any) -> _DrcEndpoint | None:
     pos = item.get("pos")
     net_match = _DRC_NET_RE.search(description)
     layer_match = _DRC_COPPER_LAYER_RE.search(description)
-    if (
-        not isinstance(pos, dict)
-        or net_match is None
-        or layer_match is None
-    ):
+    if not isinstance(pos, dict) or net_match is None:
         return None
     try:
         pad_match = _DRC_PAD_REF_RE.search(description)
@@ -12912,7 +14558,7 @@ def _endpoint_from_drc_item(item: Any) -> _DrcEndpoint | None:
             x=float(pos["x"]),
             y=float(pos["y"]),
             net=net_match.group(1),
-            layer=layer_match.group(1),
+            layer=layer_match.group(1) if layer_match is not None else None,
             ref=pad_match.group(2) if pad_match is not None else None,
             pad_number=pad_match.group(1) if pad_match is not None else None,
         )
@@ -12935,6 +14581,7 @@ def _read_drc_snapshot(report_path: Path) -> _DrcSnapshot:
     findings: list[str] = []
     non_connectivity: list[str] = []
     gaps: list[_DrcGap] = []
+    reported_unconnected = 0
     for key in ("violations", "schematic_parity", "unconnected_items"):
         for finding in data.get(key, []):
             if (
@@ -12951,22 +14598,33 @@ def _read_drc_snapshot(report_path: Path) -> _DrcSnapshot:
             if key != "unconnected_items":
                 non_connectivity.append(message)
                 continue
+            reported_unconnected += 1
             items = finding.get("items", [])
             if not isinstance(items, list) or len(items) != 2:
                 continue
             left = _endpoint_from_drc_item(items[0])
             right = _endpoint_from_drc_item(items[1])
-            if (
-                left is not None
-                and right is not None
-                and left.net == right.net
-                and left.layer == right.layer
-            ):
+            if left is None or right is None or left.net != right.net:
+                continue
+            # A PTH pad is present on every copper layer, and KiCad commonly
+            # omits ``on <layer>`` from its DRC item. Inherit the explicit
+            # layer from the other endpoint; use F.Cu only when both endpoints
+            # are through-hole. Two explicit different SMD layers need a via
+            # and are not candidates for this simple local repairer.
+            if left.layer is None and right.layer is not None:
+                left = replace(left, layer=right.layer)
+            elif right.layer is None and left.layer is not None:
+                right = replace(right, layer=left.layer)
+            elif left.layer is None and right.layer is None:
+                left = replace(left, layer="F.Cu")
+                right = replace(right, layer="F.Cu")
+            if left.layer == right.layer:
                 gaps.append(_DrcGap(left=left, right=right))
     return _DrcSnapshot(
         findings=tuple(findings),
         non_connectivity_errors=tuple(non_connectivity),
         gaps=tuple(gaps),
+        reported_unconnected=reported_unconnected,
     )
 
 
@@ -13055,6 +14713,73 @@ def _candidate_copper_paths(
             ]
         )
     return paths
+
+
+def _connection_metrics_after_copper_repair(
+    artifact: RouteResult,
+    remaining: int,
+    *,
+    connectivity_changed: bool,
+) -> tuple[int, int, str]:
+    """Carry authoritative connection telemetry across copper-only repairs.
+
+    Tracks, vias, and zones do not change the logical net topology, so the
+    pre-route KiCad connectivity count remains the valid denominator.  When a
+    DRC-monotonic repair closes a real gap, combine that frozen denominator
+    with KiCad DRC's post-repair remaining count.  If no gap was closed, keep
+    the original Freerouting metrics byte-for-byte instead of degrading them
+    to an unknown value merely because a planned plane was materialized.
+    """
+
+    if not connectivity_changed:
+        return (
+            artifact.routed_connections,
+            artifact.total_connections,
+            artifact.metric_basis,
+        )
+
+    total = artifact.total_connections
+    if total < 0:
+        return -1, -1, "kicad_drc_unconnected_after_repair_without_baseline"
+    if remaining < 0 or remaining > total:
+        return (
+            -1,
+            total,
+            "kicad_connectivity_total+kicad_drc_unconnected_inconsistent",
+        )
+    return (
+        total - remaining,
+        total,
+        "kicad_connectivity_total+kicad_drc_unconnected_after_repair",
+    )
+
+
+def _synchronize_route_result_with_drc(
+    artifact: RouteResult,
+    snapshot: _DrcSnapshot,
+) -> RouteResult:
+    """Make authoritative KiCad DRC connectivity the route-stage truth source."""
+
+    if snapshot.parse_error:
+        return artifact
+    remaining = snapshot.unconnected
+    total = artifact.total_connections
+    routed_connections = total - remaining if total >= remaining >= 0 else -1
+    changed = remaining != artifact.unconnected
+    return artifact.model_copy(
+        update={
+            "routed_nets": artifact.total_nets if remaining == 0 else 0,
+            "routed_connections": routed_connections,
+            "metric_basis": "kicad_cli_drc_authoritative",
+            "unconnected": remaining,
+            "note": (
+                f"{artifact.note}; authoritative KiCad DRC corrected "
+                f"unconnected telemetry {artifact.unconnected}->{remaining}"
+                if changed
+                else artifact.note
+            ),
+        }
+    )
 
 
 def _repair_drc_connectivity_gaps(
@@ -13157,14 +14882,23 @@ def _repair_drc_connectivity_gaps(
 
         backup_path.unlink(missing_ok=True)
         remaining = baseline.unconnected
+        (
+            routed_connections,
+            total_connections,
+            metric_basis,
+        ) = _connection_metrics_after_copper_repair(
+            artifact,
+            remaining,
+            connectivity_changed=True,
+        )
         return artifact.model_copy(
             update={
                 "routed_nets": (
                     artifact.total_nets if remaining == 0 else artifact.routed_nets
                 ),
-                "routed_connections": -1,
-                "total_connections": -1,
-                "metric_basis": "kicad_drc_unconnected_after_repair",
+                "routed_connections": routed_connections,
+                "total_connections": total_connections,
+                "metric_basis": metric_basis,
                 "routed_tracks": artifact.routed_tracks + added_tracks,
                 "unconnected": remaining,
                 "note": (
@@ -13335,7 +15069,7 @@ def _repair_power_plane_gaps(
     from ratsnestpro.eda import routing
 
     write = state.artifact(PipelineStep.LAYOUT_WRITE)
-    if not isinstance(write, PcbWriteResult) or artifact.unconnected <= 0:
+    if not isinstance(write, PcbWriteResult) or artifact.unconnected < 0:
         return artifact
     pcb_path = Path(write.pcb_path)
     cli = kicad_cli_available()
@@ -13363,8 +15097,15 @@ def _repair_power_plane_gaps(
             default=cap.min_clearance,
         ),
     )
+    explicit_track_width = (
+        extract_requirement_invariants(
+            state.requirement_text
+        ).minimum_track_width_mm
+        or 0.0
+    )
     track_width = max(
         cap.min_track_width,
+        explicit_track_width,
         min(
             (net_class.width for net_class in net_classes),
             default=cap.min_track_width,
@@ -13424,13 +15165,25 @@ def _repair_power_plane_gaps(
                     payload = {}
         remaining = int(payload.get("unconnected", -1))
         closed = int(payload.get("closed_gaps", 0))
+        added_zones = int(payload.get("added_zones", 0))
         if (
             process.returncode == 0
             and payload.get("ok")
-            and closed > 0
-            and 0 <= remaining < artifact.unconnected
+            and (added_zones > 0 or closed > 0)
+            and remaining >= 0
         ):
             backup_path.unlink(missing_ok=True)
+            connectivity_changed = remaining != artifact.unconnected
+            effective_remaining = remaining
+            (
+                routed_connections,
+                total_connections,
+                metric_basis,
+            ) = _connection_metrics_after_copper_repair(
+                artifact,
+                effective_remaining,
+                connectivity_changed=connectivity_changed,
+            )
             tracks = max(
                 artifact.routed_tracks,
                 int(payload.get("routed_tracks", artifact.routed_tracks)),
@@ -13439,17 +15192,17 @@ def _repair_power_plane_gaps(
                 update={
                     "routed_nets": (
                         artifact.total_nets
-                        if remaining == 0
+                        if effective_remaining == 0
                         else artifact.routed_nets
                     ),
-                    "routed_connections": -1,
-                    "total_connections": -1,
-                    "metric_basis": "kicad_drc_unconnected_after_repair",
+                    "routed_connections": routed_connections,
+                    "total_connections": total_connections,
+                    "metric_basis": metric_basis,
                     "routed_tracks": tracks,
-                    "unconnected": remaining,
+                    "unconnected": effective_remaining,
                     "note": (
                         f"{artifact.note}; AHE materialized "
-                        f"{payload.get('added_zones', 0)} planned copper "
+                        f"{added_zones} planned copper "
                         f"plane(s) and closed {closed} rail gap(s) with "
                         f"{payload.get('added_vias', 0)} DRC-verified "
                         f"stitching via(s); {remaining} remain"
@@ -13839,6 +15592,64 @@ def _route_completion_metrics(
     return routed_nets, routed_connections, total_connections, basis
 
 
+def _physical_plane_mismatches(
+    state: PipelineState,
+    layer_count: int,
+) -> list[str]:
+    """Return planned plane assignments absent from the real KiCad board."""
+
+    from ratsnestpro.eda.vendor.pcb import PcbBoard
+
+    write = state.artifact(PipelineStep.LAYOUT_WRITE)
+    assignments = _resolved_plane_assignments(state, layer_count)
+    if not isinstance(write, PcbWriteResult) or not assignments:
+        return [f"{item['layer']}:{item['net']}" for item in assignments]
+    pcb_path = Path(write.pcb_path)
+    if not pcb_path.is_file():
+        return [f"{item['layer']}:{item['net']}" for item in assignments]
+    try:
+        zones = PcbBoard.load(pcb_path).list_zones()
+    except Exception:  # noqa: BLE001 - an unreadable board cannot prove release
+        return [f"{item['layer']}:{item['net']}" for item in assignments]
+    physical = {
+        (str(zone.get("layer", "")), str(zone.get("net", "")).casefold())
+        for zone in zones
+    }
+    return [
+        f"{item['layer']}:{item['net']}"
+        for item in assignments
+        if (item["layer"], item["net"].casefold()) not in physical
+    ]
+
+
+def _routing_physical_invariant_blockers(state: PipelineState) -> list[str]:
+    """Audit routing-owned invariants on the board that will be released."""
+
+    from ratsnestpro.eda.vendor.pcb import PcbBoard
+
+    write = state.artifact(PipelineStep.LAYOUT_WRITE)
+    selection = state.artifact(PipelineStep.SELECTION)
+    if not isinstance(write, PcbWriteResult) or not Path(write.pcb_path).is_file():
+        return ["final routed PCB is unavailable"]
+    try:
+        findings = audit_pcb_invariants(
+            extract_requirement_invariants(state.requirement_text),
+            PcbBoard.load(Path(write.pcb_path)),
+            selection.parts if isinstance(selection, SelectionPlan) else [],
+        )
+    except Exception as exc:  # noqa: BLE001 - an unreadable board is blocking
+        return [f"physical PCB audit failed: {type(exc).__name__}: {exc}"]
+    owned = {
+        "copper_layer_count",
+        "minimum_track_width",
+    }
+    return [
+        f"{finding.invariant_id}: {finding.message}"
+        for finding in findings
+        if finding.invariant_id in owned
+    ]
+
+
 class RouteSignalsStep(PipelineStepBase):
     """Route remaining signals with Freerouting.
 
@@ -13847,6 +15658,7 @@ class RouteSignalsStep(PipelineStepBase):
     """
 
     step = PipelineStep.ROUTE_SIGNALS
+    allow_artifact_first_design_repair = True
     repair_is_deterministic = True
     knowledge_role = "routing"
     repair_strategy_id = "route_plane_stitch_and_local_search_v2"
@@ -13880,14 +15692,26 @@ class RouteSignalsStep(PipelineStepBase):
             route_plan.net_classes if isinstance(route_plan, RoutePlan) else []
         )
         cap = config.process_capability()
+        explicit_track_width = (
+            extract_requirement_invariants(
+                state.requirement_text
+            ).minimum_track_width_mm
+            or 0.0
+        )
         route_rules = {
             "clearance_mm": min(
                 (net_class.clearance for net_class in net_classes),
                 default=cap.min_clearance,
             ),
-            "track_width_mm": min(
-                (net_class.width for net_class in net_classes),
-                default=cap.min_track_width,
+            # The current Freerouting adapter accepts one global width.  Use
+            # the strictest explicit user minimum so a power-net contract can
+            # never be silently weakened by the signal-class minimum.
+            "track_width_mm": max(
+                explicit_track_width,
+                min(
+                    (net_class.width for net_class in net_classes),
+                    default=cap.min_track_width,
+                ),
             ),
             "via_diameter_mm": min(
                 (net_class.via_diameter for net_class in net_classes),
@@ -14016,7 +15840,7 @@ class RouteSignalsStep(PipelineStepBase):
                 outcome = candidate
         adaptive_rules = {
             "clearance_mm": cap.min_clearance,
-            "track_width_mm": cap.min_track_width,
+            "track_width_mm": max(cap.min_track_width, explicit_track_width),
             "via_diameter_mm": cap.min_via_diameter,
             "via_drill_mm": cap.min_via_drill,
         }
@@ -14104,7 +15928,7 @@ class RouteSignalsStep(PipelineStepBase):
             total_connections,
             metric_basis,
         ) = _route_completion_metrics(outcome)
-        return RouteResult(
+        result = RouteResult(
             method=outcome.method,
             required=ctx.require_freerouting,
             layers=outcome.layers,
@@ -14124,7 +15948,22 @@ class RouteSignalsStep(PipelineStepBase):
                 if adaptive_rules_used
                 else outcome.note
             ),
-        ), False
+        )
+        # A plane is a required physical PCB object, not merely a routing
+        # recovery trick.  Materialize it even when Freerouting already closed
+        # every ratsnest connection.
+        result = _repair_power_plane_gaps(state, ctx, result)
+        cli = kicad_cli_available()
+        if cli:
+            result = _synchronize_route_result_with_drc(
+                result,
+                _run_kicad_drc_snapshot(
+                    cli,
+                    pcb_path,
+                    pcb_path.with_suffix(".route-final.drc.json"),
+                ),
+            )
+        return result, False
 
     def check(self, state: PipelineState, artifact: BaseModel) -> list[CheckResult]:
         assert isinstance(artifact, RouteResult)
@@ -14136,6 +15975,11 @@ class RouteSignalsStep(PipelineStepBase):
             and bool(artifact.dsn_path)
             and bool(artifact.ses_path)
         )
+        missing_planes = _physical_plane_mismatches(state, artifact.layers)
+        routing_invariant_blockers = _routing_physical_invariant_blockers(state)
+        explicit_layers = extract_requirement_invariants(
+            state.requirement_text
+        ).copper_layer_count
         return [
             CheckResult(
                 name="signals_routed",
@@ -14148,6 +15992,27 @@ class RouteSignalsStep(PipelineStepBase):
                         f"unconnected={artifact.unconnected}, "
                         f"basis={artifact.metric_basis}; {artifact.note}",
             ),
+            CheckResult(
+                name="ground_plane_materialized",
+                ok=not missing_planes,
+                message=f"planned physical copper zones are missing: {missing_planes}",
+            ),
+            CheckResult(
+                name="explicit_layer_count_preserved",
+                ok=explicit_layers is None or artifact.layers == explicit_layers,
+                message=(
+                    f"routed PCB uses {artifact.layers} layers; explicit "
+                    f"requirement is {explicit_layers}"
+                ),
+            ),
+            CheckResult(
+                name="routing_physical_invariants",
+                ok=not routing_invariant_blockers,
+                message=(
+                    "final routed PCB violates routing-owned requirements: "
+                    f"{routing_invariant_blockers}"
+                ),
+            ),
         ]
 
     def repair(
@@ -14159,11 +16024,20 @@ class RouteSignalsStep(PipelineStepBase):
         checks: list[CheckResult],
     ) -> tuple[BaseModel, bool]:
         assert isinstance(artifact, RouteResult)
+        if any(
+            not check.ok
+            and check.name in {
+                "explicit_layer_count_preserved",
+                "routing_physical_invariants",
+            }
+            for check in checks
+        ):
+            return self.propose(state, ctx, knowledge)
         repaired = _repair_drc_connectivity_gaps(state, ctx, artifact)
         if repaired.unconnected < artifact.unconnected:
             return repaired, False
         repaired = _repair_power_plane_gaps(state, ctx, artifact)
-        if repaired.unconnected < artifact.unconnected:
+        if repaired != artifact:
             return repaired, False
         return (
             _repair_route_endpoint_placement(
@@ -14185,7 +16059,18 @@ class RouteSignalsStep(PipelineStepBase):
         write = state.artifact(PipelineStep.LAYOUT_WRITE)
         return (
             isinstance(artifact, RouteResult)
-            and artifact.unconnected > 0
+            and (
+                artifact.unconnected > 0
+                or any(
+                    not check.ok
+                    and check.name in {
+                        "ground_plane_materialized",
+                        "explicit_layer_count_preserved",
+                        "routing_physical_invariants",
+                    }
+                    for check in checks
+                )
+            )
             and isinstance(write, PcbWriteResult)
             and Path(write.pcb_path).is_file()
             and bool(kicad_cli_available())
@@ -14267,6 +16152,74 @@ class RouteFabStep(PipelineStepBase):
         return f"{len(artifact.violations)} fab violations"
 
 
+def _kicad_error_repair_plans(report_path: Path) -> list[EntityRepairPlan]:
+    """Return evidence-complete repair plans for error-severity findings.
+
+    KiCad reports warnings and errors in the same JSON document.  Entity repair
+    is permitted only for release-blocking errors with concrete targets; warning
+    disposition is governed separately by the signed warning contract.
+    """
+
+    if not report_path.is_file():
+        return []
+    try:
+        raw = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw, dict):
+        return []
+    sheet_violations = [
+        finding
+        for sheet in raw.get("sheets", [])
+        if isinstance(sheet, dict)
+        for finding in sheet.get("violations", [])
+        if isinstance(finding, dict)
+    ] if isinstance(raw.get("sheets", []), list) else []
+    filtered: dict[str, list[dict[str, Any]]] = {}
+    for section in ("violations", "schematic_parity", "unconnected_items"):
+        findings = raw.get(section, [])
+        if not isinstance(findings, list):
+            continue
+        filtered[section] = [
+            finding
+            for finding in findings
+            if isinstance(finding, dict)
+            and str(finding.get("severity", "error")).casefold() == "error"
+        ]
+    filtered.setdefault("violations", []).extend(
+        finding
+        for finding in sheet_violations
+        if str(finding.get("severity", "error")).casefold() == "error"
+    )
+    return classify_kicad_report(filtered)
+
+
+def _bounded_entity_repair_plans(
+    report_path: Path,
+) -> list[EntityRepairPlan]:
+    return [
+        plan
+        for plan in _kicad_error_repair_plans(report_path)
+        if plan.execution_policy == RepairExecutionPolicy.BOUNDED_CANDIDATE
+        and plan.rollback_step in PipelineStep._value2member_map_
+    ]
+
+
+def _entity_repair_refs(plans: Iterable[EntityRepairPlan]) -> list[str]:
+    return sorted({ref for plan in plans for ref in plan.affected_refs})
+
+
+def _earliest_entity_rollback(
+    plans: Iterable[EntityRepairPlan],
+) -> PipelineStep | None:
+    candidates = {
+        PipelineStep(plan.rollback_step)
+        for plan in plans
+        if plan.rollback_step in PipelineStep._value2member_map_
+    }
+    return min(candidates, key=_ORDER_INDEX.__getitem__) if candidates else None
+
+
 def _run_kicad_drc(
     cli: str,
     pcb_path: Path,
@@ -14276,6 +16229,135 @@ def _run_kicad_drc(
     return list(
         _run_kicad_drc_snapshot(cli, pcb_path, report_path).findings
     )
+
+
+_REPAIRABLE_SILK_WARNING_TYPES = frozenset({
+    "silk_edge_clearance",
+    "silk_over_copper",
+    "silk_overlap",
+})
+
+
+def _kicad_warning_findings(report_path: Path) -> list[dict[str, Any]]:
+    if not report_path.is_file():
+        return []
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(report, dict):
+        return []
+    return [
+        finding
+        for section in ("violations", "schematic_parity", "unconnected_items")
+        for finding in report.get(section, [])
+        if isinstance(finding, dict)
+        and str(finding.get("severity", "error")).casefold() == "warning"
+    ]
+
+
+def _drc_warning_messages(report_path: Path) -> list[str]:
+    return [
+        "kicad_cli:"
+        f"{finding.get('type', 'unknown')}:"
+        f"{finding.get('description', 'DRC warning')}"
+        for finding in _kicad_warning_findings(report_path)
+    ]
+
+
+def _repair_silkscreen_entities(
+    cli: str,
+    pcb_path: Path,
+    report_path: Path,
+) -> bool:
+    """Demote only DRC-identified offending silk entities to fabrication.
+
+    Candidate edits are accepted only when authoritative DRC proves that the
+    targeted warning count decreases without adding an error or connectivity
+    gap.  Electrical geometry, copper, mask, paste, outline, and placement are
+    untouched; rejected candidates restore the exact input bytes.
+    """
+
+    from ratsnestpro.eda.vendor.pcb import PcbBoard
+    from ratsnestpro.eda.vendor.sexpr import find_first
+
+    warnings = _kicad_warning_findings(report_path)
+    targeted = [
+        finding
+        for finding in warnings
+        if str(finding.get("type", "")) in _REPAIRABLE_SILK_WARNING_TYPES
+    ]
+    if not targeted:
+        return False
+    target_uuids = {
+        str(item.get("uuid"))
+        for finding in targeted
+        for item in finding.get("items", [])
+        if isinstance(item, dict) and item.get("uuid")
+    }
+    if not target_uuids:
+        return False
+
+    baseline = _read_drc_snapshot(report_path)
+    if baseline.parse_error:
+        return False
+    backup_path = pcb_path.with_suffix(".ahe-silkscreen-backup.kicad_pcb")
+    candidate_report = pcb_path.with_suffix(".ahe-silkscreen.drc.json")
+    shutil.copy2(pcb_path, backup_path)
+    try:
+        board = PcbBoard.load(pcb_path)
+        changed = 0
+
+        def visit(node: Any) -> None:
+            nonlocal changed
+            if not isinstance(node, list):
+                return
+            uuid_node = find_first(node, "uuid") or find_first(node, "tstamp")
+            node_uuid = (
+                str(uuid_node[1])
+                if uuid_node is not None and len(uuid_node) > 1
+                else ""
+            )
+            if node_uuid in target_uuids:
+                layer = find_first(node, "layer")
+                if layer is not None and len(layer) > 1:
+                    current = str(layer[1])
+                    if current in {"F.SilkS", "B.SilkS"}:
+                        layer[1] = "F.Fab" if current.startswith("F.") else "B.Fab"
+                        changed += 1
+            for child in node:
+                if isinstance(child, list):
+                    visit(child)
+
+        visit(board.root)
+        if not changed:
+            return False
+        board.save(pcb_path)
+        after = _run_kicad_drc_snapshot(cli, pcb_path, candidate_report)
+        after_silk = sum(
+            str(finding.get("type", "")) in _REPAIRABLE_SILK_WARNING_TYPES
+            for finding in _kicad_warning_findings(candidate_report)
+        )
+        accepted = (
+            not after.parse_error
+            and after_silk < len(targeted)
+            and after.unconnected <= baseline.unconnected
+            and set(after.non_connectivity_errors).issubset(
+                baseline.non_connectivity_errors
+            )
+        )
+        if not accepted:
+            return False
+        backup_path.unlink(missing_ok=True)
+        shutil.copy2(candidate_report, report_path)
+        return True
+    except Exception:  # noqa: BLE001 - candidate is restored below
+        return False
+    finally:
+        candidate_report.unlink(missing_ok=True)
+        if backup_path.is_file():
+            shutil.copy2(backup_path, pcb_path)
+            backup_path.unlink(missing_ok=True)
 
 
 def _worker_result(
@@ -14533,6 +16615,46 @@ def _prepare_intrinsic_footprint_replan(
     return bool(replacements) or pending
 
 
+def _manufacture_receipt_errors(
+    state: PipelineState,
+    artifact: ManufactureResult,
+) -> list[str]:
+    """Re-audit a manufacturing receipt against the current checkpoint bytes."""
+
+    write = state.artifact(PipelineStep.LAYOUT_WRITE)
+    selection = state.artifact(PipelineStep.SELECTION)
+    if not isinstance(write, PcbWriteResult):
+        return ["layout-write PCB artifact is unavailable"]
+    if not isinstance(selection, SelectionPlan):
+        return ["selection artifact is unavailable"]
+    pcb_path = Path(write.pcb_path)
+    manifest_path = Path(artifact.requirement_invariants_path)
+    if not pcb_path.is_file():
+        return ["current KiCad PCB is unavailable"]
+    if not manifest_path.is_file():
+        return ["release-invariant receipt is unavailable"]
+    try:
+        manifest = validate_release_invariant_manifest(
+            manifest_path,
+            project_name=state.project_name,
+            requirement=state.requirement_text,
+            pcb_path=pcb_path,
+            parts=selection.parts,
+        )
+    except Exception as exc:  # noqa: BLE001 - release validation fails closed
+        return [f"{type(exc).__name__}: {exc}"]
+    errors: list[str] = []
+    if artifact.release_identity != manifest.release_identity:
+        errors.append("ManufactureResult identity differs from its release receipt")
+    if artifact.requirement_release_ready != manifest.requirement_release_ready:
+        errors.append("ManufactureResult release verdict differs from its receipt")
+    if list(artifact.requirement_release_blockers) != list(
+        manifest.requirement_release_blockers
+    ):
+        errors.append("ManufactureResult blockers differ from its release receipt")
+    return errors
+
+
 class ManufactureStep(PipelineStepBase):
     """DRC bottom-line + manufacturing outputs (BOM, CPL, optional Gerber).
 
@@ -14543,8 +16665,17 @@ class ManufactureStep(PipelineStepBase):
     """
 
     step = PipelineStep.MANUFACTURE
+    allow_artifact_first_design_repair = True
     repair_is_deterministic = True
     repair_strategy_id = "drc_monotonic_geometry_v1"
+
+    def resume_artifact_is_current(
+        self,
+        state: PipelineState,
+        artifact: BaseModel,
+    ) -> bool:
+        assert isinstance(artifact, ManufactureResult)
+        return not _manufacture_receipt_errors(state, artifact)
 
     def propose(
         self, state: PipelineState, ctx: PipelineContext, knowledge: str
@@ -14568,12 +16699,21 @@ class ManufactureStep(PipelineStepBase):
             write_art, PcbWriteResult
         ) else None
         cli = kicad_cli_available()
+        drc_report_path = out_dir / f"{state.project_name}.drc.json"
+        drc_warnings: list[str] = []
         if cli and pcb_path is not None and pcb_path.is_file():
             drc += _run_kicad_drc(
                 cli,
                 pcb_path,
-                out_dir / f"{state.project_name}.drc.json",
+                drc_report_path,
             )
+            if not drc and _repair_silkscreen_entities(
+                cli,
+                pcb_path,
+                drc_report_path,
+            ):
+                drc = list(_read_drc_snapshot(drc_report_path).findings)
+            drc_warnings = _drc_warning_messages(drc_report_path)
 
         # --- BOM + component release manifest from the selection -----------
         bom_path = out_dir / f"{state.project_name}_bom.csv"
@@ -14582,6 +16722,36 @@ class ManufactureStep(PipelineStepBase):
         )
         sel = state.artifact(PipelineStep.SELECTION)
         component_issues = selection_release_issues(state)
+        if isinstance(sel, SelectionPlan):
+            closure_check = _component_closure_manifest_check(sel)
+            if not closure_check.ok:
+                closure_refs = closure_check.affected_refs or [
+                    part.ref for part in sel.parts
+                ]
+                component_issues.extend(
+                    {
+                        "ref": ref,
+                        "status": "component_closure_stale",
+                        "reason": closure_check.message,
+                        "symbol": next(
+                            (
+                                part.symbol
+                                for part in sel.parts
+                                if part.ref == ref
+                            ),
+                            "",
+                        ),
+                        "footprint": next(
+                            (
+                                part.footprint
+                                for part in sel.parts
+                                if part.ref == ref
+                            ),
+                            "",
+                        ),
+                    }
+                    for ref in closure_refs
+                )
         nonrelease_refs = {issue["ref"] for issue in component_issues}
         if isinstance(sel, SelectionPlan):
             with bom_path.open("w", newline="", encoding="utf-8") as fh:
@@ -14760,6 +16930,111 @@ class ManufactureStep(PipelineStepBase):
                 drill_paths = []
                 drill_ok = False
 
+        # --- Frozen requirement invariants against the final physical PCB --
+        invariants = extract_requirement_invariants(state.requirement_text)
+        invariant_findings = []
+        requirement_blockers: list[str] = []
+        audited_pcb_sha256 = ""
+        if pcb_path is None or not pcb_path.is_file():
+            requirement_blockers.append(
+                "final KiCad PCB is unavailable for physical requirement audit"
+            )
+        else:
+            try:
+                from ratsnestpro.eda.vendor.pcb import PcbBoard
+
+                before_audit_sha256 = sha256_file(pcb_path)
+                invariant_findings = audit_pcb_invariants(
+                    invariants,
+                    PcbBoard.load(pcb_path),
+                    sel.parts if isinstance(sel, SelectionPlan) else [],
+                )
+                audited_pcb_sha256 = sha256_file(pcb_path)
+                if audited_pcb_sha256 != before_audit_sha256:
+                    requirement_blockers.append(
+                        "final KiCad PCB changed during physical requirement audit"
+                    )
+                requirement_blockers.extend(
+                    f"{finding.invariant_id}: {finding.message}"
+                    for finding in invariant_findings
+                )
+            except Exception as exc:  # noqa: BLE001 - fail closed at release
+                requirement_blockers.append(
+                    "physical requirement audit failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+        if (
+            invariants.mounting_holes_non_plated
+            and invariants.mounting_hole_count
+            and manufacturing_export_applicable
+        ):
+            npth_coordinates = 0
+            npth_files: list[str] = []
+            for drill_path in map(Path, drill_paths):
+                try:
+                    content = drill_path.read_text(
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                except OSError:
+                    continue
+                if (
+                    "FileFunction,NonPlated" not in content
+                    and "NPTH" not in drill_path.name.upper()
+                ):
+                    continue
+                npth_files.append(str(drill_path))
+                npth_coordinates += sum(
+                    bool(re.match(r"^X[-+]?\d+(?:\.\d+)?Y[-+]?\d", line))
+                    for line in content.splitlines()
+                )
+            if npth_coordinates < invariants.mounting_hole_count:
+                requirement_blockers.append(
+                    "manufacturing NPTH drill audit found "
+                    f"{npth_coordinates} coordinate(s) in {npth_files}; "
+                    f"requirement is at least {invariants.mounting_hole_count}"
+                )
+        invariant_manifest_path = (
+            out_dir / f"{state.project_name}.release_invariants.json"
+        )
+        release_manifest = None
+        if (
+            pcb_path is not None
+            and pcb_path.is_file()
+            and audited_pcb_sha256
+            and not any("changed during" in item for item in requirement_blockers)
+        ):
+            try:
+                release_manifest = build_release_invariant_manifest(
+                    project_name=state.project_name,
+                    requirement=state.requirement_text,
+                    pcb_path=pcb_path,
+                    findings=invariant_findings,
+                    blockers=requirement_blockers,
+                    pcb_sha256=audited_pcb_sha256,
+                )
+                temporary_manifest = invariant_manifest_path.with_suffix(
+                    ".json.tmp"
+                )
+                temporary_manifest.write_text(
+                    release_manifest.model_dump_json(indent=2),
+                    encoding="utf-8",
+                )
+                if sha256_file(pcb_path) != audited_pcb_sha256:
+                    temporary_manifest.unlink(missing_ok=True)
+                    release_manifest = None
+                    requirement_blockers.append(
+                        "final KiCad PCB changed before release receipt commit"
+                    )
+                else:
+                    temporary_manifest.replace(invariant_manifest_path)
+            except Exception as exc:  # noqa: BLE001 - receipt must fail closed
+                release_manifest = None
+                requirement_blockers.append(
+                    "release-invariant receipt generation failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
         return (
             ManufactureResult(
                 bom_path=str(bom_path) if isinstance(sel, SelectionPlan) else "",
@@ -14775,13 +17050,34 @@ class ManufactureStep(PipelineStepBase):
                 gerber_exported=gerber_ok,
                 drill_paths=drill_paths,
                 drill_exported=drill_ok,
+                drc_report_path=(
+                    str(drc_report_path) if drc_report_path.is_file() else ""
+                ),
                 drc_violations=drc,
+                drc_warnings=drc_warnings,
+                requirement_invariants_path=(
+                    str(invariant_manifest_path)
+                    if release_manifest is not None
+                    else ""
+                ),
+                release_identity=(
+                    release_manifest.release_identity
+                    if release_manifest is not None
+                    else None
+                ),
+                requirement_release_ready=not requirement_blockers,
+                requirement_release_blockers=requirement_blockers,
             ),
             False,
         )
 
     def check(self, state: PipelineState, artifact: BaseModel) -> list[CheckResult]:
         assert isinstance(artifact, ManufactureResult)
+        receipt_errors = _manufacture_receipt_errors(state, artifact)
+        entity_plans = _bounded_entity_repair_plans(
+            Path(artifact.drc_report_path)
+        ) if artifact.drc_report_path else []
+        entity_strategies = sorted({plan.strategy for plan in entity_plans})
         write = state.artifact(PipelineStep.LAYOUT_WRITE)
         export_applicable = (
             artifact.manufacturing_export_applicable
@@ -14792,8 +17088,39 @@ class ManufactureStep(PipelineStepBase):
             )
         )
         checks = [
-            CheckResult(name="drc_clean", ok=not artifact.drc_violations,
-                        message=f"DRC violations: {artifact.drc_violations}"),
+            CheckResult(
+                name="drc_clean",
+                ok=not artifact.drc_violations,
+                message=(
+                    f"DRC violations: {artifact.drc_violations}; "
+                    f"entity repair strategies: {entity_strategies}"
+                ),
+                reason_code=(
+                    "entity_repair:" + ",".join(entity_strategies)
+                    if entity_strategies
+                    else "drc_error_without_bounded_entity_plan"
+                ),
+                affected_refs=_entity_repair_refs(entity_plans),
+                evidence={
+                    "entity_repair_plans": [
+                        plan.model_dump(mode="json") for plan in entity_plans
+                    ],
+                    "drc_report_path": artifact.drc_report_path,
+                },
+            ),
+            CheckResult(
+                name="drc_warnings_governed",
+                ok=not artifact.drc_warnings,
+                severity=Severity.WARNING,
+                message=(
+                    "no KiCad DRC warnings remain"
+                    if not artifact.drc_warnings
+                    else "remaining KiCad warnings require the deterministic "
+                    "review warning contract: "
+                    f"{artifact.drc_warnings}"
+                ),
+                reason_code="remaining_drc_warnings_require_governance",
+            ),
             CheckResult(
                 name="component_release_ready",
                 ok=artifact.component_release_ready,
@@ -14810,6 +17137,30 @@ class ManufactureStep(PipelineStepBase):
                 name="unresolved_manifest_written",
                 ok=bool(artifact.unresolved_manifest_path),
                 message="unresolved-component manifest not written",
+            ),
+            CheckResult(
+                name="requirement_invariants_written",
+                ok=(
+                    bool(artifact.requirement_invariants_path)
+                    and Path(artifact.requirement_invariants_path).is_file()
+                ),
+                message="physical requirement invariant manifest not written",
+            ),
+            CheckResult(
+                name="release_identity_bound",
+                ok=not receipt_errors,
+                message=(
+                    "release receipt is stale or not bound to current evidence: "
+                    f"{receipt_errors}"
+                ),
+            ),
+            CheckResult(
+                name="physical_requirements_release_ready",
+                ok=artifact.requirement_release_ready,
+                message=(
+                    "final PCB violates frozen user requirements: "
+                    f"{artifact.requirement_release_blockers}"
+                ),
             ),
         ]
         if not artifact.gerber_exported:
@@ -14855,6 +17206,11 @@ class ManufactureStep(PipelineStepBase):
     ) -> tuple[BaseModel, bool]:
         assert isinstance(artifact, ManufactureResult)
         if any(
+            not check.ok and check.name == "requirement_invariants_written"
+            for check in checks
+        ):
+            return self.propose(state, ctx, knowledge)
+        if any(
             not check.ok
             and check.severity == Severity.ERROR
             and check.name in {"gerber_exported", "drill_exported"}
@@ -14882,7 +17238,11 @@ class ManufactureStep(PipelineStepBase):
                     not check.ok
                     and check.severity == Severity.ERROR
                     and check.name
-                    in {"gerber_exported", "drill_exported"}
+                    in {
+                        "gerber_exported",
+                        "drill_exported",
+                        "requirement_invariants_written",
+                    }
                     for check in checks
                 )
             )
@@ -14934,6 +17294,16 @@ class ManufactureStep(PipelineStepBase):
             ))
         ):
             return PipelineStep.LAYOUT_WRITE
+        entity_target = _earliest_entity_rollback(
+            _bounded_entity_repair_plans(Path(artifact.drc_report_path))
+            if artifact.drc_report_path
+            else []
+        )
+        if entity_target is not None:
+            return entity_target
+        # Compatibility for old checkpoints created before the structured DRC
+        # report path was persisted.  New runs use the evidence-rich mapping
+        # above; the legacy fallback remains deliberately conservative.
         if {
             "clearance",
             "shorting_items",
@@ -14950,6 +17320,7 @@ class ManufactureStep(PipelineStepBase):
         return (
             f"{g}{d}BOM+CPL written; "
             f"{len(artifact.drc_violations)} DRC violations; "
+            f"{len(artifact.drc_warnings)} governed DRC warning(s); "
             f"{len(artifact.component_release_blockers)} nonrelease component(s)"
         )
 
@@ -15044,10 +17415,13 @@ def restore_pipeline_state(
     revision: int = 0,
     repair_history: list[dict[str, Any]] | None = None,
     replan_history: list[dict[str, Any]] | None = None,
+    recovery_history: list[dict[str, Any]] | None = None,
     capability_gaps: list[dict[str, Any]] | None = None,
     resume_candidates: dict[str, Any] | None = None,
     connection_synthesis_checkpoint: dict[str, Any] | None = None,
     connection_synthesis_report: dict[str, Any] | None = None,
+    release_resume_step: str | None = None,
+    release_resume_token_digest: str = "",
     invalidate_from_step: PipelineStep | None = None,
     artifact_first: bool = False,
 ) -> PipelineState:
@@ -15078,11 +17452,19 @@ def restore_pipeline_state(
             ReplanRecord.model_validate(item)
             for item in (replan_history or [])
         ],
+        recovery_history=[
+            RecoveryTurnRecord.model_validate(item)
+            for item in (recovery_history or [])
+        ],
         capability_gaps=[
             CapabilityGap.model_validate(item)
             for item in (capability_gaps or [])
         ],
         connection_synthesis_report=restored_connection_report,
+        release_resume_step=(
+            PipelineStep(release_resume_step) if release_resume_step else None
+        ),
+        release_resume_token_digest=release_resume_token_digest,
     )
     connection_contract_invalidated = (
         invalidate_from_step is not None
@@ -15106,6 +17488,12 @@ def restore_pipeline_state(
             for record in state.replan_history
             if record.trigger_step not in invalidated_steps
             and record.rollback_to not in invalidated_steps
+        ]
+        state.recovery_history = [
+            record
+            for record in state.recovery_history
+            if record.step not in invalidated_steps
+            and (record.decision.target_step or "") not in invalidated_steps
         ]
         state.capability_gaps = [
             gap
@@ -15166,6 +17554,9 @@ def restore_pipeline_state(
                 artifact,
                 bool(saved.get("used_llm")),
             )
+            break
+        if not validator.resume_artifact_is_current(state, artifact):
+            state.artifacts.pop(expected, None)
             break
         if _artifact_fingerprint(artifact) != saved_fingerprint:
             state.resume_candidates[expected] = (
@@ -15303,11 +17694,12 @@ class PipelineOrderError(RuntimeError):
 
 
 class Pipeline:
-    """Runs a contiguous prefix of the pinned step sequence, in order.
+    """Runs a contiguous prefix of the pinned release sequence.
 
-    Steps cannot be skipped or reordered: the registered list must equal the
-    first N entries of :data:`CANONICAL_ORDER`. Execution stops at the first
-    blocking step (fail closed) or after ``until`` (inclusive) if given.
+    Registered release stages cannot be skipped or reordered. A failed stage
+    enters bounded Plan/Act/Observe recovery and may replay an earlier verified
+    prefix. Execution becomes terminal only after safe recovery paths are
+    exhausted, or after ``until`` (inclusive) if given.
     """
 
     def __init__(self, steps: list[PipelineStepBase] | None = None) -> None:
@@ -15366,6 +17758,21 @@ class Pipeline:
             except Exception:  # noqa: BLE001 - observability is best effort
                 return
 
+        def emit_recovery(event: str, record: RecoveryTurnRecord) -> None:
+            if ctx.on_ahe_event is None:
+                return
+            try:
+                ctx.on_ahe_event(
+                    ahe_event(
+                        event,
+                        step=record.step,
+                        revision=state.revision,
+                        recovery=record,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - observability is best effort
+                return
+
         def score(result: StepResult) -> tuple[int, int, int]:
             failed = [check for check in result.checks if not check.ok]
             return (
@@ -15406,8 +17813,35 @@ class Pipeline:
                 ),
                 None,
             )
+            active_recovery = next(
+                (
+                    record
+                    for record in reversed(state.recovery_history)
+                    if record.step == step.step.value
+                    and record.status == "acted"
+                ),
+                None,
+            )
             if active_replan is not None:
                 ctx.repair_feedback = active_replan.feedback
+            elif (
+                active_recovery is not None
+                and active_recovery.decision.target_step == step.step.value
+                and active_recovery.decision.action == RecoveryAction.LOCAL_REPAIR
+            ):
+                instructions = str(
+                    active_recovery.decision.tool_args.get(
+                        "repair_instructions",
+                        active_recovery.decision.strategy,
+                    )
+                )[:6_000]
+                ctx.repair_feedback = (
+                    "Agentic recovery plan. Preserve every immutable requirement.\n"
+                    f"Hypothesis: {active_recovery.decision.hypothesis}\n"
+                    f"Action: {active_recovery.decision.action.value}\n"
+                    f"Instructions: {instructions}\n"
+                    "The deterministic gate, not the model, decides success."
+                )
             execution_attempt = 0
             while True:
                 try:
@@ -15469,13 +17903,37 @@ class Pipeline:
                     state.results.append(result)
                     break
                 finally:
-                    if active_replan is not None:
+                    if active_replan is not None or active_recovery is not None:
                         ctx.repair_feedback = ""
+
+            if active_recovery is not None:
+                after_score = score(result)
+                active_recovery.after_score = after_score
+                active_recovery.status = (
+                    "verified"
+                    if after_score[0] == 0
+                    else "improved"
+                    if after_score < active_recovery.before_score
+                    else "rejected"
+                )
+                active_recovery.observation = (
+                    "Deterministic gate observation: "
+                    + (
+                        "all error checks passed"
+                        if not result.error_checks
+                        else "; ".join(
+                            f"{check.name}: {check.message}"
+                            for check in result.error_checks
+                        )[:10_000]
+                    )
+                )
+                emit_recovery("recovery_observed", active_recovery)
 
             can_continue = (
                 not result.blocked
                 or (
                     ctx.artifact_first
+                    and not ctx.repair_release_issues
                     and not result.execution_blocked
                 )
             )
@@ -15493,7 +17951,7 @@ class Pipeline:
 
             if result.blocked:
                 step_artifact = state.artifacts.get(step.step)
-                rollback_to = (
+                suggested_rollback = (
                     step.rollback_target(
                         state,
                         step_artifact,
@@ -15512,6 +17970,236 @@ class Pipeline:
                 current_failure_ids = {
                     failure.failure_id for failure in result.failures
                 }
+                current_score = score(result)
+                current_index = _ORDER_INDEX[step.step]
+                allowed_targets = [
+                    target
+                    for target in CANONICAL_ORDER[1:current_index]
+                    if target in state.artifacts
+                    and sum(
+                        record.trigger_step == step.step.value
+                        and record.rollback_to == target.value
+                        and bool(
+                            current_failure_ids.intersection(record.failure_ids)
+                        )
+                        for record in state.replan_history
+                    )
+                    < max(0, ctx.max_replan_attempts)
+                ]
+                local_repair_available = bool(
+                    step_artifact is not None
+                    and (
+                        type(step).repair is not PipelineStepBase.repair
+                        or type(step).replan is not PipelineStepBase.replan
+                        or result.used_llm
+                    )
+                )
+                related_recovery_turns = [
+                    record
+                    for record in state.recovery_history
+                    if record.step == step.step.value
+                    and (
+                        not current_failure_ids
+                        or bool(
+                            current_failure_ids.intersection(record.failure_ids)
+                        )
+                    )
+                ]
+                recovery_turn: RecoveryTurnRecord | None = None
+                agentic_budget_available = (
+                    ctx.agentic_recovery_enabled
+                    and ctx.mode != LlmMode.OFFLINE
+                    and ctx.client is not None
+                    and len(related_recovery_turns)
+                    < max(0, ctx.max_agentic_recovery_turns_per_step)
+                    and len(state.recovery_history)
+                    < max(0, ctx.max_total_agentic_recovery_turns)
+                    and (
+                        ctx.ahe_deadline_monotonic is None
+                        or time.monotonic() < ctx.ahe_deadline_monotonic
+                    )
+                )
+                decision: RecoveryDecision | None = None
+                if agentic_budget_available:
+                    decision, decision_used_llm, skill_name, skill_digest = (
+                        _plan_agentic_recovery(
+                            state=state,
+                            ctx=ctx,
+                            result=result,
+                            artifact=step_artifact,
+                            before_score=current_score,
+                            allowed_targets=allowed_targets,
+                            suggested_target=suggested_rollback,
+                            local_repair_available=local_repair_available,
+                        )
+                    )
+                    deterministic_fallback = _fallback_recovery_decision(
+                        result=result,
+                        allowed_targets=allowed_targets,
+                        suggested_target=suggested_rollback,
+                        local_repair_available=local_repair_available,
+                    )
+                    hard_conflict = any(
+                        failure.recoverability == Recoverability.HARD_CONFLICT
+                        for failure in result.failures
+                    )
+                    external_decision_required = bool(result.failures) and all(
+                        failure.origin == FailureOrigin.EXTERNAL_EVIDENCE
+                        for failure in result.failures
+                    )
+                    valid_replan = (
+                        decision.action == RecoveryAction.REPLAN_UPSTREAM
+                        and decision.target_step in {
+                            target.value for target in allowed_targets
+                        }
+                    )
+                    invalid_action = (
+                        (
+                            decision.action == RecoveryAction.LOCAL_REPAIR
+                            and not local_repair_available
+                        )
+                        or (
+                            decision.action == RecoveryAction.REPLAN_UPSTREAM
+                            and not valid_replan
+                        )
+                        or (
+                            decision.action == RecoveryAction.ASK_HUMAN
+                            and not external_decision_required
+                        )
+                        or (
+                            decision.action == RecoveryAction.STOP
+                            and not hard_conflict
+                            and bool(allowed_targets or local_repair_available)
+                        )
+                    )
+                    if invalid_action:
+                        decision = deterministic_fallback
+                        decision_used_llm = False
+                    action_target = (
+                        decision.target_step
+                        if decision.action == RecoveryAction.REPLAN_UPSTREAM
+                        else step.step.value
+                    )
+                    repair_instructions = str(
+                        decision.tool_args.get(
+                            "repair_instructions",
+                            decision.strategy,
+                        )
+                    )[:6_000]
+                    decision = decision.model_copy(
+                        update={
+                            "failure_ids": sorted(current_failure_ids),
+                            "target_step": action_target,
+                            # The model selects a capability; the Harness binds
+                            # it to a real implementation and discards invented
+                            # command names or arbitrary shell arguments.
+                            "tool_name": {
+                                RecoveryAction.LOCAL_REPAIR: "replan_current_step",
+                                RecoveryAction.REPLAN_UPSTREAM: "replan_upstream_step",
+                                RecoveryAction.RETRY_TOOL: "retry_current_step",
+                                RecoveryAction.INVESTIGATE_HARNESS: "run_step_gate",
+                                RecoveryAction.ASK_HUMAN: "request_human_input",
+                                RecoveryAction.STOP: "stop_hard_conflict",
+                            }[decision.action],
+                            "tool_args": {
+                                "repair_instructions": repair_instructions,
+                            },
+                            "expected_observation": (
+                                decision.expected_observation.strip()
+                                or deterministic_fallback.expected_observation
+                            )[:4_000],
+                        }
+                    )
+                    repeated_stagnant_action = any(
+                        prior.decision.action == decision.action
+                        and prior.decision.target_step == decision.target_step
+                        and prior.baseline_fingerprint
+                        == _artifact_fingerprint(step_artifact)
+                        and prior.status in {"rejected", "exhausted"}
+                        and prior.after_score == prior.before_score
+                        for prior in related_recovery_turns
+                    )
+                    recovery_turn = RecoveryTurnRecord(
+                        step=step.step.value,
+                        attempt=len(related_recovery_turns) + 1,
+                        revision=state.revision,
+                        failure_ids=sorted(current_failure_ids),
+                        decision=decision,
+                        status=(
+                            "exhausted" if repeated_stagnant_action else "planned"
+                        ),
+                        before_score=current_score,
+                        after_score=(
+                            current_score if repeated_stagnant_action else None
+                        ),
+                        observation=(
+                            "The same action, target, artifact fingerprint and "
+                            "gate score already stagnated; exact replay rejected."
+                            if repeated_stagnant_action
+                            else ""
+                        ),
+                        baseline_fingerprint=_artifact_fingerprint(step_artifact),
+                        used_llm=decision_used_llm,
+                        skill_name=skill_name,
+                        skill_digest=skill_digest,
+                    )
+                    state.recovery_history.append(recovery_turn)
+                    emit_recovery(
+                        "recovery_exhausted"
+                        if repeated_stagnant_action
+                        else "recovery_planned",
+                        recovery_turn,
+                    )
+                    if (
+                        not repeated_stagnant_action
+                        and decision.action
+                        in {
+                            RecoveryAction.LOCAL_REPAIR,
+                            RecoveryAction.RETRY_TOOL,
+                            RecoveryAction.INVESTIGATE_HARNESS,
+                        }
+                    ):
+                        recovery_turn.status = "acted"
+                        state.revision += 1
+                        recovery_turn.revision = state.revision
+                        # A local repair needs the rejected artifact as its
+                        # editable baseline. Tool retry and Harness
+                        # investigation must execute the step producer again;
+                        # feeding them the cached observation merely reruns the
+                        # same gate over stale evidence.
+                        if (
+                            step_artifact is not None
+                            and decision.action == RecoveryAction.LOCAL_REPAIR
+                        ):
+                            state.resume_candidates[step.step] = (
+                                step_artifact,
+                                result.used_llm,
+                            )
+                        state.results = [
+                            existing
+                            for existing in state.results
+                            if existing is not result
+                        ]
+                        state.artifacts.pop(step.step, None)
+                        completed_set = set(state.completed)
+                        emit_recovery("recovery_action_started", recovery_turn)
+                        if ctx.on_progress_checkpoint is not None:
+                            ctx.on_progress_checkpoint(state)
+                        continue
+
+                rollback_to = suggested_rollback
+                if (
+                    decision is not None
+                    and recovery_turn is not None
+                    and recovery_turn.status != "exhausted"
+                ):
+                    if decision.action == RecoveryAction.REPLAN_UPSTREAM:
+                        rollback_to = PipelineStep(str(decision.target_step))
+                    elif decision.action in {
+                        RecoveryAction.ASK_HUMAN,
+                        RecoveryAction.STOP,
+                    }:
+                        rollback_to = None
                 rollback_artifact = (
                     state.artifacts.get(rollback_to)
                     if rollback_to is not None
@@ -15532,7 +18220,6 @@ class Pipeline:
                         current_failure_ids.intersection(record.failure_ids)
                     )
                 ]
-                current_score = score(result)
                 replan_limit = max(0, ctx.max_replan_attempts)
                 if rollback_to is not None and ctx.replan_score is not None:
                     learned_score = ctx.replan_score(
@@ -15549,9 +18236,20 @@ class Pipeline:
                     and len(prior) < replan_limit
                 )
                 if can_replan and rollback_to is not None:
+                    recovery_guidance = ""
+                    if decision is not None:
+                        recovery_guidance = (
+                            "\nAgentic recovery hypothesis: "
+                            f"{decision.hypothesis}\n"
+                            "Recovery instructions: "
+                            f"{decision.tool_args.get('repair_instructions', '')}\n"
+                            "Expected observation: "
+                            f"{decision.expected_observation}\n"
+                        )
                     feedback = (
                         f"Downstream {step.step.value} checks failed. Replan from "
                         f"{rollback_to.value} without weakening any requirement:\n"
+                        f"{recovery_guidance}"
                         + "\n".join(
                             f"- {check.name}: {check.message}"
                             for check in result.error_checks
@@ -15606,8 +18304,12 @@ class Pipeline:
                     }
                     completed_set = set(state.completed)
                     emit_replan("replan_scheduled", record)
-                    if ctx.on_step_completed is not None:
-                        ctx.on_step_completed(state, result)
+                    if recovery_turn is not None:
+                        recovery_turn.status = "acted"
+                        recovery_turn.revision = state.revision
+                        emit_recovery("recovery_action_started", recovery_turn)
+                    if ctx.on_progress_checkpoint is not None:
+                        ctx.on_progress_checkpoint(state)
                     index = rollback_index
                     continue
 
@@ -15620,6 +18322,14 @@ class Pipeline:
                     )
                     pending.after_score = current_score
                     emit_replan(f"replan_{pending.status}", pending)
+                if recovery_turn is not None and recovery_turn.status == "planned":
+                    recovery_turn.status = "exhausted"
+                    recovery_turn.after_score = current_score
+                    recovery_turn.observation = (
+                        "The selected action could not be scheduled within the "
+                        "validated target and recovery budgets."
+                    )
+                    emit_recovery("recovery_exhausted", recovery_turn)
                 for failure in result.failures:
                     attribution = attribute_failure(failure)
                     event_name = {

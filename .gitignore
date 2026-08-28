@@ -70,6 +70,9 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 .pytest-tmp-*/
+.pytest-*/
+.pytest_*/
+.local-pytest-*/
 .mypy_cache/
 .ruff_cache/
 cover/
@@ -202,6 +205,10 @@ privatecredentials/*
 *.kicad_prl
 *-backups/
 src/ratsnestpro/knowledge/.index/
+
+# Raw live-event captures can contain user prompts and runtime metadata. Commit
+# only redacted aggregate evaluation JSON/Markdown reports.
+evals/reports/*.sse
 
 # Node and Next.js build outputs
 node_modules/

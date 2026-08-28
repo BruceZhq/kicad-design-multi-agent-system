@@ -26,10 +26,12 @@ from ratsnestpro.orchestration.pipeline import (
     SelectionStep,
     _ConnectivityView,
     _diode_polarity_checks,
+    _external_input_protection_topology_checks,
     _library_closure_check,
     _library_closure_diagnostics,
     _mcu_control_topology_checks,
     _repairable_selection_refs,
+    _specific_component_identity_error,
 )
 from ratsnestpro.orchestration.pipeline_contracts import (
     LogicalPin,
@@ -106,6 +108,107 @@ def test_generic_capability_identity_regression_is_a_harness_failure(
     assert resolution.reason_code == "generic_capability_closure_contradiction"
     assert resolution.diagnostic is not None
     assert resolution.diagnostic.category == "harness_failure"
+
+
+def test_reverse_protection_keeps_generic_identity_without_relabeling(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "ratsnestpro.orchestration.pipeline.symbols.symbol_properties",
+        lambda _lib_id: {
+            "Value": "D_Schottky",
+            "Description": "Schottky diode",
+        },
+    )
+    generic = SelectedPart(
+        ref="D1",
+        symbol="Device:D_Schottky",
+        value="D_Schottky",
+        footprint="Diode_SMD:D_SMA",
+        role="reverse_polarity_protection",
+    )
+    relabeled = generic.model_copy(update={"value": "SS14"})
+
+    assert _specific_component_identity_error(generic, "5 V input") is None
+    assert "select the real device" in (
+        _specific_component_identity_error(relabeled, "5 V input") or ""
+    )
+
+
+def test_reverse_protection_role_is_part_of_external_input_series_chain(
+    monkeypatch,
+) -> None:
+    pin_map = {
+        "Connector_Generic:Conn_01x02": [
+            {"number": "1", "name": "Pin_1"},
+            {"number": "2", "name": "Pin_2"},
+        ],
+        "Device:Polyfuse": [
+            {"number": "1", "name": "~"},
+            {"number": "2", "name": "~"},
+        ],
+        "Device:D_Schottky": [
+            {"number": "1", "name": "K"},
+            {"number": "2", "name": "A"},
+        ],
+        "Regulator_Linear:AP1117-33": [
+            {"number": "1", "name": "GND"},
+            {"number": "2", "name": "VO"},
+            {"number": "3", "name": "VI"},
+        ],
+    }
+    monkeypatch.setattr(
+        "ratsnestpro.orchestration.pipeline.symbols.symbol_pins",
+        lambda lib_id: pin_map[lib_id],
+    )
+    selection = SelectionPlan(parts=[
+        SelectedPart(
+            ref="J1", symbol="Connector_Generic:Conn_01x02",
+            value="Conn_01x02", footprint="Connector:Header",
+            role="power_input_connector",
+        ),
+        SelectedPart(
+            ref="F1", symbol="Device:Polyfuse", value="Polyfuse",
+            footprint="Fuse:Fuse_1206_3216Metric", role="input_ptc_fuse",
+        ),
+        SelectedPart(
+            ref="D1", symbol="Device:D_Schottky", value="D_Schottky",
+            footprint="Diode_SMD:D_SMA", role="reverse_protection_diode",
+        ),
+        SelectedPart(
+            ref="U2", symbol="Regulator_Linear:AP1117-33",
+            value="AP1117-33", footprint="Package_TO_SOT_SMD:SOT-223-3_TabPin2",
+            role="ldo_regulator",
+        ),
+    ])
+    intent = NetlistIntent(
+        supply_nets=["VIN_5V", "5V_FUSED", "5V_REG", "3V3"],
+        ground_net="GND",
+        nets=[
+            NetIntent(name="VIN_5V", kind="power", pins=[
+                LogicalPin(ref="J1", pin="1"), LogicalPin(ref="F1", pin="1"),
+            ]),
+            NetIntent(name="5V_FUSED", kind="power", pins=[
+                LogicalPin(ref="F1", pin="2"), LogicalPin(ref="D1", pin="2"),
+            ]),
+            NetIntent(name="5V_REG", kind="power", pins=[
+                LogicalPin(ref="D1", pin="1"), LogicalPin(ref="U2", pin="3"),
+            ]),
+            NetIntent(name="3V3", kind="power", pins=[
+                LogicalPin(ref="U2", pin="2"),
+            ]),
+            NetIntent(name="GND", kind="ground", pins=[
+                LogicalPin(ref="J1", pin="2"), LogicalPin(ref="U2", pin="1"),
+            ]),
+        ],
+    )
+
+    checks = _external_input_protection_topology_checks(
+        _ConnectivityView.build(selection, intent)
+    )
+
+    assert len(checks) == 1
+    assert checks[0].ok, checks[0].message
 
 
 def test_mixed_library_closure_does_not_relabel_design_failure_as_harness() -> None:
@@ -844,6 +947,62 @@ def test_boot_gate_rejects_missing_or_wrong_pin_alias_and_wrong_pull_direction(
     ]
     assert all(not check.ok for check in failed)
     assert all(check.origin is None for check in failed)
+
+
+def test_resettable_input_fuse_is_not_classified_as_mcu_reset_support(
+    monkeypatch,
+) -> None:
+    pin_map = {
+        "MCU_Test:Controller": [
+            {"number": "1", "name": "VSS"},
+            {"number": "2", "name": "VDD"},
+            {"number": "5", "name": "PA14"},
+        ],
+        "Device:R": [
+            {"number": "1", "name": "~"},
+            {"number": "2", "name": "~"},
+        ],
+        "Device:D": [
+            {"number": "1", "name": "K"},
+            {"number": "2", "name": "A"},
+        ],
+        "Device:Polyfuse": [
+            {"number": "1", "name": "~"},
+            {"number": "2", "name": "~"},
+        ],
+    }
+    monkeypatch.setattr(
+        "ratsnestpro.orchestration.pipeline.symbols.symbol_pins",
+        lambda lib_id: pin_map[lib_id],
+    )
+    selection = _control_selection()
+    selection.parts.append(SelectedPart(
+        ref="F1",
+        symbol="Device:Polyfuse",
+        value="Polyfuse",
+        footprint="Fuse:Fuse_1206_3216Metric",
+        role="input_resettable_fuse",
+    ))
+    intent = _control_intent()
+    intent.nets.append(NetIntent(
+        name="5V_IN",
+        kind="power",
+        pins=[LogicalPin(ref="F1", pin="1")],
+    ))
+    next(net for net in intent.nets if net.name == "5V").pins.append(
+        LogicalPin(ref="F1", pin="2")
+    )
+
+    checks = _mcu_control_topology_checks(
+        _ConnectivityView.build(selection, intent),
+        _architect_requirement(),
+    )
+    reset_boot = next(
+        check for check in checks
+        if check.name.startswith("mcu_reset_boot_support:")
+    )
+
+    assert "F1 (input_resettable_fuse)" not in reset_boot.message
 
 
 def test_flyback_polarity_gate_uses_pin_functions_not_model_or_ref(monkeypatch) -> None:

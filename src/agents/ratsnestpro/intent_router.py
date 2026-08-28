@@ -48,6 +48,10 @@ _EXPLICIT_MODE_RE = re.compile(
     r"(build|review|research|parts|diagnose)\b",
     re.IGNORECASE,
 )
+_REVISION_ENVELOPE_RE = re.compile(
+    r"\A\s*(?:USER CHANGE REQUEST:\s*)+",
+    re.IGNORECASE,
+)
 _PROJECT_PATH_RE = re.compile(
     r"(?:[A-Za-z]:\\[^\r\n,;\"']+|/[^\s,;\"']+)"
     r"\.(?:kicad_sch|kicad_pcb|kicad_pro|pro)\b",
@@ -90,15 +94,15 @@ _DIAGNOSE_ACTION_RE = re.compile(
 _CONTINUE_ACTION_RE = re.compile(
     r"\b(?:continue|resume|retry|rerun|run\s+again|try\s+again|"
     r"fix\s+(?:it|this|that)|repair\s+(?:it|this|that|the\s+previous))\b|"
-    r"(?:继续|恢复|重试|再试|再跑|重做|重新做|重新运行|接着做|修复(?:它|这个|刚才|之前)|"
+    r"(?:继续|恢复|重试|再试|再跑|重做|重新做|重新运行|重新执行|接着做|修复(?:它|这个|刚才|之前)|"
     r"解决(?:它|这个|刚才|之前))",
     re.IGNORECASE,
 )
 _NEGATED_CONTINUE_RE = re.compile(
-    r"(?:\b(?:do\s+not|don't|must\s+not|never)\b[^.\n]{0,40}"
+    r"(?:\b(?:do\s+not|don't|must\s+not|never)\b[^.;\n]{0,40}"
     r"\b(?:continue|resume|retry|rerun|run\s+again|try\s+again)\b|"
     r"(?:不要|不得|禁止|不能|不可|不允许)[^。；;\n]{0,24}"
-    r"(?:继续|恢复|重试|再试|再跑|重做|重新做|重新运行|接着做))",
+    r"(?:继续|恢复|重试|再试|再跑|重做|重新做|重新运行|重新执行|接着做))",
     re.IGNORECASE,
 )
 _EXPLICIT_NEW_CONTEXT_RE = re.compile(
@@ -108,8 +112,15 @@ _EXPLICIT_NEW_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 _AMEND_ACTION_RE = re.compile(
-    r"\b(?:add|remove|replace|change|extend|also\s+include)\b|"
-    r"(?:新增|添加|增加|删除|移除|替换|改成|改为|调整|再加|还要)",
+    r"\b(?:add|remove|replace|change|modify|amend|extend|also\s+include)\b|"
+    r"(?:新增|添加|增加|删除|移除|替换|改成|改为|调整|修改|变更|再加|还要)",
+    re.IGNORECASE,
+)
+_NEGATED_AMEND_RE = re.compile(
+    r"(?:\b(?:do\s+not|don't|must\s+not|never|without|not\s+(?:a\s+)?)\b"
+    r"[^.;\n]{0,64}\b(?:add|remove|replace|change|modify|amend|extend|include)(?:ing|ed)?\b|"
+    r"(?:不要|不得|禁止|不能|不可|无需|不是|并非|不属于)"
+    r"[^。；;\n]{0,40}(?:新增|添加|增加|删除|移除|替换|改成|改为|调整|修改|变更|再加|还要))",
     re.IGNORECASE,
 )
 _NEGATED_BUILD_RE = re.compile(
@@ -199,6 +210,14 @@ def requests_new_context(text: str) -> bool:
     return bool(_EXPLICIT_NEW_CONTEXT_RE.search(text))
 
 
+def unwrap_revision_envelope(text: str) -> tuple[str, bool]:
+    """Separate the control plane's revision envelope from user semantics."""
+
+    raw = text.strip()
+    wrapped = bool(_REVISION_ENVELOPE_RE.match(raw))
+    return _REVISION_ENVELOPE_RE.sub("", raw, count=1).strip(), wrapped
+
+
 def classify_intent(
     text: str,
     *,
@@ -208,7 +227,7 @@ def classify_intent(
 ) -> IntentDecision:
     """Classify a request using semantic evidence, not isolated keywords."""
 
-    requirement = text.strip()
+    requirement, revision_envelope = unwrap_revision_envelope(text)
     if not requirement:
         return IntentDecision(
             primary_intent="clarify",
@@ -229,7 +248,8 @@ def classify_intent(
     # in another clause can still be recognized.
     continuation_text = _NEGATED_CONTINUE_RE.sub("", requirement)
     has_continue = bool(_CONTINUE_ACTION_RE.search(continuation_text))
-    has_amendment = bool(_AMEND_ACTION_RE.search(requirement))
+    amendment_text = _NEGATED_AMEND_RE.sub("", requirement)
+    has_amendment = bool(_AMEND_ACTION_RE.search(amendment_text))
     explicit_new_context = requests_new_context(requirement)
     negated_build = bool(_NEGATED_BUILD_RE.search(requirement))
     in_scope = bool(_DOMAIN_RE.search(requirement))
@@ -338,6 +358,20 @@ def classify_intent(
             confidence=0.96,
             evidence=["diagnostic follow-up", "active workflow context"],
             context_relation="diagnose",
+        )
+
+    if (
+        revision_envelope
+        and has_active_context
+        and not explicit_new_context
+        and normalized_prior in resumable_intents
+    ):
+        return IntentDecision(
+            primary_intent=cast(PrimaryIntent, normalized_prior),
+            requested_outputs=outputs,
+            confidence=0.96,
+            evidence=["revision feedback envelope", f"prior intent: {normalized_prior}"],
+            context_relation="amend",
         )
 
     if not in_scope:

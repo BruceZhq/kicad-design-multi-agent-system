@@ -1,0 +1,111 @@
+{
+  "schemaVersion": "1.0",
+  "scope": "terminal_release_evidence_and_partial_paired_evaluation",
+  "capturedAt": "2026-08-29T01:55:00+08:00",
+  "strictSuccessDefinition": "17/17 pipeline steps, release_ready delivery, ERC errors=0, DRC errors=0, DRC unconnected=0, complete routed connectivity, and a trusted artifact manifest",
+  "multiAgentReleaseSet": {
+    "caseCount": 2,
+    "releaseReadyCount": 2,
+    "releaseReadyRate": 1.0,
+    "cases": [
+      {
+        "caseId": "golden.p01-ne555-led-blinker",
+        "deliveryStatus": "release_ready",
+        "completedSteps": 17,
+        "totalSteps": 17,
+        "ercErrors": 0,
+        "drcErrors": 0,
+        "drcUnconnected": 0,
+        "routedNets": 6,
+        "totalNets": 6,
+        "routedConnections": 15,
+        "totalConnections": 15,
+        "routingMethod": "freerouting",
+        "publishedArtifactCount": 55,
+        "releaseManifestId": "48bb4619-9735-57b2-a9d7-a26170f910d5",
+        "revisionCount": 7,
+        "activeRuntimeSeconds": 4877.879,
+        "elapsedSecondsIncludingHumanGaps": 23205.082
+      },
+      {
+        "caseId": "golden.02-stm32f030-minimal-board",
+        "deliveryStatus": "release_ready",
+        "completedSteps": 17,
+        "totalSteps": 17,
+        "ercErrors": 0,
+        "drcErrors": 0,
+        "drcUnconnected": 0,
+        "routedNets": 16,
+        "totalNets": 16,
+        "routedConnections": 50,
+        "totalConnections": 50,
+        "routingMethod": "freerouting",
+        "publishedArtifactCount": 66,
+        "releaseManifestId": "afa01682-31ca-5366-ab21-dbff469b2b7a",
+        "revisionCount": 11,
+        "activeRuntimeSeconds": 13595.638,
+        "elapsedSecondsIncludingHumanGaps": 16570.417,
+        "hitlClarificationCount": 1,
+        "finalRevisionAgenticRecoveryTurns": 5,
+        "verifiedAgenticRecoveryTurns": 1
+      }
+    ]
+  },
+  "pairedComparison": {
+    "completePairCount": 1,
+    "pairId": "golden.p01",
+    "caseId": "ne555-led-blinker",
+    "singleAgent": {
+      "deliveryStatus": "delivered_with_issues",
+      "completedSteps": 17,
+      "totalSteps": 17,
+      "strictTaskSuccess": false,
+      "releaseReady": false,
+      "ercErrors": 2,
+      "drcErrors": 12,
+      "activeRuntimeSeconds": 988.801,
+      "revisionCount": 1,
+      "hitlClarificationCount": 0
+    },
+    "multiAgent": {
+      "deliveryStatus": "release_ready",
+      "completedSteps": 17,
+      "totalSteps": 17,
+      "strictTaskSuccess": true,
+      "releaseReady": true,
+      "ercErrors": 0,
+      "drcErrors": 0,
+      "drcUnconnected": 0,
+      "activeRuntimeSeconds": 4877.879,
+      "revisionCount": 7,
+      "hitlClarificationCount": 0
+    },
+    "strictTaskSuccessRate": {
+      "singleAgent": 0.0,
+      "multiAgent": 1.0,
+      "deltaMultiMinusSingle": 1.0
+    },
+    "releaseReadyRate": {
+      "singleAgent": 0.0,
+      "multiAgent": 1.0,
+      "deltaMultiMinusSingle": 1.0
+    },
+    "activeRuntimeSeconds": {
+      "singleAgent": 988.801,
+      "multiAgent": 4877.879,
+      "deltaMultiMinusSingle": 3889.078
+    }
+  },
+  "unavailableMetrics": {
+    "humanAcceptanceRate": "N/A: no blind human-review records were captured",
+    "handoffErrorRate": "N/A: compacted historical event evidence is not complete enough for a denominator",
+    "toolArgumentSchemaValidityRate": "N/A: the historical single-agent result exposed no structured tool-call sample",
+    "toolPostconditionPassRate": "N/A as a cross-arm rate; strict final ERC/DRC/connectivity postconditions are reported separately"
+  },
+  "limitations": [
+    "Only one complete single-agent/multi-agent pair exists, so no statistical generalization is valid.",
+    "The STM32F030 case has no completed single-agent counterpart and is excluded from paired deltas.",
+    "The multi-agent runs include engineering recovery revisions created while the harness was being repaired; their duration is convergence evidence, not a clean throughput benchmark.",
+    "KiCad library mismatch warnings were accepted only through digest-bound structural-equivalence evidence; warning counts were not silently suppressed."
+  ]
+}

@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ratsnest.local/schemas/paired-result.v1.schema.json",
+  "title": "RatsNest paired Agent evaluation report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "scope", "planId", "planDigest", "sourceCommit", "sourceDirty", "frozenExecution", "createdAt", "cases", "armMetrics", "pairedComparison", "metrics"],
+  "properties": {
+    "schemaVersion": {"const": "1.0"},
+    "scope": {"const": "live_http_sse_agent_evaluation_not_manufacturing_approval"},
+    "planId": {"type": "string"},
+    "planDigest": {"$ref": "#/$defs/digest"},
+    "sourceCommit": {"type": "string"},
+    "sourceDirty": {"type": "boolean"},
+    "frozenExecution": {"type": ["object", "null"]},
+    "createdAt": {"type": "string", "format": "date-time"},
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["caseId", "arm", "pairId", "frozenInputDigest", "observed", "checks", "humanAcceptance", "passed"],
+        "properties": {
+          "caseId": {"type": "string"},
+          "arm": {"enum": ["single_agent", "multi_agent", null]},
+          "pairId": {"type": ["string", "null"]},
+          "frozenInputDigest": {"$ref": "#/$defs/digest"},
+          "observed": {"type": "object"},
+          "checks": {"type": "object"},
+          "humanAcceptance": {"type": ["object", "null"]},
+          "passed": {"type": "boolean"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "armMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["single_agent", "multi_agent"],
+      "properties": {
+        "single_agent": {"$ref": "#/$defs/armMetrics"},
+        "multi_agent": {"$ref": "#/$defs/armMetrics"}
+      }
+    },
+    "pairedComparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pairCount", "completePairCount", "incompletePairCount", "deltaDenominatorCompletePairs", "deltaConvention", "completePairArmMetrics", "metricDeltas", "pairs"],
+      "properties": {
+        "pairCount": {"type": "integer", "minimum": 0},
+        "completePairCount": {"type": "integer", "minimum": 0},
+        "incompletePairCount": {"type": "integer", "minimum": 0},
+        "deltaDenominatorCompletePairs": {"type": "integer", "minimum": 0},
+        "deltaConvention": {"const": "multi_agent_minus_single_agent"},
+        "completePairArmMetrics": {
+          "type": "object",
+          "required": ["single_agent", "multi_agent"],
+          "properties": {
+            "single_agent": {"$ref": "#/$defs/armMetrics"},
+            "multi_agent": {"$ref": "#/$defs/armMetrics"}
+          },
+          "additionalProperties": false
+        },
+        "metricDeltas": {"type": "object", "additionalProperties": {"$ref": "#/$defs/nullableNumber"}},
+        "pairs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["pairId", "complete", "arms"],
+            "properties": {
+              "pairId": {"type": "string"},
+              "complete": {"type": "boolean"},
+              "arms": {
+                "type": "object",
+                "required": ["single_agent", "multi_agent"],
+                "properties": {
+                  "single_agent": {"$ref": "#/$defs/nullableOutcome"},
+                  "multi_agent": {"$ref": "#/$defs/nullableOutcome"}
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    "metrics": {"type": "object"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullableNumber": {"type": ["number", "null"]},
+    "nullableBoolean": {"type": ["boolean", "null"]},
+    "armMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["caseCount", "transportCompletionRate", "protocolCompletionRate", "pipeline17StepCompletionRate", "strictTaskSuccessRate", "releaseReadyRate", "releaseStatusObservationCoverage", "humanAcceptanceRate", "humanReviewCoverage", "phaseContractErrorRate", "toolContractErrorRate", "meanDurationSeconds", "medianDurationSeconds", "p95DurationSeconds", "hitlInterventionRate", "hitlRequestCount", "toolArgumentSchemaValidityRate", "toolPostconditionPassRate", "observedToolCallCount", "handoffEvidenceStatus", "observedHandoffCount", "handoffErrorCount", "handoffErrorRate"],
+      "properties": {
+        "caseCount": {"type": "integer", "minimum": 0},
+        "transportCompletionRate": {"$ref": "#/$defs/nullableNumber"},
+        "protocolCompletionRate": {"$ref": "#/$defs/nullableNumber"},
+        "pipeline17StepCompletionRate": {"$ref": "#/$defs/nullableNumber"},
+        "strictTaskSuccessRate": {"$ref": "#/$defs/nullableNumber"},
+        "releaseReadyRate": {"$ref": "#/$defs/nullableNumber"},
+        "releaseStatusObservationCoverage": {"$ref": "#/$defs/nullableNumber"},
+        "humanAcceptanceRate": {"$ref": "#/$defs/nullableNumber"},
+        "humanReviewCoverage": {"$ref": "#/$defs/nullableNumber"},
+        "phaseContractErrorRate": {"$ref": "#/$defs/nullableNumber"},
+        "toolContractErrorRate": {"$ref": "#/$defs/nullableNumber"},
+        "meanDurationSeconds": {"$ref": "#/$defs/nullableNumber"},
+        "medianDurationSeconds": {"$ref": "#/$defs/nullableNumber"},
+        "p95DurationSeconds": {"$ref": "#/$defs/nullableNumber"},
+        "hitlInterventionRate": {"$ref": "#/$defs/nullableNumber"},
+        "hitlRequestCount": {"type": ["integer", "null"], "minimum": 0},
+        "toolArgumentSchemaValidityRate": {"$ref": "#/$defs/nullableNumber"},
+        "toolPostconditionPassRate": {"$ref": "#/$defs/nullableNumber"},
+        "observedToolCallCount": {"type": "integer", "minimum": 0},
+        "handoffEvidenceStatus": {"enum": ["not_applicable", "missing", "observed"]},
+        "observedHandoffCount": {"type": ["integer", "null"], "minimum": 0},
+        "handoffErrorCount": {"type": ["integer", "null"], "minimum": 0},
+        "handoffErrorRate": {"$ref": "#/$defs/nullableNumber"}
+      }
+    },
+    "nullableOutcome": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["caseId", "transportCompleted", "protocolCompleted", "completedSteps", "strictTaskSuccess", "releaseReady", "humanAccepted", "durationSeconds", "hitlIntervened", "phaseContractOk", "toolContractOk"],
+          "properties": {
+            "caseId": {"type": "string"},
+            "transportCompleted": {"$ref": "#/$defs/nullableBoolean"},
+            "protocolCompleted": {"$ref": "#/$defs/nullableBoolean"},
+            "completedSteps": {"type": ["integer", "null"], "minimum": 0},
+            "strictTaskSuccess": {"$ref": "#/$defs/nullableBoolean"},
+            "releaseReady": {"$ref": "#/$defs/nullableBoolean"},
+            "humanAccepted": {"$ref": "#/$defs/nullableBoolean"},
+            "durationSeconds": {"$ref": "#/$defs/nullableNumber"},
+            "hitlIntervened": {"$ref": "#/$defs/nullableBoolean"},
+            "phaseContractOk": {"$ref": "#/$defs/nullableBoolean"},
+            "toolContractOk": {"$ref": "#/$defs/nullableBoolean"}
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

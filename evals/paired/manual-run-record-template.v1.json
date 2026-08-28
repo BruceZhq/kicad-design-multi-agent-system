@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0",
+  "recordKind": "paired_eval_manual_run",
+  "createdAt": null,
+  "planId": "ratsnest-paired-kicad-golden-v1",
+  "planDigest": null,
+  "pairId": null,
+  "caseId": null,
+  "arm": null,
+  "agentId": null,
+  "promptDigest": null,
+  "frozenInputDigest": null,
+  "frozenExecution": null,
+  "observed": {
+    "transportCompleted": null,
+    "protocolCompleted": null,
+    "completedSteps": null,
+    "strictTaskSuccess": null,
+    "releaseReady": null,
+    "humanAccepted": null,
+    "durationSeconds": null,
+    "hitlRequestCount": null,
+    "toolArgumentSchemaValidityRate": null,
+    "toolPostconditionPassRate": null,
+    "handoffErrorCount": null
+  },
+  "notes": null
+}

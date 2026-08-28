@@ -137,7 +137,7 @@ def _done_delivery_action(
 # is pinned to the same high-water mark as the lifecycle state.
 _LOAD_STATUS_SNAPSHOT_LUA = r"""
 local state = redis.call('HGETALL', KEYS[1])
-if #state == 0 then return {state, {}, redis.call('TIME')} end
+if #state == 0 then return {state, {}, redis.call('TIME'), {}} end
 local cursor = tonumber(redis.call('HGET', KEYS[1], 'last_event_id') or '0')
 local max_id = cursor .. '-0'
 local events = redis.call('XREVRANGE', KEYS[2], max_id, '-', 'COUNT', 256)

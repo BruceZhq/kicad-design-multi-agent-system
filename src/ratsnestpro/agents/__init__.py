@@ -6,6 +6,7 @@ from ratsnestpro.agents.llm import (
     LLMClient,
     LlmError,
     LlmMode,
+    NonRetryableLlmError,
     OpenAICompatibleClient,
     parse_mode,
 )
@@ -17,6 +18,7 @@ __all__ = [
     "LLMClient",
     "LlmError",
     "LlmMode",
+    "NonRetryableLlmError",
     "ReviewResult",
     "Reviewer",
     "TriageItem",

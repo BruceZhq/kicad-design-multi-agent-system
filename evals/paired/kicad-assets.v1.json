@@ -1,0 +1,229 @@
+{
+  "schemaVersion": "1.0",
+  "snapshotId": "kicad-installed-assets-20260826",
+  "checkedAt": "2026-08-26T15:26:35.402218+00:00",
+  "verificationMethod": "read_only_runtime_resolver_query",
+  "preflightBaseImageId": "sha256:b3cee3d26017888fc9aa96d49549e23135288938a15edbf940dc34504c7f1d7e",
+  "symbolRoot": "/usr/share/kicad/symbols",
+  "footprintRoot": "/usr/share/kicad/footprints",
+  "policy": {
+    "symbolResolved": true,
+    "footprintResolved": true,
+    "pinPadCompatibilityRequired": true,
+    "emptyMechanicalPadsIgnored": true
+  },
+  "bindings": [
+    {
+      "assetId": "ne555d-soic8",
+      "symbol": "Timer:NE555D",
+      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "symbolPinCount": 8,
+      "footprintPadCount": 8,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "25080cfd12ee33ebdb4c81bb9ac4745f7b1e9d7e4a7e083e0d7f160a8d42207f",
+      "footprintFileSha256": "10d69b1de331f68e88e7c93414190dad01f05d93ae4e388711bc74c801b57798"
+    },
+    {
+      "assetId": "stm32f030f4px-tssop20",
+      "symbol": "MCU_ST_STM32F0:STM32F030F4Px",
+      "footprint": "Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm",
+      "symbolPinCount": 20,
+      "footprintPadCount": 20,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "749a362b52e85de40e87cf286e6676437470012ca7644b45e8e3838f017b70bd",
+      "footprintFileSha256": "dcbb1cf18668d5bfd6b3da00c69ced6131b50e09ff09ad65c659a9e265db8b7b"
+    },
+    {
+      "assetId": "stm32g070rbtx-lqfp64",
+      "symbol": "MCU_ST_STM32G0:STM32G070RBTx",
+      "footprint": "Package_QFP:LQFP-64_10x10mm_P0.5mm",
+      "symbolPinCount": 64,
+      "footprintPadCount": 64,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "3cb00c1154ca3999660f538d4625feeee9bf5e42f4945e388adeba4389a95370",
+      "footprintFileSha256": "f2469b4012f9335d58475824e59f428e42ddb568f735dee88f75503fd9c4af99"
+    },
+    {
+      "assetId": "rp2040-qfn56",
+      "symbol": "MCU_RaspberryPi:RP2040",
+      "footprint": "Package_DFN_QFN:QFN-56-1EP_7x7mm_P0.4mm_EP3.2x3.2mm",
+      "symbolPinCount": 57,
+      "footprintPadCount": 57,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "e10a806c38d73ace959849554766493b4c57c0f28b4f305daa1f28dc80850c7f",
+      "footprintFileSha256": "7ecd6e166b86b4c77660b5a57636650ba3a621fbd36266f75b22d9e90688c086"
+    },
+    {
+      "assetId": "stm32g431cbtx-lqfp48",
+      "symbol": "MCU_ST_STM32G4:STM32G431CBTx",
+      "footprint": "Package_QFP:LQFP-48_7x7mm_P0.5mm",
+      "symbolPinCount": 48,
+      "footprintPadCount": 48,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "55934b3878401d6bb166c61e03a5853dea57cf2ecbc9ed95f2029d26b76e505a",
+      "footprintFileSha256": "d45493a489488cc84852d2dbaf90fe53c5c0e8be9a2bad5eca2f544a305dccc8"
+    },
+    {
+      "assetId": "stm32f072cbtx-lqfp48",
+      "symbol": "MCU_ST_STM32F0:STM32F072CBTx",
+      "footprint": "Package_QFP:LQFP-48_7x7mm_P0.5mm",
+      "symbolPinCount": 48,
+      "footprintPadCount": 48,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "749a362b52e85de40e87cf286e6676437470012ca7644b45e8e3838f017b70bd",
+      "footprintFileSha256": "d45493a489488cc84852d2dbaf90fe53c5c0e8be9a2bad5eca2f544a305dccc8"
+    },
+    {
+      "assetId": "esp32-c3-wroom-02u",
+      "symbol": "RF_Module:ESP32-C3-WROOM-02U",
+      "footprint": "RF_Module:ESP32-C3-WROOM-02U",
+      "symbolPinCount": 19,
+      "footprintPadCount": 19,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "ff273ea08e73a50d1e383a3196e2cc1b98c51d61108a1fac1f1b5d1810dd2915",
+      "footprintFileSha256": "891e768ef84e2d003f1b0f7cd3e3ecf83d3d39a9029095ceecd847b3cde9e02a"
+    },
+    {
+      "assetId": "ap2112k-3v3-sot23-5",
+      "symbol": "Regulator_Linear:AP2112K-3.3",
+      "footprint": "Package_TO_SOT_SMD:SOT-23-5",
+      "symbolPinCount": 5,
+      "footprintPadCount": 5,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "a9f650b6c3eec1b9570739d9b348364ca0b48fc272cc857707700e4690ec8336",
+      "footprintFileSha256": "e063acf8bcf318f5ebebddb6eeb493da6614b1f2cee19dd7dd8df0d5943f241a"
+    },
+    {
+      "assetId": "mcp23017-sp-dip28",
+      "symbol": "Interface_Expansion:MCP23017_SP",
+      "footprint": "Package_DIP:DIP-28_W7.62mm",
+      "symbolPinCount": 28,
+      "footprintPadCount": 28,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "8c551e46a9b7980f8931742e6b082bbd73fa82117b9f627a038458421bf406af",
+      "footprintFileSha256": "94aa048217575106f623d7e51945cefc9287a5087a3863c02b881a6aec326e4b"
+    },
+    {
+      "assetId": "lis3dh-lga16",
+      "symbol": "Sensor_Motion:LIS3DH",
+      "footprint": "Package_LGA:LGA-16_3x3mm_P0.5mm_LayoutBorder3x5y",
+      "symbolPinCount": 16,
+      "footprintPadCount": 16,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "66cc98cf29138ae46adf61fde8e671ea01cd29fecbf36ec7897c2fb43b12af89",
+      "footprintFileSha256": "76ee95103118a34cb7799954e0643e48f9a9f504edb2820a4775d7cd6f2d03bf"
+    },
+    {
+      "assetId": "l293d-dip16",
+      "symbol": "Driver_Motor:L293D",
+      "footprint": "Package_DIP:DIP-16_W7.62mm",
+      "symbolPinCount": 16,
+      "footprintPadCount": 16,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "da7b246b8178897bbbad9fdfd440ee6b01d83999db7b624f41742f85cc3c05ef",
+      "footprintFileSha256": "dfeb577b373ee0c11646e2abb24c5aded6feee41fdfbc2fb8568655d5269d96c"
+    },
+    {
+      "assetId": "lm35-lp-to92",
+      "symbol": "Sensor_Temperature:LM35-LP",
+      "footprint": "Package_TO_SOT_THT:TO-92_Inline",
+      "symbolPinCount": 3,
+      "footprintPadCount": 3,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "4e6161278e0c0cafce2e5394cac1fa2a28f0483338a24c6b835887b042a94c90",
+      "footprintFileSha256": "182a771a964f3244d9870ad235b39f4e481832a714de97aca7e1f02b6347386a"
+    },
+    {
+      "assetId": "resistor-0805",
+      "symbol": "Device:R",
+      "footprint": "Resistor_SMD:R_0805_2012Metric",
+      "symbolPinCount": 2,
+      "footprintPadCount": 2,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "f605999e711a8cd31f8b754741dc1a68e3099968ce89c16e9902e103c37925a8",
+      "footprintFileSha256": "54fd6e17158e15e5a591053f905fbd5bd9a1aa7008c73cccd391b192a3b1a09d"
+    },
+    {
+      "assetId": "capacitor-0805",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0805_2012Metric",
+      "symbolPinCount": 2,
+      "footprintPadCount": 2,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "f605999e711a8cd31f8b754741dc1a68e3099968ce89c16e9902e103c37925a8",
+      "footprintFileSha256": "4f88d912a06c5e2e3b8151311be72f6ac49eea68d52b4e1beaeaa067916555cc"
+    },
+    {
+      "assetId": "led-0805",
+      "symbol": "Device:LED",
+      "footprint": "LED_SMD:LED_0805_2012Metric",
+      "symbolPinCount": 2,
+      "footprintPadCount": 2,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "f605999e711a8cd31f8b754741dc1a68e3099968ce89c16e9902e103c37925a8",
+      "footprintFileSha256": "9886763499664dcbcbd9438893af4b1ab5143faf39ff147ed51da0388b300652"
+    },
+    {
+      "assetId": "pushbutton-tl3342",
+      "symbol": "Switch:SW_Push",
+      "footprint": "Button_Switch_SMD:SW_SPST_TL3342",
+      "symbolPinCount": 2,
+      "footprintPadCount": 2,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "a93607f7bb68bce50996f458d7be86e1e187ac661877548a5119f8b890748fef",
+      "footprintFileSha256": "5529a38017a0115b81f9762ded4c845a9d51abbe807690996e39b10e3de22423"
+    },
+    {
+      "assetId": "pin-header-1x02",
+      "symbol": "Connector_Generic:Conn_01x02",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+      "symbolPinCount": 2,
+      "footprintPadCount": 2,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "c44a0a561694b37a58027539b4e215067f64b5789cd7855bc001890dc484d51b",
+      "footprintFileSha256": "d99c4d03937f72768bbafadda5817203e12c47cb823f3f40a55823bbdfe1e1b6"
+    },
+    {
+      "assetId": "pin-header-1x04",
+      "symbol": "Connector_Generic:Conn_01x04",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
+      "symbolPinCount": 4,
+      "footprintPadCount": 4,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "c44a0a561694b37a58027539b4e215067f64b5789cd7855bc001890dc484d51b",
+      "footprintFileSha256": "89dd15132b2ad0d4f59fdb37878b65ebcd4d587422fc90fed5db30bee18c24e8"
+    },
+    {
+      "assetId": "mounting-hole-m2",
+      "symbol": "Mechanical:MountingHole",
+      "footprint": "MountingHole:MountingHole_2.2mm_M2",
+      "symbolPinCount": 0,
+      "footprintPadCount": 0,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "4c7870f43d33655734456135bc3bdf7b0ae9dc75746b01aa565c28362892aa6b",
+      "footprintFileSha256": "3ac1576b6ab02080ac7c2c716030f13550ab602a7a0f61ae0c461ead5263ecc7"
+    },
+    {
+      "assetId": "w25q128jvs-soic8-wide",
+      "symbol": "Memory_Flash:W25Q128JVS",
+      "footprint": "Package_SO:SOIC-8_5.3x5.3mm_P1.27mm",
+      "symbolPinCount": 8,
+      "footprintPadCount": 8,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "9e0fb3954582acd8b98437193caeef5c7d8793500794a2d057c82bc1e4f3be05",
+      "footprintFileSha256": "6f6cdbbb89a85650a2de1a7c4dcd3f9748112f3c8594be17e5af9b9deeb9f38a"
+    },
+    {
+      "assetId": "usb-c-usb2-gct-usb4105",
+      "symbol": "Connector:USB_C_Receptacle_USB2.0_16P",
+      "footprint": "Connector_USB:USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal",
+      "symbolPinCount": 17,
+      "footprintPadCount": 17,
+      "pinPadCompatible": true,
+      "symbolLibrarySha256": "55b7966df0aad09528ab2985a8d07513aec834658be6a8fdad708d86372ee528",
+      "footprintFileSha256": "f350bfcd388f6081aa7570d5929d6d7fb9556adc3bb24b84d6482e0d5c320818"
+    }
+  ],
+  "deployedRuntimeImageId": "sha256:2f95e32a2833c0c3cc83cfc00e89edbeca93c7fedeea715c1436d9db0f1572db",
+  "kicadVersion": "9.0.2"
+}

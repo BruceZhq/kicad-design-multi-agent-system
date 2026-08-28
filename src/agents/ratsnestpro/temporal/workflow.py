@@ -22,6 +22,52 @@ from agents.ratsnestpro.temporal.contracts import (
 )
 
 
+def _activity_failure_message(exc: ActivityError) -> str:
+    """Preserve the actionable Activity cause instead of its generic wrapper."""
+
+    current: BaseException = exc
+    detail = str(exc)
+    seen: set[int] = set()
+    for _ in range(8):
+        if id(current) in seen:
+            break
+        seen.add(id(current))
+        cause = getattr(current, "cause", None) or current.__cause__
+        if not isinstance(cause, BaseException):
+            break
+        current = cause
+        if str(current):
+            detail = str(current)
+    retry_state = getattr(getattr(exc, "retry_state", None), "name", "")
+    if retry_state == "NON_RETRYABLE_FAILURE":
+        return f"Temporal Activity failed without retry: {detail}"
+    return f"Temporal Activity failed after bounded retries: {detail}"
+
+
+def _activity_failure_contract(
+    exc: ActivityError,
+    *,
+    detailed: bool,
+) -> tuple[str, str, str, list[str]]:
+    if detailed:
+        message = _activity_failure_message(exc)
+        return message, message, message, [message]
+    return (
+        f"Temporal Activity failed after bounded retries: {exc}",
+        f"ActivityError: {exc}",
+        "activity retries exhausted",
+        ["Temporal Activity failed after bounded retries"],
+    )
+
+
+def _resume_start_index(value: Any) -> int:
+    if value is None or value == "":
+        return 0
+    if not isinstance(value, str) or value not in CANONICAL_STEPS:
+        raise ValueError("resume_from_step must be a canonical pipeline step")
+    return CANONICAL_STEPS.index(value)
+
+
 @workflow.defn(name=WORKFLOW_NAME)
 class RatsNestHardwareWorkflow:
     """Advance the existing checkpointed pipeline one canonical step at a time."""
@@ -169,18 +215,37 @@ class RatsNestHardwareWorkflow:
         workflow_timeout = max(
             60, int(input.get("workflow_timeout_seconds", 7_200))
         )
+        resume_from_step = input.get("resume_from_step")
+        start_index = _resume_start_index(resume_from_step)
         deadline = workflow.now() + timedelta(seconds=workflow_timeout)
         manifest_path = ""
+        manifest_digest = ""
         last_summary: dict[str, Any] = {
-            "completed_steps": 0,
+            "completed_steps": start_index,
             "run_directory": "",
             "expected_step": "",
         }
-        current_step = "not_started"
-        self._update(status="running", phase=current_step)
+        current_step = (
+            CANONICAL_STEPS[start_index]
+            if start_index
+            else "not_started"
+        )
+        self._update(
+            status="running",
+            phase=current_step,
+            completed_steps=start_index,
+            detail=(
+                f"resuming from step {start_index + 1}/{len(CANONICAL_STEPS)}"
+                if start_index
+                else "starting pipeline"
+            ),
+        )
 
         try:
-            for index, step in enumerate(CANONICAL_STEPS, start=1):
+            for index, step in enumerate(
+                CANONICAL_STEPS[start_index:],
+                start=start_index + 1,
+            ):
                 if self._paused:
                     await workflow.wait_condition(
                         lambda: not self._paused or self._cancel_requested
@@ -254,8 +319,12 @@ class RatsNestHardwareWorkflow:
                         input.get("governance_scope_token", "")
                     ),
                 }
+                if resume_from_step:
+                    command["resume_from_step"] = resume_from_step
                 if manifest_path:
                     command["manifest_path"] = manifest_path
+                    if manifest_digest:
+                        command["manifest_digest"] = manifest_digest
                 else:
                     command.update(
                         {
@@ -293,6 +362,9 @@ class RatsNestHardwareWorkflow:
                     self._current_activity = None
                 last_summary = summary
                 manifest_path = str(summary.get("manifest_path", manifest_path))
+                manifest_digest = str(
+                    summary.get("manifest_digest", manifest_digest)
+                )
                 completed = int(summary.get("completed_steps", 0) or 0)
                 self._update(
                     status="checkpointed",
@@ -357,14 +429,25 @@ class RatsNestHardwareWorkflow:
                     terminal_status="cancelled",
                     compensation=compensation,
                 )
+            (
+                activity_failure,
+                compensation_reason,
+                progress_detail,
+                release_blockers,
+            ) = _activity_failure_contract(
+                exc,
+                detailed=workflow.patched(
+                    "ratsnest-activity-failure-detail-v1"
+                ),
+            )
             compensation = await self._compensate(
                 input,
                 failed_step=current_step,
                 completed_steps=int(last_summary.get("completed_steps", 0) or 0),
                 run_directory=str(last_summary.get("run_directory", "")),
-                reason=f"ActivityError: {exc}",
+                reason=compensation_reason,
             )
-            self._update(status="failed", phase=current_step, detail="activity retries exhausted")
+            self._update(status="failed", phase=current_step, detail=progress_detail)
             return {
                 "status": "error",
                 "outcome": "execution_blocked",
@@ -372,8 +455,8 @@ class RatsNestHardwareWorkflow:
                 "total_steps": len(CANONICAL_STEPS),
                 "execution_complete": False,
                 "release_ready": False,
-                "error": f"Temporal Activity failed after bounded retries: {exc}",
-                "release_blockers": ["Temporal Activity failed after bounded retries"],
+                "error": activity_failure,
+                "release_blockers": release_blockers,
                 "run_directory": str(last_summary.get("run_directory", "")),
                 "artifacts": list(last_summary.get("artifacts", [])),
                 "temporal": {

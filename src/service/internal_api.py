@@ -33,6 +33,7 @@ from service.internal_auth import (
 from service.runtime_identity import scope_identity
 
 _AGENT_ID = "ratsnestpro-multi-agent"
+_INTERNAL_AGENT_ID_PATTERN = r"^ratsnestpro-(?:multi-agent|single-agent-eval)$"
 _EVOLUTION_CONTROL_PLANE_SUBJECT = "evolution-control-plane"
 _SYSTEM_PROJECT_ID = "00000000-0000-0000-0000-000000000000"
 
@@ -148,10 +149,10 @@ async def internal_info(
     from agents import get_all_agent_info
     from agents.ratsnestpro.profiles import get_profile_metadata
 
-    agent = next(info for info in get_all_agent_info() if info.key == _AGENT_ID)
+    agents = get_all_agent_info()
     models = sorted(settings.AVAILABLE_MODELS)
     return ServiceMetadata(
-        agents=[agent],
+        agents=agents,
         models=models,
         default_agent=_AGENT_ID,
         default_model=settings.DEFAULT_MODEL,
@@ -201,15 +202,16 @@ async def internal_evolution_trial_status(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
-@router.post("/runs/ratsnestpro-multi-agent/stream", response_class=StreamingResponse)
+@router.post("/runs/{agent_id}/stream", response_class=StreamingResponse)
 async def internal_stream(
+    agent_id: Annotated[str, Path(pattern=_INTERNAL_AGENT_ID_PATTERN)],
     input: InternalStreamRequest,
     claims: Annotated[InternalClaims, Depends(verified_internal_claims)],
 ) -> StreamingResponse:
     _require_request_run(claims, input.request_id)
     from service.service import stream
 
-    return await stream(input.to_runtime_input(claims), _AGENT_ID)
+    return await stream(input.to_runtime_input(claims), agent_id)
 
 
 @router.get("/runs/{request_id}")
@@ -257,7 +259,7 @@ async def internal_resume_interaction(
         interaction_id=interaction_id,
         response_request_id=str(input.response_request_id),
         state_version=input.state_version,
-        agent_id=_AGENT_ID,
+        agent_id=current.agent_id,
     )
 
 
@@ -278,12 +280,13 @@ async def internal_history(
     claims: Annotated[InternalClaims, Depends(verified_internal_claims)],
 ) -> ChatHistory:
     _require_request_run(claims, input.request_id)
-    from service.service import history
+    from service.service import history, run_status
 
+    current = await run_status(input.request_id, _owner_id(claims))
     history_input = ChatHistoryInput(thread_id=input.thread_id, user_id=claims.subject)
     history_input.bind_runtime_identity(
         principal_id=claims.subject,
         tenant_id=claims.tenant_id,
         project_id=claims.project_id,
     )
-    return await history(history_input, _AGENT_ID)
+    return await history(history_input, current.agent_id)

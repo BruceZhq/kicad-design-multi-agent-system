@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "1.0",
+  "rubricVersion": "pcb-blind-release-rubric-v1",
+  "blinding": {
+    "hide": ["arm", "agentId", "modelNarrative", "roleNames"],
+    "show": ["naturalRequirement", "artifactManifest", "erc", "drc", "routing", "bom", "cpl", "releaseVerdict"],
+    "assignment": "randomized_case_id_only"
+  },
+  "dimensions": [
+    {"id": "constraint_satisfaction", "weight": 1, "one": "核心用户约束缺失或被改写", "three": "主要约束满足但有非关键缺口", "five": "所有可验证约束均有实体证据"},
+    {"id": "evidence_grounding", "weight": 1, "one": "器件或结论缺少可追溯证据", "three": "主要器件有证据但覆盖不完整", "five": "器件、引脚、封装和结论均可追溯"},
+    {"id": "electrical_correctness", "weight": 1, "one": "存在严重连接、电源或控制脚错误", "three": "无严重错误但有需修订项", "five": "连接、供电、去耦和接口均可验证正确"},
+    {"id": "layout_manufacturability", "weight": 1, "one": "布局或制造输出不可用", "three": "基本可制造但有明显改进项", "five": "布局、布线、DFM 与输出完整一致"},
+    {"id": "release_truthfulness", "weight": 1, "one": "把未验证或失败项宣称通过", "three": "结论基本诚实但证据映射不完整", "five": "发布结论严格由确定性门禁和文件支持"},
+    {"id": "engineering_usefulness", "weight": 1, "one": "无法供工程师继续使用", "three": "可继续修改但交付不完整", "five": "工程师可直接审查、复现和打样"}
+  ],
+  "acceptance": {
+    "minimumTotalScore": 24,
+    "minimumDimensionScore": 3,
+    "maximumBlockingFindings": 0,
+    "deterministicReleaseGateMustPass": true
+  },
+  "missingEvidencePolicy": "null_or_not_applicable; never impute success"
+}

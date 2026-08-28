@@ -1,0 +1,55 @@
+{
+  "schemaVersion": "1.0",
+  "experimentId": "ratsnest-orchestration-ab-v1",
+  "hypothesis": "With model, evidence tools, engineering pipeline, review gates and budgets held fixed, orchestration is the only intended independent variable.",
+  "arms": {
+    "single_agent": {
+      "agentId": "ratsnestpro-single-agent-eval",
+      "graphShape": "one_node_continuous_context"
+    },
+    "multi_agent": {
+      "agentId": "ratsnestpro-multi-agent",
+      "graphShape": "supervisor_specialist_handoffs"
+    }
+  },
+  "model": "deepseek-v4-flash",
+  "provider": "deepseek",
+  "temperature": null,
+  "seed": null,
+  "samplingControl": "provider_does_not_guarantee_temperature_or_seed_for_this_runtime; record observed run identity and do not claim deterministic inference",
+  "capabilityProfile": "site-control-telemetry@1.1",
+  "budget": {
+    "maxWallClockMinutes": 600,
+    "maxLlmTokens": 1200000,
+    "maxAheRepairs": 6,
+    "maxSameFailureRetries": 2
+  },
+  "evidenceToolAllowlist": [
+    "ratsnest_lookup_kicad_symbol",
+    "ratsnest_validate_kicad_binding",
+    "ratsnest_search_internal_knowledge",
+    "web_search_kicad_official_docs",
+    "web_search",
+    "web_search_official_manufacturer",
+    "fetch_datasheet",
+    "ratsnest_search_parts"
+  ],
+  "sharedDeterministicSystems": [
+    "ratsnest_temporal_hardware_workflow",
+    "17_step_eda_pipeline",
+    "ratsnest_review_kicad_project",
+    "artifact_manifest_release_gate"
+  ],
+  "assetSnapshotPath": "evals/paired/kicad-assets.v1.json",
+  "assetSnapshotDigest": "384b376900421ca3a6900ef0eab6321f07f4f82d6ed0af3e4e39d71a2d66bb12",
+  "executionPolicy": {
+    "mode": "counterbalanced_sequential",
+    "parallelArms": false,
+    "freshThreadPerArm": true,
+    "freshWorkspaceRunPerArm": true,
+    "samePromptWithinPair": true,
+    "sameFrozenInputsWithinPair": true
+  },
+  "deployedRuntimeImageId": "sha256:2f95e32a2833c0c3cc83cfc00e89edbeca93c7fedeea715c1436d9db0f1572db",
+  "kicadVersion": "9.0.2"
+}

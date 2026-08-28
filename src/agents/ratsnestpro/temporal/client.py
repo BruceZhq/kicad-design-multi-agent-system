@@ -149,6 +149,7 @@ async def dispatch_hardware_workflow(
     harness_version_id: str = "",
     harness_manifest_digest: str = "",
     governance_scope_token: str = "",
+    resume_from_step: str | None = None,
 ) -> dict[str, Any]:
     """Start once, or attach when a LangGraph checkpoint replays dispatch."""
 
@@ -165,6 +166,14 @@ async def dispatch_hardware_workflow(
                 "model_name": model_name,
                 "model_type": model_type,
                 "ahe_budget": ahe_budget or {},
+                **(
+                    {
+                        "resume_from_step": resume_from_step,
+                        "resume_token": request_id,
+                    }
+                    if resume_from_step
+                    else {}
+                ),
             },
             "run_name": run_name,
             "workspace_run_name": workspace_run_name,
@@ -205,6 +214,8 @@ async def dispatch_hardware_workflow(
         "heartbeat_seconds": settings.RATSNESTPRO_TEMPORAL_HEARTBEAT_SECONDS,
         "workflow_timeout_seconds": workflow_timeout_seconds,
     }
+    if resume_from_step:
+        workflow_input["resume_from_step"] = resume_from_step
     expected_identity = hardware_workflow_identity(workflow_input)
     status = "started"
     try:
