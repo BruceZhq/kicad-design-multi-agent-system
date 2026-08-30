@@ -8,6 +8,7 @@ from ratsnestpro.orchestration.pipeline import (
     PcbPlacementPlan,
     PipelineContext,
     PipelineState,
+    PipelineStep,
     Severity,
 )
 
@@ -32,6 +33,146 @@ def test_functional_anchor_uses_role_and_connectivity_not_physical_nearness() ->
     )
 
     assert anchor == "U2"
+
+
+def test_local_support_prefers_functional_ic_over_button_or_connector() -> None:
+    anchor = pipeline._functional_anchor_ref(
+        "R1",
+        "reset_pullup",
+        {
+            "R1": "reset_pullup",
+            "U1": "mcu",
+            "SW1": "reset_button",
+            "J1": "reset_connector",
+        },
+        {
+            "R1": (55.5, 5.0),
+            "U1": (35.0, 24.0),
+            "SW1": (10.5, 4.0),
+            "J1": (8.0, 4.0),
+        },
+        connected_refs={
+            "R1": {"U1": 1.0, "SW1": 1.0, "J1": 1.0},
+        },
+        allow_connectors=True,
+        eligible_anchor_refs={"U1", "SW1", "J1"},
+    )
+
+    assert anchor == "U1"
+
+
+def test_local_support_inherits_functional_owner_zone(monkeypatch) -> None:
+    state = PipelineState(requirement_text="board", project_name="board")
+    state.artifacts[PipelineStep.LAYOUT_PARTITION] = pipeline.BoardPartition(
+        board_width=70.0,
+        board_height=45.0,
+        zones=[
+            pipeline.BoardZone(
+                name="MCU_Core_U1",
+                kind="mcu",
+                target_ref="U1",
+                x1=28.0,
+                y1=15.0,
+                x2=48.0,
+                y2=30.0,
+            ),
+            pipeline.BoardZone(
+                name="SWD_Debug_J2",
+                kind="debug_interface",
+                target_ref="J2",
+                x1=62.0,
+                y1=18.0,
+                x2=69.0,
+                y2=28.0,
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_roles",
+        lambda _state: {
+            "U1": "mcu",
+            "J2": "debug_connector",
+            "R2": "boot0_pulldown",
+        },
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_connected_refs_by_ref",
+        lambda _state: {"R2": {"U1": 1.0, "J2": 1.0}},
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_functional_anchor_refs",
+        lambda _state: {"U1", "J2"},
+    )
+
+    targets, ambiguities = pipeline._resolved_zone_targets(state)
+
+    assert targets["R2"] == (38.0, 22.5)
+    assert "R2" not in ambiguities
+
+
+def test_layout_general_repairs_local_support_before_repacking(monkeypatch) -> None:
+    step = LayoutGeneralStep()
+    state = PipelineState(requirement_text="board", project_name="board")
+    original = PcbPlacementPlan(
+        board_width=70.0,
+        board_height=50.0,
+        placements=[
+            PcbPlacement(ref="U1", x=10.0, y=25.0),
+            PcbPlacement(ref="R1", x=60.0, y=25.0),
+        ],
+        rationale="baseline",
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_roles",
+        lambda _state: {"U1": "mcu", "R1": "reset_pullup"},
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_footprints_of",
+        lambda _state: {"U1": "", "R1": ""},
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_connected_refs_by_ref",
+        lambda _state: {"R1": {"U1": 1.0}, "U1": {"R1": 1.0}},
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_functional_anchor_refs",
+        lambda _state: {"U1"},
+    )
+    monkeypatch.setattr(
+        step,
+        "propose",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local support repair must run before full repacking")
+        ),
+    )
+
+    checks = step.check(state, original)
+    assert any(
+        check.name == "local_support_near_anchor" and not check.ok
+        for check in checks
+    )
+
+    repaired, used_llm = step.repair(
+        state,
+        PipelineContext(),
+        "",
+        original,
+        checks,
+    )
+
+    assert repaired.by_ref()["R1"] != original.by_ref()["R1"]
+    assert not any(
+        not check.ok and check.severity == Severity.ERROR
+        for check in step.check(state, repaired)
+    )
+    assert used_llm is False
 
 
 def test_maxrect_emits_functional_anchor_before_large_dependent(

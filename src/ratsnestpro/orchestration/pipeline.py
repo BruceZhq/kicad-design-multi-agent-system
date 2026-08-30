@@ -25,6 +25,7 @@ subclasses :class:`PipelineStepBase` and is registered in :data:`ALL_STEPS`.
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import math
 import os
@@ -33,6 +34,7 @@ import shutil
 import tempfile
 import time
 from abc import ABC, abstractmethod
+from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -55,6 +57,7 @@ from ratsnestpro.eda.materialize import materialize_pinmapped
 from ratsnestpro.eda.vendor.library import register_library
 from ratsnestpro.knowledge import KnowledgeBase, build_default_kb
 from ratsnestpro.orchestration.ahe import (
+    CandidateStateSnapshot,
     CapabilityGap,
     FailureAction,
     FailureAttribution,
@@ -399,10 +402,19 @@ class PipelineContext:
     agentic_recovery_enabled: bool = False
     max_agentic_recovery_turns_per_step: int = 6
     max_total_agentic_recovery_turns: int = 24
+    active_recovery_tool: str = ""
 
 
 _MAX_REPAIR_ARTIFACT_CHARS = 80_000
 _ERC_EVIDENCE_CONTRACT_VERSION = 1
+_DIRECT_LOCAL_REPAIR_TOOLS = frozenset({
+    "repair_route_connectivity",
+    "repair_physical_track_width",
+})
+_LOCAL_REPAIR_TOOL_WHITELIST = frozenset({
+    *_DIRECT_LOCAL_REPAIR_TOOLS,
+    "repair_current_step",
+})
 
 
 def _artifact_fingerprint(artifact: BaseModel | None) -> str:
@@ -418,6 +430,62 @@ def _artifact_fingerprint(artifact: BaseModel | None) -> str:
         return ""
     payload = artifact.model_dump_json(exclude={"rationale"})
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+
+
+def _recovery_action_fingerprint(decision: RecoveryDecision) -> str:
+    """Identify the executable recovery proposal, not merely its broad class."""
+
+    instructions = str(decision.tool_args.get("repair_instructions", ""))
+    payload = {
+        "action": decision.action.value,
+        "target_step": decision.target_step,
+        "tool_name": decision.tool_name,
+        "strategy": " ".join(decision.strategy.casefold().split()),
+        "repair_instructions": " ".join(instructions.casefold().split()),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:20]
+
+
+def _bind_local_repair_tool(
+    result: StepResult,
+    repair_instructions: str,
+) -> str:
+    """Bind an advisory local strategy to one owned executable capability."""
+
+    if result.step != PipelineStep.ROUTE_SIGNALS:
+        return "repair_current_step"
+    instructions = " ".join(repair_instructions.casefold().split())
+    failed_checks = {check.name for check in result.error_checks}
+    reason_codes = {
+        reason.casefold()
+        for reason in (
+            *(check.reason_code for check in result.error_checks),
+            *(failure.reason_code for failure in result.failures),
+        )
+        if reason
+    }
+    width_owned = "routing_physical_invariants" in failed_checks and bool(
+        re.search(
+            r"\b(?:width|widen|minimum.track|undersized|track.size|线宽|加宽)\b",
+            instructions
+            + " "
+            + " ".join(check.message.casefold() for check in result.error_checks),
+        )
+    )
+    connectivity_owned = (
+        "signals_routed" in failed_checks
+        or bool(reason_codes.intersection({
+            "kicad_drc_unconnected",
+            "routing_incomplete",
+        }))
+    )
+    if width_owned:
+        return "repair_physical_track_width"
+    if connectivity_owned:
+        return "repair_route_connectivity"
+    return "repair_current_step"
 
 
 # --------------------------------------------------------------------------- #
@@ -709,6 +777,74 @@ def _fallback_recovery_decision(
     )
 
 
+def _recovery_entity_context(
+    state: PipelineState,
+    result: StepResult,
+    artifact: BaseModel | None,
+) -> list[dict[str, Any]]:
+    """Expose grounded ownership facts for the refs named by a failed gate."""
+
+    affected_refs = sorted({
+        ref
+        for failure in result.failures
+        for ref in failure.affected_refs
+        if ref
+    })[:24]
+    selection = state.artifact(PipelineStep.SELECTION)
+    if not affected_refs or not isinstance(selection, SelectionPlan):
+        return []
+    parts = {part.ref: part for part in selection.parts}
+    roles = {part.ref: part.role for part in selection.parts}
+    netlist = state.artifact(PipelineStep.SCH_CONNECTIONS)
+    view = (
+        _ConnectivityView.build(selection, netlist)
+        if isinstance(netlist, NetlistIntent)
+        else None
+    )
+    connected_refs = _connected_refs_by_ref(state)
+    positions = (
+        {
+            placement.ref: (placement.x, placement.y)
+            for placement in artifact.placements
+        }
+        if isinstance(artifact, PcbPlacementPlan)
+        else {}
+    )
+    eligible_anchor_refs = _functional_anchor_refs(state)
+    context: list[dict[str, Any]] = []
+    for ref in affected_refs:
+        part = parts.get(ref)
+        if part is None:
+            continue
+        functional_owner = None
+        if _is_local_support_role(part.role):
+            functional_owner = _functional_anchor_ref(
+                ref,
+                part.role,
+                roles,
+                positions,
+                connected_refs=connected_refs,
+                allow_connectors=True,
+                eligible_anchor_refs=eligible_anchor_refs,
+            )
+        context.append({
+            "ref": ref,
+            "role": part.role,
+            "value": part.value,
+            "symbol": part.symbol,
+            "footprint": part.footprint,
+            "electrical_nets": (
+                sorted(view.part_nets(part)) if view is not None else []
+            ),
+            "connected_references": sorted(
+                connected_refs.get(ref, {}).items(),
+                key=lambda item: (-item[1], item[0]),
+            )[:16],
+            "functional_owner": functional_owner,
+        })
+    return context
+
+
 def _plan_agentic_recovery(
     *,
     state: PipelineState,
@@ -793,6 +929,11 @@ def _plan_agentic_recovery(
         "failure_envelopes": [
             failure.model_dump(mode="json") for failure in result.failures
         ],
+        "affected_entity_context": _recovery_entity_context(
+            state,
+            result,
+            artifact,
+        ),
         "candidate_artifact_json": artifact_json,
         "allowed_actions": [
             RecoveryAction.LOCAL_REPAIR.value,
@@ -978,7 +1119,16 @@ class PipelineStepBase(ABC):
         else:
             artifact, used_llm = resumed
             artifact = self.prepare_resumed_artifact(state, artifact)
-            if ctx.repair_feedback:
+            if ctx.active_recovery_tool in _DIRECT_LOCAL_REPAIR_TOOLS:
+                artifact, repair_used_llm = self.repair(
+                    state,
+                    ctx,
+                    knowledge,
+                    artifact,
+                    self.check(state, artifact),
+                )
+                used_llm = used_llm or repair_used_llm
+            elif ctx.repair_feedback:
                 artifact, used_llm = self.replan(
                     state,
                     ctx,
@@ -1219,6 +1369,10 @@ class PipelineStepBase(ABC):
                     f"{failure_text}"
                 )
                 before_score = self.convergence_score(best_artifact, best_checks)
+                attempt_file_snapshot = _snapshot_candidate_files(
+                    ctx,
+                    f"repair-{self.step.value}-{state.revision}-{attempt}",
+                )
                 try:
                     candidate, candidate_used_llm = self.repair(
                         state,
@@ -1227,6 +1381,7 @@ class PipelineStepBase(ABC):
                         best_artifact,
                         best_checks,
                     )
+                    candidate_checks = self.check(state, candidate)
                 except LlmError as exc:
                     # The already validated, blocked proposal and its deterministic
                     # check evidence are more useful than losing the entire step
@@ -1249,10 +1404,13 @@ class PipelineStepBase(ABC):
                     repair_records.append(record)
                     state.repair_history.append(record)
                     emit("repair_error", repair=record)
+                    _restore_candidate_files(ctx, attempt_file_snapshot)
                     break
+                except Exception:
+                    _restore_candidate_files(ctx, attempt_file_snapshot)
+                    raise
                 finally:
                     ctx.repair_feedback = ""
-                candidate_checks = self.check(state, candidate)
                 after_score = self.convergence_score(candidate, candidate_checks)
                 improved = self.repair_progress_is_material(
                     before_score,
@@ -1284,6 +1442,7 @@ class PipelineStepBase(ABC):
                 state.repair_history.append(record)
                 emit(f"repair_{record.status}", repair=record)
                 if improved:
+                    _discard_candidate_files(ctx, attempt_file_snapshot)
                     best_artifact = candidate
                     best_checks = candidate_checks
                     used_llm = candidate_used_llm
@@ -1295,12 +1454,13 @@ class PipelineStepBase(ABC):
                         best_artifact
                     )
                     consecutive_stagnant = 0
-                elif custom_repair and self.repair_is_deterministic:
-                    # A deterministic local transform will produce the same
-                    # rejected patch on the next call. Preserve budget for an
-                    # upstream replan instead of repeating it.
-                    break
                 else:
+                    _restore_candidate_files(ctx, attempt_file_snapshot)
+                    if custom_repair and self.repair_is_deterministic:
+                        # A deterministic local transform will produce the same
+                        # rejected patch on the next call. Preserve budget for an
+                        # upstream replan instead of repeating it.
+                        break
                     consecutive_stagnant += 1
                 if self.convergence_score(best_artifact, best_checks)[0] == 0:
                     break
@@ -1725,17 +1885,108 @@ def _architect_evidence_payload(text: str) -> dict[str, Any]:
     return payload
 
 
+_SINGLETON_CONTROL_ALIASES = frozenset({
+    "BOOT",
+    "BOOT0",
+    "EN",
+    "ENABLE",
+    "GPIO0",
+    "IO0",
+    "NRESET",
+    "NRST",
+    "RESET",
+    "SWCLK",
+    "SWDIO",
+})
+
+
+def _direct_datasheet_alias_match(
+    payload: dict[str, Any],
+    alias: VerifiedPinAlias,
+    function: str,
+) -> bool:
+    """Prove a flattened-table alias only from a composite pin token.
+
+    PDF extraction may flatten an entire pinout table into one line.  Mere
+    line co-location then aliases every GPIO to every control function on the
+    page.  A composite token such as ``PA14-BOOT0`` remains unambiguous after
+    flattening and is safe to use to collapse such a fan-out.
+    """
+
+    datasheet = payload.get("datasheet", {})
+    pages = datasheet.get("matched_pages", []) if isinstance(datasheet, dict) else []
+    if not isinstance(pages, list):
+        return False
+    pin = re.escape(alias.symbol_pin_name)
+    control = re.escape(function)
+    composite = re.compile(
+        rf"(?<![A-Za-z0-9])(?:{pin}(?:[-_/]+){control}|"
+        rf"{control}(?:[-_/]+){pin})(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+    evidenced_pages = {
+        match.group(1)
+        for evidence_id in alias.evidence_ids
+        if (match := re.search(r"#page=(\d+)(?:$|[&#])", evidence_id))
+    }
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        page_number = str(page.get("page", ""))
+        if evidenced_pages and page_number not in evidenced_pages:
+            continue
+        if composite.search(str(page.get("text", ""))):
+            return True
+    return False
+
+
 def _verified_pin_aliases(text: str) -> tuple[VerifiedPinAlias, ...]:
-    raw = _architect_evidence_payload(text).get("verified_pin_aliases", [])
+    payload = _architect_evidence_payload(text)
+    raw = payload.get("verified_pin_aliases", [])
     if not isinstance(raw, list):
         return ()
-    verified: list[VerifiedPinAlias] = []
+    parsed: list[VerifiedPinAlias] = []
     for item in raw[:512]:
         try:
-            verified.append(VerifiedPinAlias.model_validate(item))
+            parsed.append(VerifiedPinAlias.model_validate(item))
         except Exception:  # noqa: BLE001 - malformed evidence is ignored fail-closed
             continue
-    return tuple(verified)
+    grouped: dict[tuple[str, str], list[VerifiedPinAlias]] = {}
+    for item in parsed:
+        for function in item.aliases:
+            normalized = re.sub(r"[^A-Z0-9]", "", function.upper())
+            grouped.setdefault(
+                (item.symbol_lib_id.casefold(), normalized),
+                [],
+            ).append(item)
+
+    approved: dict[tuple[str, str, str], set[str]] = {}
+    source: dict[tuple[str, str, str], VerifiedPinAlias] = {}
+    for (_symbol, function), candidates in grouped.items():
+        unique = {
+            (item.symbol_lib_id, item.pin_number, item.symbol_pin_name): item
+            for item in candidates
+        }
+        selected = list(unique.values())
+        if function in _SINGLETON_CONTROL_ALIASES and len(selected) > 1:
+            selected = [
+                item
+                for item in selected
+                if _direct_datasheet_alias_match(payload, item, function)
+            ]
+            if len(selected) != 1:
+                # Ambiguous executable evidence is ignored fail-closed.  The
+                # installed direct pin name may still resolve the function.
+                continue
+        for item in selected:
+            key = (item.symbol_lib_id, item.pin_number, item.symbol_pin_name)
+            source[key] = item
+            approved.setdefault(key, set()).add(function)
+
+    return tuple(
+        source[key].model_copy(update={"aliases": sorted(aliases)})
+        for key, aliases in sorted(approved.items())
+    )
 
 
 def _model_mention_is_negated(text: str, start: int) -> bool:
@@ -6805,8 +7056,6 @@ def _normalize_control_support(
             if len(symbols.symbol_pins(part.symbol) or []) != 2:
                 continue
             nets = view.part_nets(part)
-            if len(nets) >= 2:
-                continue
             is_switch = (
                 part.ref.upper().startswith("SW")
                 or part.symbol.lower().startswith("switch:")
@@ -6825,6 +7074,8 @@ def _normalize_control_support(
             elif supply and (is_pullup or part.ref.upper().startswith("R")):
                 other = supply
             else:
+                continue
+            if nets == {control_net, other}:
                 continue
             normalized = _rewire_two_terminal_part(
                 normalized,
@@ -11780,6 +12031,13 @@ def _is_connector_part(part: SelectedPart) -> bool:
     return connector_symbol or connector_ref or _is_connector_role(part.role)
 
 
+def _is_human_interface_endpoint_role(role: str) -> bool:
+    """Return whether a role consumes a signal rather than owning its circuit."""
+
+    tokens = set(re.findall(r"[a-z0-9]+", role.lower()))
+    return bool(tokens & {"button", "switch", "key", "keypad", "encoder"})
+
+
 def _is_mounting_hole_role(role: str) -> bool:
     text = role.lower()
     return "mounting" in text and "hole" in text
@@ -11859,7 +12117,7 @@ def _functional_anchor_ref(
         if connected_refs is not None
         else None
     )
-    candidates: list[tuple[int, float, int, str]] = []
+    candidates: list[tuple[int, int, float, int, str]] = []
     for candidate_ref, candidate_role in roles.items():
         if (
             candidate_ref == ref
@@ -11889,6 +12147,19 @@ def _functional_anchor_ref(
             if _is_mcu_role(candidate_role)
             else 0
         )
+        # Pulls, bias parts, filters, and other local support belong to the
+        # active IC that owns their signal.  A button or connector may share
+        # the same named net (and therefore more role tokens), but it is an
+        # endpoint, not the functional owner of that support component.
+        functional_owner_priority = (
+            0
+            if _is_local_support_role(role)
+            and (
+                _is_connector_role(candidate_role)
+                or _is_human_interface_endpoint_role(candidate_role)
+            )
+            else 1
+        )
         if score or electrical_neighbors is not None:
             electrical_strength = (
                 electrical_neighbors.get(candidate_ref, 0.0)
@@ -11896,19 +12167,21 @@ def _functional_anchor_ref(
                 else 0.0
             )
             candidates.append((
+                functional_owner_priority,
                 score,
                 electrical_strength,
                 anchor_priority,
                 candidate_ref,
             ))
     if candidates:
-        _, _, _, anchor_ref = max(
+        _, _, _, _, anchor_ref = max(
             candidates,
             key=lambda item: (
                 item[0],
                 item[1],
                 item[2],
-                -list(roles).index(item[3]),
+                item[3],
+                -list(roles).index(item[4]),
             ),
         )
         return anchor_ref
@@ -12375,6 +12648,33 @@ def _resolved_zone_targets(
     }
     partition = bind_zone_targets(partition, roles)
     zones = partition.zones
+    # Resolve exact physical owners once, independent of selection order.  A
+    # local support part such as a pull resistor may share a net with both an
+    # IC and a connector; semantic zone names alone then produce a false tie.
+    # Such support inherits the zone of its electrically connected functional
+    # owner, using the same ownership rule as the proximity gate.
+    exact_owner_targets: dict[str, tuple[float, float]] = {}
+    for candidate_ref in roles:
+        explicitly_bound = [
+            zone
+            for zone in zones
+            if zone.target_ref.strip().casefold()
+            == candidate_ref.strip().casefold()
+        ]
+        exact_named = [
+            zone
+            for zone in zones
+            if zone.name.strip().casefold() == candidate_ref.strip().casefold()
+        ]
+        matches = explicitly_bound or exact_named
+        if len(matches) == 1:
+            zone = matches[0]
+            exact_owner_targets[candidate_ref] = (
+                (zone.x1 + zone.x2) / 2,
+                (zone.y1 + zone.y2) / 2,
+            )
+    connected_refs = _connected_refs_by_ref(state)
+    eligible_anchor_refs = _functional_anchor_refs(state)
     for ref, role in roles.items():
         explicitly_bound = [
             zone
@@ -12406,6 +12706,19 @@ def _resolved_zone_targets(
         if len(exact) > 1:
             ambiguities[ref] = [zone.name for zone in exact]
             continue
+        if _is_local_support_role(role):
+            owner_ref = _functional_anchor_ref(
+                ref,
+                role,
+                roles,
+                exact_owner_targets,
+                connected_refs=connected_refs,
+                allow_connectors=True,
+                eligible_anchor_refs=eligible_anchor_refs,
+            )
+            if owner_ref in exact_owner_targets:
+                targets[ref] = exact_owner_targets[owner_ref]
+                continue
         group = _role_group(role)
         role_tokens = _semantic_role_tokens(role)
         scored: list[tuple[int, int, BoardZone]] = []
@@ -13821,7 +14134,6 @@ class LayoutGeneralStep(PipelineStepBase):
         if any(
             check.name in {
                 "all_parts_placed",
-                "local_support_near_anchor",
                 "placement_constraints_satisfied",
                 "unambiguous_zone_binding",
             }
@@ -13834,7 +14146,14 @@ class LayoutGeneralStep(PipelineStepBase):
             # dependency packer before proximity repair.
             return self.propose(state, ctx, knowledge)
         repaired = _repair_proximity_placements(state, artifact)
-        if any(
+        placement_changed = {
+            (placement.ref, placement.x, placement.y, placement.rotation)
+            for placement in repaired.placements
+        } != {
+            (placement.ref, placement.x, placement.y, placement.rotation)
+            for placement in artifact.placements
+        }
+        if not placement_changed or any(
             not check.ok and check.severity == Severity.ERROR
             for check in self.check(state, repaired)
         ):
@@ -14715,6 +15034,646 @@ def _candidate_copper_paths(
     return paths
 
 
+@dataclass(frozen=True)
+class _CopperObstacle:
+    start: tuple[float, float]
+    end: tuple[float, float]
+    radius: float
+
+
+def _point_segment_distance(
+    point: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> float:
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length_squared = dx * dx + dy * dy
+    if length_squared <= 1e-12:
+        return math.dist(point, start)
+    scale = max(
+        0.0,
+        min(
+            1.0,
+            ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy)
+            / length_squared,
+        ),
+    )
+    projection = (start[0] + scale * dx, start[1] + scale * dy)
+    return math.dist(point, projection)
+
+
+def _segments_intersect(
+    left_start: tuple[float, float],
+    left_end: tuple[float, float],
+    right_start: tuple[float, float],
+    right_end: tuple[float, float],
+) -> bool:
+    def orientation(
+        first: tuple[float, float],
+        second: tuple[float, float],
+        third: tuple[float, float],
+    ) -> float:
+        return (
+            (second[0] - first[0]) * (third[1] - first[1])
+            - (second[1] - first[1]) * (third[0] - first[0])
+        )
+
+    values = (
+        orientation(left_start, left_end, right_start),
+        orientation(left_start, left_end, right_end),
+        orientation(right_start, right_end, left_start),
+        orientation(right_start, right_end, left_end),
+    )
+    if values[0] * values[1] < -1e-12 and values[2] * values[3] < -1e-12:
+        return True
+    return any(
+        abs(value) <= 1e-12
+        and min(segment_start[0], segment_end[0]) - 1e-9
+        <= point[0]
+        <= max(segment_start[0], segment_end[0]) + 1e-9
+        and min(segment_start[1], segment_end[1]) - 1e-9
+        <= point[1]
+        <= max(segment_start[1], segment_end[1]) + 1e-9
+        for value, segment_start, segment_end, point in (
+            (values[0], left_start, left_end, right_start),
+            (values[1], left_start, left_end, right_end),
+            (values[2], right_start, right_end, left_start),
+            (values[3], right_start, right_end, left_end),
+        )
+    )
+
+
+def _segment_distance(
+    left_start: tuple[float, float],
+    left_end: tuple[float, float],
+    right_start: tuple[float, float],
+    right_end: tuple[float, float],
+) -> float:
+    if _segments_intersect(left_start, left_end, right_start, right_end):
+        return 0.0
+    return min(
+        _point_segment_distance(left_start, right_start, right_end),
+        _point_segment_distance(left_end, right_start, right_end),
+        _point_segment_distance(right_start, left_start, left_end),
+        _point_segment_distance(right_end, left_start, left_end),
+    )
+
+
+def _frozen_gap_route_width(state: PipelineState, net_name: str) -> float:
+    """Freeze the narrowest legal width before generating a repair candidate."""
+
+    cap = config.process_capability()
+    route_plan = state.artifact(PipelineStep.ROUTE_PLAN)
+    route_width = min(
+        (
+            net_class.width
+            for net_class in route_plan.net_classes
+        ),
+        default=cap.min_track_width,
+    ) if isinstance(route_plan, RoutePlan) else cap.min_track_width
+    width = max(cap.min_track_width, route_width)
+    invariants = extract_requirement_invariants(state.requirement_text)
+    explicit_nets = {
+        name.upper().lstrip("+")
+        for name in invariants.minimum_track_width_nets
+    }
+    normalized_net = net_name.upper().lstrip("+")
+    if (
+        invariants.minimum_track_width_mm is not None
+        and (not explicit_nets or normalized_net in explicit_nets)
+    ):
+        width = max(width, invariants.minimum_track_width_mm)
+    return width
+
+
+def _copper_obstacles(
+    board: Any,
+    *,
+    net_name: str,
+    layer: str,
+) -> list[_CopperObstacle]:
+    """Extract real other-net tracks, pads, and vias on one copper layer."""
+
+    from ratsnestpro.eda.vendor.footprint import rotate_offset
+    from ratsnestpro.eda.vendor.sexpr import Atom, find_all, find_first
+
+    obstacles: list[_CopperObstacle] = []
+    for track in board.list_tracks(layer=layer):
+        if track.get("net_name") == net_name:
+            continue
+        start = track.get("start")
+        end = track.get("end")
+        width = track.get("width")
+        if start and end and width is not None:
+            obstacles.append(_CopperObstacle(
+                start=(float(start[0]), float(start[1])),
+                end=(float(end[0]), float(end[1])),
+                radius=float(width) / 2,
+            ))
+
+    net_names = {
+        item["index"]: item["name"]
+        for item in board.list_nets()
+    }
+    for footprint in find_all(board.root, "footprint"):
+        footprint_at = find_first(footprint, "at")
+        if footprint_at is None or len(footprint_at) < 3:
+            continue
+        origin = (
+            Atom(str(footprint_at[1])).as_float(),
+            Atom(str(footprint_at[2])).as_float(),
+        )
+        rotation = (
+            Atom(str(footprint_at[3])).as_float()
+            if len(footprint_at) > 3
+            else 0.0
+        )
+        for pad in find_all(footprint, "pad"):
+            pad_layers = find_first(pad, "layers")
+            layers = {
+                str(item)
+                for item in pad_layers[1:]
+            } if pad_layers is not None else set()
+            if layer not in layers and "*.Cu" not in layers:
+                continue
+            net_node = find_first(pad, "net")
+            net_index = (
+                Atom(str(net_node[1])).as_int()
+                if net_node is not None and len(net_node) > 1
+                else 0
+            )
+            if net_names.get(net_index, "") == net_name:
+                continue
+            at = find_first(pad, "at")
+            size = find_first(pad, "size")
+            if at is None or size is None or len(size) < 3:
+                continue
+            offset = rotate_offset(
+                Atom(str(at[1])).as_float(),
+                Atom(str(at[2])).as_float(),
+                -rotation,
+            )
+            center = (origin[0] + offset[0], origin[1] + offset[1])
+            size_x = Atom(str(size[1])).as_float()
+            size_y = Atom(str(size[2])).as_float()
+            pad_rotation = (
+                Atom(str(at[3])).as_float()
+                if len(at) > 3
+                else rotation
+            )
+            if size_x >= size_y:
+                half_axis = rotate_offset(
+                    (size_x - size_y) / 2,
+                    0.0,
+                    -pad_rotation,
+                )
+            else:
+                half_axis = rotate_offset(
+                    0.0,
+                    (size_y - size_x) / 2,
+                    -pad_rotation,
+                )
+            obstacles.append(_CopperObstacle(
+                (center[0] - half_axis[0], center[1] - half_axis[1]),
+                (center[0] + half_axis[0], center[1] + half_axis[1]),
+                min(size_x, size_y) / 2,
+            ))
+
+    for via in find_all(board.root, "via"):
+        via_layers = find_first(via, "layers")
+        layers = {
+            str(item)
+            for item in via_layers[1:]
+        } if via_layers is not None else set()
+        if layer not in layers:
+            continue
+        net_node = find_first(via, "net")
+        net_index = (
+            Atom(str(net_node[1])).as_int()
+            if net_node is not None and len(net_node) > 1
+            else 0
+        )
+        if net_names.get(net_index, "") == net_name:
+            continue
+        at = find_first(via, "at")
+        size = find_first(via, "size")
+        if at is None or size is None or len(at) < 3 or len(size) < 2:
+            continue
+        center = (
+            Atom(str(at[1])).as_float(),
+            Atom(str(at[2])).as_float(),
+        )
+        obstacles.append(_CopperObstacle(
+            center,
+            center,
+            Atom(str(size[1])).as_float() / 2,
+        ))
+    return obstacles
+
+
+def _route_bounds(
+    board: Any,
+    endpoints: tuple[tuple[float, float], tuple[float, float]],
+    width: float,
+) -> tuple[float, float, float, float]:
+    from ratsnestpro.eda.vendor.sexpr import Atom, find_all, find_first
+
+    edge_points: list[tuple[float, float]] = []
+    for line in find_all(board.root, "gr_line"):
+        layer = find_first(line, "layer")
+        if layer is None or len(layer) < 2 or str(layer[1]) != "Edge.Cuts":
+            continue
+        for tag in ("start", "end"):
+            point = find_first(line, tag)
+            if point is not None and len(point) >= 3:
+                edge_points.append((
+                    Atom(str(point[1])).as_float(),
+                    Atom(str(point[2])).as_float(),
+                ))
+    points = edge_points or list(endpoints)
+    cap = config.process_capability()
+    margin = cap.min_board_edge_clearance + width / 2
+    if edge_points:
+        return (
+            min(point[0] for point in points) + margin,
+            min(point[1] for point in points) + margin,
+            max(point[0] for point in points) - margin,
+            max(point[1] for point in points) - margin,
+        )
+    return (
+        min(point[0] for point in points) - 5.0,
+        min(point[1] for point in points) - 5.0,
+        max(point[0] for point in points) + 5.0,
+        max(point[1] for point in points) + 5.0,
+    )
+
+
+def _obstacle_aware_copper_paths(
+    board: Any,
+    gap: _DrcGap,
+    *,
+    width: float,
+    clearance: float,
+    budget: int,
+) -> list[list[tuple[tuple[float, float], tuple[float, float]]]]:
+    """Find bounded 45-degree single-layer paths without crossing copper."""
+
+    layer = gap.left.layer
+    if layer not in {"F.Cu", "B.Cu"} or gap.right.layer != layer:
+        return []
+    start = (gap.left.x, gap.left.y)
+    goal = (gap.right.x, gap.right.y)
+    bounds = _route_bounds(board, (start, goal), width)
+    obstacles = _copper_obstacles(
+        board,
+        net_name=gap.left.net,
+        layer=layer,
+    )
+    required_distance = width / 2 + clearance
+    step = max(0.35, min(0.6, width + clearance))
+
+    def clear_segment(
+        left: tuple[float, float],
+        right: tuple[float, float],
+    ) -> bool:
+        return all(
+            _segment_distance(left, right, obstacle.start, obstacle.end)
+            + 1e-9
+            >= obstacle.radius + required_distance
+            for obstacle in obstacles
+        )
+
+    anchor = (
+        goal
+        if gap.right.ref is not None
+        else start
+        if gap.left.ref is not None
+        else start
+    )
+    grid_origin = (
+        anchor[0] - math.floor((anchor[0] - bounds[0]) / step) * step,
+        anchor[1] - math.floor((anchor[1] - bounds[1]) / step) * step,
+    )
+    x_count = max(1, int(math.floor((bounds[2] - grid_origin[0]) / step)))
+    y_count = max(1, int(math.floor((bounds[3] - grid_origin[1]) / step)))
+
+    def point(index: tuple[int, int]) -> tuple[float, float]:
+        return (
+            grid_origin[0] + index[0] * step,
+            grid_origin[1] + index[1] * step,
+        )
+
+    def terminal_cells(terminal: tuple[float, float]) -> list[tuple[int, int]]:
+        center = (
+            round((terminal[0] - grid_origin[0]) / step),
+            round((terminal[1] - grid_origin[1]) / step),
+        )
+        candidates: list[tuple[float, tuple[int, int]]] = []
+        for dx in range(-3, 4):
+            for dy in range(-3, 4):
+                index = (center[0] + dx, center[1] + dy)
+                if not (0 <= index[0] <= x_count and 0 <= index[1] <= y_count):
+                    continue
+                grid_point = point(index)
+                if clear_segment(terminal, grid_point):
+                    candidates.append((math.dist(terminal, grid_point), index))
+        return [item[1] for item in sorted(candidates)[:12]]
+
+    starts = terminal_cells(start)
+    goals = set(terminal_cells(goal))
+    if not starts or not goals:
+        return []
+    directions = (
+        (-1, 0), (1, 0), (0, -1), (0, 1),
+        (-1, -1), (-1, 1), (1, -1), (1, 1),
+    )
+    penalties: Counter[tuple[int, int]] = Counter()
+    routes: list[list[tuple[tuple[float, float], tuple[float, float]]]] = []
+    seen: set[tuple[tuple[float, float], ...]] = set()
+    for _ in range(max(1, budget)):
+        queue: list[tuple[float, float, tuple[int, int]]] = []
+        cost: dict[tuple[int, int], float] = {}
+        previous: dict[tuple[int, int], tuple[int, int]] = {}
+        for index in starts:
+            initial = math.dist(start, point(index))
+            cost[index] = initial
+            heapq.heappush(queue, (initial, initial, index))
+        reached: tuple[int, int] | None = None
+        expansions = 0
+        while queue and expansions < 80_000:
+            _, current_cost, current = heapq.heappop(queue)
+            if current_cost > cost.get(current, math.inf) + 1e-9:
+                continue
+            expansions += 1
+            if current in goals:
+                reached = current
+                break
+            current_point = point(current)
+            for dx, dy in directions:
+                neighbor = (current[0] + dx, current[1] + dy)
+                if not (
+                    0 <= neighbor[0] <= x_count
+                    and 0 <= neighbor[1] <= y_count
+                ):
+                    continue
+                neighbor_point = point(neighbor)
+                if not clear_segment(current_point, neighbor_point):
+                    continue
+                next_cost = (
+                    current_cost
+                    + math.hypot(dx, dy) * step
+                    + penalties[neighbor] * step * 2
+                )
+                if next_cost + 1e-9 >= cost.get(neighbor, math.inf):
+                    continue
+                cost[neighbor] = next_cost
+                previous[neighbor] = current
+                heuristic = min(
+                    math.dist(neighbor_point, point(goal_index))
+                    for goal_index in goals
+                )
+                heapq.heappush(
+                    queue,
+                    (next_cost + heuristic, next_cost, neighbor),
+                )
+        if reached is None:
+            break
+        indices = [reached]
+        while indices[-1] not in starts:
+            indices.append(previous[indices[-1]])
+        indices.reverse()
+        points = [start, *(point(index) for index in indices), goal]
+        compact = [points[0]]
+        for candidate in points[1:]:
+            if math.dist(compact[-1], candidate) <= 1e-9:
+                continue
+            if len(compact) >= 2:
+                left = compact[-2]
+                middle = compact[-1]
+                cross = (
+                    (middle[0] - left[0]) * (candidate[1] - middle[1])
+                    - (middle[1] - left[1]) * (candidate[0] - middle[0])
+                )
+                if abs(cross) <= 1e-9:
+                    compact[-1] = candidate
+                    continue
+            compact.append(candidate)
+        key = tuple(compact)
+        if key not in seen and all(
+            clear_segment(left, right)
+            for left, right in zip(compact, compact[1:])
+        ):
+            seen.add(key)
+            routes.append(list(zip(compact, compact[1:])))
+        for index in indices[1:-1]:
+            penalties[index] += 1
+    return routes
+
+
+@dataclass(frozen=True)
+class _CopperPatch:
+    tracks: tuple[
+        tuple[tuple[float, float], tuple[float, float], str],
+        ...,
+    ]
+    vias: tuple[tuple[float, float], ...] = ()
+
+
+def _frozen_gap_via_rules(state: PipelineState) -> tuple[float, float]:
+    cap = config.process_capability()
+    route_plan = state.artifact(PipelineStep.ROUTE_PLAN)
+    net_classes = (
+        route_plan.net_classes
+        if isinstance(route_plan, RoutePlan)
+        else []
+    )
+    return (
+        max(
+            cap.min_via_diameter,
+            min(
+                (net_class.via_diameter for net_class in net_classes),
+                default=cap.min_via_diameter,
+            ),
+        ),
+        max(
+            cap.min_via_drill,
+            min(
+                (net_class.via_drill for net_class in net_classes),
+                default=cap.min_via_drill,
+            ),
+        ),
+    )
+
+
+def _micro_jump_copper_patches(
+    board: Any,
+    gap: _DrcGap,
+    *,
+    width: float,
+    clearance: float,
+    via_diameter: float,
+    budget: int,
+) -> list[_CopperPatch]:
+    """Bridge an F.Cu-only dead end with a bounded B.Cu via-pair jump."""
+
+    if gap.left.layer != "F.Cu" or gap.right.layer != "F.Cu":
+        return []
+    net_name = gap.left.net
+    front_obstacles = _copper_obstacles(
+        board,
+        net_name=net_name,
+        layer="F.Cu",
+    )
+    back_obstacles = _copper_obstacles(
+        board,
+        net_name=net_name,
+        layer="B.Cu",
+    )
+    track_distance = width / 2 + clearance
+    via_distance = via_diameter / 2 + clearance
+    bounds = _route_bounds(
+        board,
+        ((gap.left.x, gap.left.y), (gap.right.x, gap.right.y)),
+        max(width, via_diameter),
+    )
+
+    def clear_track(
+        start: tuple[float, float],
+        end: tuple[float, float],
+        obstacles: list[_CopperObstacle],
+    ) -> bool:
+        return all(
+            _segment_distance(start, end, obstacle.start, obstacle.end)
+            + 1e-9
+            >= obstacle.radius + track_distance
+            for obstacle in obstacles
+        )
+
+    def clear_via(point: tuple[float, float]) -> bool:
+        return all(
+            _point_segment_distance(point, obstacle.start, obstacle.end)
+            + 1e-9
+            >= obstacle.radius + via_distance
+            for obstacle in (*front_obstacles, *back_obstacles)
+        )
+
+    def escape_sites(endpoint: _DrcEndpoint) -> list[tuple[float, float]]:
+        origin = (endpoint.x, endpoint.y)
+        sites: list[tuple[float, tuple[float, float]]] = []
+        minimum_escape = max(1.0, via_diameter + clearance)
+        for distance in (
+            minimum_escape,
+            minimum_escape + 0.5,
+            minimum_escape + 1.0,
+            minimum_escape + 1.5,
+            minimum_escape + 2.0,
+        ):
+            for degrees in range(0, 360, 45):
+                radians = math.radians(degrees)
+                site = (
+                    origin[0] + math.cos(radians) * distance,
+                    origin[1] + math.sin(radians) * distance,
+                )
+                if not (
+                    bounds[0] <= site[0] <= bounds[2]
+                    and bounds[1] <= site[1] <= bounds[3]
+                    and clear_via(site)
+                    and clear_track(origin, site, front_obstacles)
+                ):
+                    continue
+                sites.append((distance, site))
+        return [item[1] for item in sorted(sites)[:10]]
+
+    left_sites = escape_sites(gap.left)
+    right_sites = escape_sites(gap.right)
+    if not left_sites or not right_sites:
+        return []
+    site_pairs = sorted(
+        (
+            (math.dist(left, right), left, right)
+            for left in left_sites
+            for right in right_sites
+        ),
+        key=lambda item: item[0],
+    )
+    patches: list[_CopperPatch] = []
+    seen: set[
+        tuple[tuple[float, float], tuple[float, float]]
+    ] = set()
+    for _, left_site, right_site in site_pairs:
+        pair = (left_site, right_site)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        back_gap = _DrcGap(
+            left=_DrcEndpoint(
+                left_site[0],
+                left_site[1],
+                net_name,
+                "B.Cu",
+            ),
+            right=_DrcEndpoint(
+                right_site[0],
+                right_site[1],
+                net_name,
+                "B.Cu",
+            ),
+        )
+        back_paths = _obstacle_aware_copper_paths(
+            board,
+            back_gap,
+            width=width,
+            clearance=clearance,
+            budget=1,
+        )
+        if not back_paths:
+            continue
+        back_tracks = tuple(
+            (start, end, "B.Cu")
+            for start, end in back_paths[0]
+        )
+        patches.append(_CopperPatch(
+            tracks=(
+                ((gap.left.x, gap.left.y), left_site, "F.Cu"),
+                *back_tracks,
+                (right_site, (gap.right.x, gap.right.y), "F.Cu"),
+            ),
+            vias=(left_site, right_site),
+        ))
+        if len(patches) >= budget:
+            break
+    return patches
+
+
+def _refill_copper_zones(pcb_path: Path) -> bool:
+    import subprocess
+
+    from ratsnestpro.eda import routing
+
+    python = routing.kicad_python()
+    worker = (
+        Path(__file__).resolve().parent.parent
+        / "eda"
+        / "_zone_refill_worker.py"
+    )
+    if not python or not worker.is_file():
+        return False
+    try:
+        process = subprocess.run(
+            [python, str(worker), str(pcb_path)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return process.returncode == 0
+
+
 def _connection_metrics_after_copper_repair(
     artifact: RouteResult,
     remaining: int,
@@ -14782,6 +15741,52 @@ def _synchronize_route_result_with_drc(
     )
 
 
+def _route_gap_check_evidence(
+    state: PipelineState,
+    artifact: RouteResult,
+) -> tuple[list[str], dict[str, Any]]:
+    """Return concrete KiCad ownership evidence for an incomplete route."""
+
+    if artifact.unconnected <= 0:
+        return [], {}
+    write = state.artifact(PipelineStep.LAYOUT_WRITE)
+    if not isinstance(write, PcbWriteResult):
+        return [], {}
+    pcb_path = Path(write.pcb_path)
+    report_candidates = (
+        pcb_path.with_suffix(".route-final.drc.json"),
+        pcb_path.with_suffix(".ahe-route.drc.json"),
+        pcb_path.with_suffix(".drc.json"),
+    )
+    report_path = next((path for path in report_candidates if path.is_file()), None)
+    if report_path is None:
+        return [], {}
+    snapshot = _read_drc_snapshot(report_path)
+    if snapshot.parse_error or not snapshot.gaps:
+        return [], {}
+
+    gaps: list[dict[str, Any]] = []
+    affected_refs: set[str] = set()
+    for gap in snapshot.gaps:
+        endpoints: list[dict[str, Any]] = []
+        for endpoint in (gap.left, gap.right):
+            if endpoint.ref:
+                affected_refs.add(endpoint.ref)
+            endpoints.append({
+                "ref": endpoint.ref,
+                "pad": endpoint.pad_number,
+                "x_mm": endpoint.x,
+                "y_mm": endpoint.y,
+                "layer": endpoint.layer,
+            })
+        gaps.append({"net": gap.left.net, "endpoints": endpoints})
+    return sorted(affected_refs), {
+        "source": str(report_path),
+        "reported_unconnected": snapshot.unconnected,
+        "route_gaps": gaps,
+    }
+
+
 def _repair_drc_connectivity_gaps(
     state: PipelineState,
     ctx: PipelineContext,
@@ -14790,6 +15795,7 @@ def _repair_drc_connectivity_gaps(
     """Greedily close DRC gaps, accepting only monotonic, DRC-safe patches."""
 
     from ratsnestpro.eda.vendor.pcb import PcbBoard
+    from ratsnestpro.eda.vendor.sexpr import find_all
 
     write = state.artifact(PipelineStep.LAYOUT_WRITE)
     if not isinstance(write, PcbWriteResult):
@@ -14804,25 +15810,47 @@ def _repair_drc_connectivity_gaps(
     backup_path = pcb_path.with_suffix(".ahe-route-backup.kicad_pcb")
     shutil.copy2(pcb_path, backup_path)
     report_path = pcb_path.with_suffix(".ahe-route.drc.json")
-    baseline = _run_kicad_drc_snapshot(cli, pcb_path, report_path)
-    if baseline.parse_error or not baseline.gaps:
+    try:
+        has_copper_zones = bool(find_all(PcbBoard.load(pcb_path).root, "zone"))
+    except Exception:  # noqa: BLE001 - unreadable boards are not repairable
         backup_path.unlink(missing_ok=True)
         return artifact
+    if has_copper_zones and not _refill_copper_zones(pcb_path):
+        # Zone fills participate in physical connectivity.  A failed refill
+        # leaves every previously reported gap potentially stale, so no copper
+        # candidate may be derived from that report.
+        shutil.copy2(backup_path, pcb_path)
+        backup_path.unlink(missing_ok=True)
+        return artifact
+    baseline = _run_kicad_drc_snapshot(cli, pcb_path, report_path)
+    if baseline.parse_error:
+        shutil.copy2(backup_path, pcb_path)
+        backup_path.unlink(missing_ok=True)
+        return artifact
+    if not baseline.gaps:
+        backup_path.unlink(missing_ok=True)
+        return _synchronize_route_result_with_drc(artifact, baseline)
 
     added_tracks = 0
+    added_vias = 0
     closed_gaps = 0
     try:
-        route_plan = state.artifact(PipelineStep.ROUTE_PLAN)
         cap = config.process_capability()
-        width = cap.min_track_width
-        if isinstance(route_plan, RoutePlan) and route_plan.net_classes:
-            width = max(
-                cap.min_track_width,
-                min(net_class.width for net_class in route_plan.net_classes),
-            )
-        max_candidates = 18
-        candidate_count = 0
-        while baseline.gaps and candidate_count < max_candidates:
+        route_plan = state.artifact(PipelineStep.ROUTE_PLAN)
+        clearance = max(
+            cap.min_clearance,
+            min(
+                (
+                    net_class.clearance
+                    for net_class in route_plan.net_classes
+                ),
+                default=cap.min_clearance,
+            ) if isinstance(route_plan, RoutePlan) else cap.min_clearance,
+        )
+        candidates_per_gap = 6
+        via_diameter, via_drill = _frozen_gap_via_rules(state)
+        baseline_invariants = set(_routing_physical_invariant_blockers(state))
+        while baseline.gaps:
             improved = False
             ordered_gaps = sorted(
                 baseline.gaps,
@@ -14832,30 +15860,74 @@ def _repair_drc_connectivity_gaps(
                 ),
             )
             for gap in ordered_gaps:
-                for path in _candidate_copper_paths(gap):
-                    candidate_count += 1
-                    if candidate_count > max_candidates:
-                        break
+                board = PcbBoard.load(pcb_path)
+                width = _frozen_gap_route_width(state, gap.left.net)
+                front_paths = _obstacle_aware_copper_paths(
+                    board,
+                    gap,
+                    width=width,
+                    clearance=clearance,
+                    budget=candidates_per_gap,
+                )
+                patches = [
+                    _CopperPatch(tracks=tuple(
+                        (start, end, "F.Cu")
+                        for start, end in path
+                    ))
+                    for path in front_paths
+                ]
+                if not patches:
+                    patches = _micro_jump_copper_patches(
+                        board,
+                        gap,
+                        width=width,
+                        clearance=clearance,
+                        via_diameter=via_diameter,
+                        budget=candidates_per_gap,
+                    )
+                for patch in patches[:candidates_per_gap]:
                     candidate_backup = pcb_path.with_suffix(
                         ".ahe-route-candidate.kicad_pcb"
                     )
                     shutil.copy2(pcb_path, candidate_backup)
-                    board = PcbBoard.load(pcb_path)
-                    for start, end in path:
-                        board.add_track(
+                    candidate_board = PcbBoard.load(pcb_path)
+                    for start, end, layer in patch.tracks:
+                        candidate_board.add_track(
                             start[0],
                             start[1],
                             end[0],
                             end[1],
                             width=width,
-                            layer=gap.left.layer,
+                            layer=layer,
                             net=gap.left.net,
                         )
-                    board.save(pcb_path)
-                    after = _run_kicad_drc_snapshot(
-                        cli,
-                        pcb_path,
-                        report_path,
+                    for x, y in patch.vias:
+                        candidate_board.add_via(
+                            x,
+                            y,
+                            size=via_diameter,
+                            drill=via_drill,
+                            net=gap.left.net,
+                        )
+                    candidate_board.save(pcb_path)
+                    refill_ok = (
+                        not patch.vias
+                        or _refill_copper_zones(pcb_path)
+                    )
+                    after = (
+                        _run_kicad_drc_snapshot(cli, pcb_path, report_path)
+                        if refill_ok
+                        else _DrcSnapshot(
+                            findings=("zone refill failed",),
+                            non_connectivity_errors=("zone refill failed",),
+                            gaps=(),
+                            parse_error=True,
+                        )
+                    )
+                    after_invariants = (
+                        set(_routing_physical_invariant_blockers(state))
+                        if refill_ok
+                        else {"zone refill failed"}
                     )
                     safe = (
                         not after.parse_error
@@ -14863,17 +15935,20 @@ def _repair_drc_connectivity_gaps(
                         and set(after.non_connectivity_errors).issubset(
                             baseline.non_connectivity_errors
                         )
+                        and after_invariants.issubset(baseline_invariants)
                     )
                     if safe:
                         closed_gaps += baseline.unconnected - after.unconnected
-                        added_tracks += len(path)
+                        added_tracks += len(patch.tracks)
+                        added_vias += len(patch.vias)
                         baseline = after
+                        baseline_invariants = after_invariants
                         candidate_backup.unlink(missing_ok=True)
                         improved = True
                         break
                     shutil.copy2(candidate_backup, pcb_path)
                     candidate_backup.unlink(missing_ok=True)
-                if improved or candidate_count >= max_candidates:
+                if improved:
                     break
             if not improved:
                 break
@@ -14904,7 +15979,8 @@ def _repair_drc_connectivity_gaps(
                 "note": (
                     f"{artifact.note}; AHE DRC-monotonic gap closer removed "
                     f"{closed_gaps} connection gap(s) with {added_tracks} "
-                    f"track segment(s); {remaining} remain"
+                    f"track segment(s) and {added_vias} via(s); "
+                    f"{remaining} remain"
                 ),
             }
         )
@@ -15622,6 +16698,477 @@ def _physical_plane_mismatches(
     ]
 
 
+def _undersized_physical_tracks(
+    state: PipelineState,
+    board: Any,
+) -> list[dict[str, Any]]:
+    """Return real segments below their process or explicit width floor."""
+
+    cap = config.process_capability()
+    invariants = extract_requirement_invariants(state.requirement_text)
+    explicit_floor = invariants.minimum_track_width_mm or 0.0
+    explicit_nets = {
+        name.upper().lstrip("+")
+        for name in invariants.minimum_track_width_nets
+    }
+    undersized: list[dict[str, Any]] = []
+    for track in board.list_tracks():
+        width = track.get("width")
+        if width is None:
+            continue
+        net_name = str(track.get("net_name", ""))
+        normalized_net = net_name.upper().lstrip("+")
+        explicit_applies = (
+            explicit_floor > 0
+            and (
+                not explicit_nets
+                or normalized_net in explicit_nets
+            )
+        )
+        required_width = max(
+            cap.min_track_width,
+            explicit_floor if explicit_applies else 0.0,
+        )
+        if float(width) + 1e-9 < required_width:
+            undersized.append({
+                "uuid": str(track.get("uuid") or ""),
+                "net_name": net_name,
+                "width": float(width),
+                "required_width": required_width,
+            })
+    return undersized
+
+
+def _drc_error_item_uuids(report_path: Path) -> set[str]:
+    """Return concrete entities named by authoritative KiCad DRC errors."""
+
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {
+        str(item.get("uuid"))
+        for group in ("violations", "schematic_parity")
+        for finding in payload.get(group, [])
+        if (
+            isinstance(finding, dict)
+            and str(finding.get("severity", "error")) == "error"
+        )
+        for item in finding.get("items", [])
+        if isinstance(item, dict) and item.get("uuid")
+    }
+
+
+def _reroute_undersized_smd_escape_chains(
+    board: Any,
+    targets: list[dict[str, Any]],
+    *,
+    offender_uuids: set[str] | None = None,
+) -> int:
+    """Center an unambiguous undersized SMD-pad escape before widening it.
+
+    A wide trace which preserves a router's slightly off-centre pin escape can
+    violate clearance to the adjacent fine-pitch pad.  This repair is narrow:
+    only a non-branching target chain with one matching SMD pad and one
+    same-net upstream segment is eligible.  KiCad DRC remains the authority
+    for accepting the complete transaction.
+    """
+
+    from ratsnestpro.eda.vendor.sexpr import Atom, find_all, find_first
+
+    def point_key(point: tuple[float, float]) -> tuple[int, int]:
+        return (round(point[0] * 10_000), round(point[1] * 10_000))
+
+    def node_float(node: list[Any] | None, index: int) -> float | None:
+        if node is None or len(node) <= index:
+            return None
+        try:
+            return float(str(node[index]))
+        except ValueError:
+            return None
+
+    def atom(value: float) -> Atom:
+        return Atom(f"{value:.6f}".rstrip("0").rstrip("."))
+
+    tracks = {
+        str(track.get("uuid") or ""): track
+        for track in board.list_tracks()
+        if track.get("uuid") and track.get("start") and track.get("end")
+    }
+    target_widths = {
+        str(target["uuid"]): float(target["required_width"])
+        for target in targets
+        if str(target.get("uuid") or "") in tracks
+    }
+    if len(target_widths) != len(targets):
+        return 0
+
+    target_nodes = {
+        str(uuid_node[1]): segment
+        for segment in find_all(board.root, "segment")
+        if (
+            (uuid_node := find_first(segment, "uuid")) is not None
+            and len(uuid_node) > 1
+            and str(uuid_node[1]) in target_widths
+        )
+    }
+    all_segment_nodes = {
+        str(uuid_node[1]): segment
+        for segment in find_all(board.root, "segment")
+        if (
+            (uuid_node := find_first(segment, "uuid")) is not None
+            and len(uuid_node) > 1
+        )
+    }
+
+    pads: list[dict[str, Any]] = []
+    for footprint in find_all(board.root, "footprint"):
+        footprint_at = find_first(footprint, "at")
+        footprint_layer = find_first(footprint, "layer")
+        fp_x = node_float(footprint_at, 1)
+        fp_y = node_float(footprint_at, 2)
+        fp_angle = node_float(footprint_at, 3) or 0.0
+        if (
+            fp_x is None
+            or fp_y is None
+            or footprint_layer is None
+            or len(footprint_layer) < 2
+            or str(footprint_layer[1]) != "F.Cu"
+        ):
+            continue
+        fp_radians = math.radians(fp_angle)
+        fp_cos = math.cos(fp_radians)
+        fp_sin = math.sin(fp_radians)
+        for pad in find_all(footprint, "pad"):
+            if len(pad) < 3 or str(pad[2]).casefold() != "smd":
+                continue
+            pad_at = find_first(pad, "at")
+            size = find_first(pad, "size")
+            layers = find_first(pad, "layers")
+            net = find_first(pad, "net")
+            local_x = node_float(pad_at, 1)
+            local_y = node_float(pad_at, 2)
+            size_x = node_float(size, 1)
+            size_y = node_float(size, 2)
+            if (
+                None in {local_x, local_y, size_x, size_y}
+                or layers is None
+                or net is None
+                or len(net) < 2
+            ):
+                continue
+            assert local_x is not None and local_y is not None
+            assert size_x is not None and size_y is not None
+            center = (
+                fp_x + local_x * fp_cos - local_y * fp_sin,
+                fp_y + local_x * fp_sin + local_y * fp_cos,
+            )
+            pad_angle = fp_angle + (node_float(pad_at, 3) or 0.0)
+            if size_y > size_x:
+                pad_angle += 90.0
+            radians = math.radians(pad_angle)
+            pads.append({
+                "net": int(str(net[1])),
+                "layers": {str(layer) for layer in layers[1:]},
+                "center": center,
+                "axis": (math.cos(radians), math.sin(radians)),
+                "half_major": max(size_x, size_y) / 2,
+                "half_minor": min(size_x, size_y) / 2,
+            })
+
+    endpoint_targets: dict[tuple[int, int], list[str]] = {}
+    for uuid, track in tracks.items():
+        if uuid not in target_widths:
+            continue
+        for raw_point in (track["start"], track["end"]):
+            key = point_key((float(raw_point[0]), float(raw_point[1])))
+            endpoint_targets.setdefault(key, []).append(uuid)
+
+    visited: set[str] = set()
+    repaired_segments = 0
+    for seed in target_widths:
+        if seed in visited:
+            continue
+        signature = (
+            tracks[seed].get("net"),
+            tracks[seed].get("layer"),
+            target_widths[seed],
+        )
+        component: set[str] = set()
+        pending = [seed]
+        while pending:
+            current = pending.pop()
+            if current in component:
+                continue
+            current_signature = (
+                tracks[current].get("net"),
+                tracks[current].get("layer"),
+                target_widths[current],
+            )
+            if current_signature != signature:
+                continue
+            component.add(current)
+            for raw_point in (tracks[current]["start"], tracks[current]["end"]):
+                key = point_key((float(raw_point[0]), float(raw_point[1])))
+                pending.extend(endpoint_targets.get(key, []))
+        visited.update(component)
+        if offender_uuids and component.isdisjoint(offender_uuids):
+            continue
+
+        degree: dict[tuple[int, int], int] = {}
+        point_values: dict[tuple[int, int], tuple[float, float]] = {}
+        for uuid in component:
+            for raw_point in (tracks[uuid]["start"], tracks[uuid]["end"]):
+                point = (float(raw_point[0]), float(raw_point[1]))
+                key = point_key(point)
+                degree[key] = degree.get(key, 0) + 1
+                point_values[key] = point
+        ends = [key for key, count in degree.items() if count == 1]
+        if len(ends) != 2 or any(count > 2 for count in degree.values()):
+            continue
+
+        net_index, layer, required_width = signature
+        pad_matches: dict[tuple[int, int], list[dict[str, Any]]] = {}
+        for key in ends:
+            point = point_values[key]
+            for pad in pads:
+                if (
+                    pad["net"] != net_index
+                    or layer not in pad["layers"]
+                ):
+                    continue
+                delta = (
+                    point[0] - pad["center"][0],
+                    point[1] - pad["center"][1],
+                )
+                along = delta[0] * pad["axis"][0] + delta[1] * pad["axis"][1]
+                across = -delta[0] * pad["axis"][1] + delta[1] * pad["axis"][0]
+                if (
+                    abs(along) <= pad["half_major"] + 1e-4
+                    and abs(across) <= pad["half_minor"] + 1e-4
+                ):
+                    pad_matches.setdefault(key, []).append(pad)
+        pad_ends = [key for key, matches in pad_matches.items() if len(matches) == 1]
+        if len(pad_ends) != 1:
+            continue
+        pad_key = pad_ends[0]
+        far_key = ends[0] if ends[1] == pad_key else ends[1]
+        pad = pad_matches[pad_key][0]
+
+        upstream: list[tuple[str, dict[str, Any]]] = []
+        for uuid, track in tracks.items():
+            if (
+                uuid in component
+                or track.get("net") != net_index
+                or track.get("layer") != layer
+            ):
+                continue
+            if far_key in {
+                point_key((float(track["start"][0]), float(track["start"][1]))),
+                point_key((float(track["end"][0]), float(track["end"][1]))),
+            }:
+                upstream.append((uuid, track))
+        if (
+            len(upstream) != 1
+            or float(upstream[0][1].get("width") or 0.0) + 1e-9
+            < required_width
+        ):
+            continue
+
+        far = point_values[far_key]
+        delta = (far[0] - pad["center"][0], far[1] - pad["center"][1])
+        along = delta[0] * pad["axis"][0] + delta[1] * pad["axis"][1]
+        across = -delta[0] * pad["axis"][1] + delta[1] * pad["axis"][0]
+        if (
+            abs(along) < pad["half_major"] - 1e-4
+            or abs(across) > max(required_width, pad["half_minor"]) + 1e-4
+        ):
+            continue
+        junction = (
+            pad["center"][0] + along * pad["axis"][0],
+            pad["center"][1] + along * pad["axis"][1],
+        )
+        if math.dist(junction, pad["center"]) <= 1e-4:
+            continue
+
+        upstream_uuid, upstream_track = upstream[0]
+        upstream_node = all_segment_nodes.get(upstream_uuid)
+        if upstream_node is None:
+            continue
+        start_node = find_first(upstream_node, "start")
+        end_node = find_first(upstream_node, "end")
+        upstream_start = point_key((
+            float(upstream_track["start"][0]),
+            float(upstream_track["start"][1]),
+        ))
+        upstream_end = point_key((
+            float(upstream_track["end"][0]),
+            float(upstream_track["end"][1]),
+        ))
+        endpoint_node = (
+            start_node if upstream_start == far_key
+            else end_node if upstream_end == far_key
+            else None
+        )
+        if endpoint_node is None or len(endpoint_node) < 3:
+            continue
+
+        endpoint_node[1] = atom(junction[0])
+        endpoint_node[2] = atom(junction[1])
+        for uuid in component:
+            board.root.remove(target_nodes[uuid])
+        board.add_track(
+            pad["center"][0],
+            pad["center"][1],
+            junction[0],
+            junction[1],
+            width=required_width,
+            layer=str(layer),
+            net=int(net_index),
+        )
+        repaired_segments += len(component)
+
+    return repaired_segments
+
+
+def _repair_undersized_physical_tracks(
+    state: PipelineState,
+    artifact: RouteResult,
+) -> RouteResult:
+    """Widen only undersized real tracks, accepting a monotonic DRC result.
+
+    Freerouting can emit short pin-escape paths narrower than the DSN class
+    width.  This transaction edits those concrete ``segment`` widths only.
+    Any new DRC error, connectivity regression, remaining width violation, or
+    new routing invariant restores the exact input board bytes.
+    """
+
+    from ratsnestpro.eda.vendor.pcb import PcbBoard
+    from ratsnestpro.eda.vendor.sexpr import Atom, find_all, find_first
+
+    write = state.artifact(PipelineStep.LAYOUT_WRITE)
+    cli = kicad_cli_available()
+    if not isinstance(write, PcbWriteResult) or not cli:
+        return artifact
+    pcb_path = Path(write.pcb_path)
+    if not pcb_path.is_file():
+        return artifact
+
+    try:
+        board = PcbBoard.load(pcb_path)
+        targets = _undersized_physical_tracks(state, board)
+    except Exception:  # noqa: BLE001 - unreadable physical state fails closed
+        return artifact
+    if not targets or any(not target["uuid"] for target in targets):
+        return artifact
+
+    target_widths = {
+        target["uuid"]: float(target["required_width"])
+        for target in targets
+    }
+    baseline_report = pcb_path.with_suffix(".ahe-width-baseline.drc.json")
+    candidate_report = pcb_path.with_suffix(".ahe-width.drc.json")
+    final_report = pcb_path.with_suffix(".route-final.drc.json")
+    backup_path = pcb_path.with_suffix(".ahe-width-backup.kicad_pcb")
+    baseline = _run_kicad_drc_snapshot(
+        cli,
+        pcb_path,
+        baseline_report,
+    )
+    if baseline.parse_error:
+        baseline_report.unlink(missing_ok=True)
+        return artifact
+    baseline_invariants = set(_routing_physical_invariant_blockers(state))
+
+    def apply_widths(candidate: Any) -> int:
+        changed = 0
+        for segment in find_all(candidate.root, "segment"):
+            uuid_node = find_first(segment, "uuid")
+            segment_uuid = (
+                str(uuid_node[1])
+                if uuid_node is not None and len(uuid_node) > 1
+                else ""
+            )
+            required_width = target_widths.get(segment_uuid)
+            if required_width is None:
+                continue
+            width_node = find_first(segment, "width")
+            if width_node is None or len(width_node) < 2:
+                continue
+            width_node[1] = Atom(f"{required_width:.6f}".rstrip("0").rstrip("."))
+            changed += 1
+        return changed
+
+    def candidate_accepted(after: _DrcSnapshot) -> bool:
+        after_board = PcbBoard.load(pcb_path)
+        remaining = _undersized_physical_tracks(state, after_board)
+        after_invariants = set(_routing_physical_invariant_blockers(state))
+        return (
+            not after.parse_error
+            and not remaining
+            and after.unconnected <= baseline.unconnected
+            and set(after.non_connectivity_errors).issubset(
+                baseline.non_connectivity_errors
+            )
+            and after_invariants.issubset(baseline_invariants)
+        )
+
+    shutil.copy2(pcb_path, backup_path)
+    try:
+        changed = apply_widths(board)
+        if changed != len(targets):
+            return artifact
+        board.save(pcb_path)
+
+        after = _run_kicad_drc_snapshot(cli, pcb_path, candidate_report)
+        rerouted = 0
+        if not candidate_accepted(after):
+            offender_uuids = _drc_error_item_uuids(candidate_report)
+            shutil.copy2(backup_path, pcb_path)
+            board = PcbBoard.load(pcb_path)
+            changed = apply_widths(board)
+            if changed != len(targets):
+                return artifact
+            rerouted = _reroute_undersized_smd_escape_chains(
+                board,
+                targets,
+                offender_uuids=offender_uuids or None,
+            )
+            if not rerouted:
+                return artifact
+            board.save(pcb_path)
+            after = _run_kicad_drc_snapshot(cli, pcb_path, candidate_report)
+            if not candidate_accepted(after):
+                return artifact
+
+        backup_path.unlink(missing_ok=True)
+        if candidate_report.is_file():
+            shutil.copy2(candidate_report, final_report)
+        return artifact.model_copy(
+            update={
+                "note": (
+                    f"{artifact.note}; AHE widened {changed} physical track "
+                    "segment(s) to their explicit/process minimum with "
+                    "monotonic KiCad DRC verification"
+                    + (
+                        f"; centerline-rerouted {rerouted} SMD escape "
+                        "segment(s)"
+                        if rerouted
+                        else ""
+                    )
+                ),
+            }
+        )
+    except Exception:  # noqa: BLE001 - rejected candidate is restored below
+        return artifact
+    finally:
+        baseline_report.unlink(missing_ok=True)
+        candidate_report.unlink(missing_ok=True)
+        if backup_path.is_file():
+            shutil.copy2(backup_path, pcb_path)
+            backup_path.unlink(missing_ok=True)
+
+
 def _routing_physical_invariant_blockers(state: PipelineState) -> list[str]:
     """Audit routing-owned invariants on the board that will be released."""
 
@@ -15980,6 +17527,10 @@ class RouteSignalsStep(PipelineStepBase):
         explicit_layers = extract_requirement_invariants(
             state.requirement_text
         ).copper_layer_count
+        route_gap_refs, route_gap_evidence = _route_gap_check_evidence(
+            state,
+            artifact,
+        )
         return [
             CheckResult(
                 name="signals_routed",
@@ -15991,6 +17542,13 @@ class RouteSignalsStep(PipelineStepBase):
                         f"{artifact.total_connections}, "
                         f"unconnected={artifact.unconnected}, "
                         f"basis={artifact.metric_basis}; {artifact.note}",
+                reason_code=(
+                    "kicad_drc_unconnected"
+                    if route_gap_evidence
+                    else "routing_incomplete"
+                ),
+                affected_refs=route_gap_refs,
+                evidence=route_gap_evidence,
             ),
             CheckResult(
                 name="ground_plane_materialized",
@@ -16024,6 +17582,27 @@ class RouteSignalsStep(PipelineStepBase):
         checks: list[CheckResult],
     ) -> tuple[BaseModel, bool]:
         assert isinstance(artifact, RouteResult)
+        if ctx.active_recovery_tool == "repair_route_connectivity":
+            repaired = _repair_drc_connectivity_gaps(state, ctx, artifact)
+            return (
+                repaired
+                if repaired.unconnected < artifact.unconnected
+                else artifact,
+                False,
+            )
+        if ctx.active_recovery_tool == "repair_physical_track_width":
+            repaired = _repair_undersized_physical_tracks(state, artifact)
+            return (repaired if repaired != artifact else artifact), False
+        if ctx.active_recovery_tool:
+            # An unsupported local capability must return to reflection. It
+            # cannot silently become a full-board Freerouting invocation.
+            return artifact, False
+        repaired = _repair_drc_connectivity_gaps(state, ctx, artifact)
+        if repaired.unconnected < artifact.unconnected:
+            return repaired, False
+        repaired = _repair_undersized_physical_tracks(state, artifact)
+        if repaired != artifact:
+            return repaired, False
         if any(
             not check.ok
             and check.name in {
@@ -16032,10 +17611,7 @@ class RouteSignalsStep(PipelineStepBase):
             }
             for check in checks
         ):
-            return self.propose(state, ctx, knowledge)
-        repaired = _repair_drc_connectivity_gaps(state, ctx, artifact)
-        if repaired.unconnected < artifact.unconnected:
-            return repaired, False
+            return artifact, False
         repaired = _repair_power_plane_gaps(state, ctx, artifact)
         if repaired != artifact:
             return repaired, False
@@ -16237,6 +17813,27 @@ _REPAIRABLE_SILK_WARNING_TYPES = frozenset({
     "silk_overlap",
 })
 
+_SILK_TEXT_ENTITY_TAGS = frozenset({
+    "fp_text",
+    "fp_text_box",
+    "gr_text",
+    "gr_text_box",
+    "property",
+})
+
+_SILK_GRAPHIC_ENTITY_TAGS = frozenset({
+    "fp_arc",
+    "fp_circle",
+    "fp_line",
+    "fp_poly",
+    "fp_rect",
+    "gr_arc",
+    "gr_circle",
+    "gr_line",
+    "gr_poly",
+    "gr_rect",
+})
+
 
 def _kicad_warning_findings(report_path: Path) -> list[dict[str, Any]]:
     if not report_path.is_file():
@@ -16265,6 +17862,124 @@ def _drc_warning_messages(report_path: Path) -> list[str]:
     ]
 
 
+def _silkscreen_entity_priority(node: Any) -> int | None:
+    """Return the safe edit priority for one concrete KiCad silk entity.
+
+    Reference fields are deliberately preferred over other text and package
+    outline graphics.  Pads, copper, mask, paste, board outline geometry, and
+    footprint identity nodes never receive a priority and therefore cannot be
+    modified by this repair channel.
+    """
+
+    from ratsnestpro.eda.vendor.sexpr import find_first, tag_of
+
+    if not isinstance(node, list):
+        return None
+    layer = find_first(node, "layer")
+    if layer is None or len(layer) < 2:
+        return None
+    if str(layer[1]) not in {"F.SilkS", "B.SilkS"}:
+        return None
+    tag = tag_of(node)
+    if (
+        tag == "property"
+        and len(node) > 1
+        and str(node[1]).casefold() == "reference"
+    ):
+        return 0
+    if tag in _SILK_TEXT_ENTITY_TAGS:
+        return 1
+    if tag in _SILK_GRAPHIC_ENTITY_TAGS:
+        return 2
+    return None
+
+
+def _silkscreen_candidate_uuids(
+    board_root: Any,
+    findings: Iterable[dict[str, Any]],
+) -> set[str]:
+    """Resolve each warning to its least invasive real editable entity."""
+
+    from ratsnestpro.eda.vendor.sexpr import find_first
+
+    entities: dict[str, Any] = {}
+
+    def index(node: Any) -> None:
+        if not isinstance(node, list):
+            return
+        uuid_node = find_first(node, "uuid") or find_first(node, "tstamp")
+        if uuid_node is not None and len(uuid_node) > 1:
+            entities[str(uuid_node[1])] = node
+        for child in node:
+            if isinstance(child, list):
+                index(child)
+
+    index(board_root)
+    selected: set[str] = set()
+    for finding in findings:
+        ranked: list[tuple[int, str]] = []
+        items = finding.get("items", [])
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict) or not item.get("uuid"):
+                continue
+            item_uuid = str(item["uuid"])
+            priority = _silkscreen_entity_priority(entities.get(item_uuid))
+            if priority is not None:
+                ranked.append((priority, item_uuid))
+        if not ranked:
+            continue
+        best_priority = min(priority for priority, _ in ranked)
+        selected.update(
+            item_uuid
+            for priority, item_uuid in ranked
+            if priority == best_priority
+        )
+    return selected
+
+
+def _demote_silkscreen_entities(board_root: Any, target_uuids: set[str]) -> int:
+    """Move exact, pre-validated non-functional silk entities to fabrication."""
+
+    from ratsnestpro.eda.vendor.sexpr import find_first
+
+    changed = 0
+
+    def visit(node: Any) -> None:
+        nonlocal changed
+        if not isinstance(node, list):
+            return
+        uuid_node = find_first(node, "uuid") or find_first(node, "tstamp")
+        node_uuid = (
+            str(uuid_node[1])
+            if uuid_node is not None and len(uuid_node) > 1
+            else ""
+        )
+        if (
+            node_uuid in target_uuids
+            and _silkscreen_entity_priority(node) is not None
+        ):
+            layer = find_first(node, "layer")
+            assert layer is not None and len(layer) > 1
+            current = str(layer[1])
+            layer[1] = "F.Fab" if current == "F.SilkS" else "B.Fab"
+            changed += 1
+        for child in node:
+            if isinstance(child, list):
+                visit(child)
+
+    visit(board_root)
+    return changed
+
+
+def _warning_type_counts(report_path: Path) -> Counter[str]:
+    return Counter(
+        str(finding.get("type", "unknown"))
+        for finding in _kicad_warning_findings(report_path)
+    )
+
+
 def _repair_silkscreen_entities(
     cli: str,
     pcb_path: Path,
@@ -16279,85 +17994,69 @@ def _repair_silkscreen_entities(
     """
 
     from ratsnestpro.eda.vendor.pcb import PcbBoard
-    from ratsnestpro.eda.vendor.sexpr import find_first
 
-    warnings = _kicad_warning_findings(report_path)
-    targeted = [
-        finding
-        for finding in warnings
-        if str(finding.get("type", "")) in _REPAIRABLE_SILK_WARNING_TYPES
-    ]
-    if not targeted:
-        return False
-    target_uuids = {
-        str(item.get("uuid"))
-        for finding in targeted
-        for item in finding.get("items", [])
-        if isinstance(item, dict) and item.get("uuid")
-    }
-    if not target_uuids:
-        return False
-
-    baseline = _read_drc_snapshot(report_path)
-    if baseline.parse_error:
-        return False
     backup_path = pcb_path.with_suffix(".ahe-silkscreen-backup.kicad_pcb")
     candidate_report = pcb_path.with_suffix(".ahe-silkscreen.drc.json")
-    shutil.copy2(pcb_path, backup_path)
-    try:
-        board = PcbBoard.load(pcb_path)
-        changed = 0
-
-        def visit(node: Any) -> None:
-            nonlocal changed
-            if not isinstance(node, list):
-                return
-            uuid_node = find_first(node, "uuid") or find_first(node, "tstamp")
-            node_uuid = (
-                str(uuid_node[1])
-                if uuid_node is not None and len(uuid_node) > 1
-                else ""
+    repaired = False
+    # Three strictly monotonic candidates are sufficient for the ordered
+    # ownership classes: reference field, other text, then package graphics.
+    for _ in range(3):
+        warnings = _kicad_warning_findings(report_path)
+        targeted = [
+            finding
+            for finding in warnings
+            if str(finding.get("type", "")) in _REPAIRABLE_SILK_WARNING_TYPES
+        ]
+        if not targeted:
+            break
+        baseline = _read_drc_snapshot(report_path)
+        if baseline.parse_error:
+            break
+        before_warning_counts = _warning_type_counts(report_path)
+        shutil.copy2(pcb_path, backup_path)
+        accepted = False
+        try:
+            board = PcbBoard.load(pcb_path)
+            target_uuids = _silkscreen_candidate_uuids(board.root, targeted)
+            if not target_uuids:
+                break
+            if not _demote_silkscreen_entities(board.root, target_uuids):
+                break
+            board.save(pcb_path)
+            after = _run_kicad_drc_snapshot(cli, pcb_path, candidate_report)
+            after_warning_counts = _warning_type_counts(candidate_report)
+            before_silk = sum(
+                before_warning_counts[warning_type]
+                for warning_type in _REPAIRABLE_SILK_WARNING_TYPES
             )
-            if node_uuid in target_uuids:
-                layer = find_first(node, "layer")
-                if layer is not None and len(layer) > 1:
-                    current = str(layer[1])
-                    if current in {"F.SilkS", "B.SilkS"}:
-                        layer[1] = "F.Fab" if current.startswith("F.") else "B.Fab"
-                        changed += 1
-            for child in node:
-                if isinstance(child, list):
-                    visit(child)
-
-        visit(board.root)
-        if not changed:
-            return False
-        board.save(pcb_path)
-        after = _run_kicad_drc_snapshot(cli, pcb_path, candidate_report)
-        after_silk = sum(
-            str(finding.get("type", "")) in _REPAIRABLE_SILK_WARNING_TYPES
-            for finding in _kicad_warning_findings(candidate_report)
-        )
-        accepted = (
-            not after.parse_error
-            and after_silk < len(targeted)
-            and after.unconnected <= baseline.unconnected
-            and set(after.non_connectivity_errors).issubset(
-                baseline.non_connectivity_errors
+            after_silk = sum(
+                after_warning_counts[warning_type]
+                for warning_type in _REPAIRABLE_SILK_WARNING_TYPES
             )
-        )
+            accepted = (
+                not after.parse_error
+                and after_silk < before_silk
+                and not (after_warning_counts - before_warning_counts)
+                and after.unconnected <= baseline.unconnected
+                and not (
+                    Counter(after.non_connectivity_errors)
+                    - Counter(baseline.non_connectivity_errors)
+                )
+            )
+            if accepted:
+                backup_path.unlink(missing_ok=True)
+                shutil.copy2(candidate_report, report_path)
+                repaired = True
+        except Exception:  # noqa: BLE001 - rejected candidate restores bytes
+            accepted = False
+        finally:
+            candidate_report.unlink(missing_ok=True)
+            if backup_path.is_file():
+                shutil.copy2(backup_path, pcb_path)
+                backup_path.unlink(missing_ok=True)
         if not accepted:
-            return False
-        backup_path.unlink(missing_ok=True)
-        shutil.copy2(candidate_report, report_path)
-        return True
-    except Exception:  # noqa: BLE001 - candidate is restored below
-        return False
-    finally:
-        candidate_report.unlink(missing_ok=True)
-        if backup_path.is_file():
-            shutil.copy2(backup_path, pcb_path)
-            backup_path.unlink(missing_ok=True)
+            break
+    return repaired
 
 
 def _worker_result(
@@ -17367,6 +19066,303 @@ ARTIFACT_MODELS: dict[PipelineStep, type[BaseModel]] = {
 }
 
 
+_CANDIDATE_FILE_SNAPSHOT_DIR = ".ratsnest-candidate-transactions"
+_CANDIDATE_FILE_RESTORE_PREFIX = ".candidate-restore-"
+_CANDIDATE_FILE_EXCLUDES = frozenset({
+    "pipeline_state.json",
+    "pipeline_result.json",
+    "temporal_recovery.json",
+})
+
+
+def _candidate_managed_file(relative: Path) -> bool:
+    """Return whether a run-local file belongs to the mutable design candidate."""
+
+    name = relative.name.lower()
+    return (
+        relative.parts
+        and relative.parts[0] != _CANDIDATE_FILE_SNAPSHOT_DIR
+        and not relative.parts[0].startswith(_CANDIDATE_FILE_RESTORE_PREFIX)
+        and name not in _CANDIDATE_FILE_EXCLUDES
+        and not name.startswith("temporal_input")
+        and not name.endswith(".jsonl")
+        and not name.endswith(".tmp")
+    )
+
+
+def _candidate_snapshot_parent(ctx: PipelineContext) -> Path | None:
+    if not ctx.out_dir:
+        return None
+    out = Path(ctx.out_dir).resolve()
+    parent = out.parent / _CANDIDATE_FILE_SNAPSHOT_DIR / out.name
+    parent.mkdir(parents=True, exist_ok=True)
+    return parent
+
+
+def _snapshot_candidate_files(ctx: PipelineContext, label: str) -> str:
+    """Copy mutable run artifacts outside the run directory before an attempt."""
+
+    if not ctx.out_dir:
+        return ""
+    out = Path(ctx.out_dir).resolve()
+    if not out.is_dir():
+        return ""
+    parent = _candidate_snapshot_parent(ctx)
+    assert parent is not None
+    safe_label = re.sub(r"[^A-Za-z0-9_.-]", "-", label).strip(".-")[:80]
+    backup = Path(tempfile.mkdtemp(prefix=f"{safe_label or 'candidate'}-", dir=parent))
+    for source in out.rglob("*"):
+        if not source.is_file() or source.is_symlink():
+            continue
+        relative = source.relative_to(out)
+        if not _candidate_managed_file(relative):
+            continue
+        target = backup / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    # Persist only the opaque run-scoped directory name.  Absolute container
+    # paths are not portable when a checkpoint is later recovered on Windows.
+    return backup.name
+
+
+def _validated_candidate_snapshot_dir(
+    ctx: PipelineContext,
+    value: str,
+) -> tuple[Path, Path] | None:
+    if not value or not ctx.out_dir:
+        return None
+    out = Path(ctx.out_dir).resolve()
+    parent = _candidate_snapshot_parent(ctx)
+    assert parent is not None
+    resolved_parent = parent.resolve()
+    normalized_parts = [
+        part
+        for part in value.strip().replace("\\", "/").split("/")
+        if part and part != "."
+    ]
+    if not normalized_parts:
+        return None
+    leaf = normalized_parts[-1]
+    portable_token = len(normalized_parts) == 1
+    legacy_run_scoped_path = (
+        len(normalized_parts) >= 3
+        and normalized_parts[-3] == _CANDIDATE_FILE_SNAPSHOT_DIR
+        and normalized_parts[-2] == out.name
+    )
+    if (
+        not (portable_token or legacy_run_scoped_path)
+        or leaf in {".", ".."}
+        or not re.fullmatch(r"[A-Za-z0-9_.-]+", leaf)
+    ):
+        raise ValueError("candidate file snapshot escaped its run scope")
+    backup = (resolved_parent / leaf).resolve()
+    if backup.parent != resolved_parent:
+        raise ValueError("candidate file snapshot escaped its run scope")
+    if not backup.is_dir():
+        raise FileNotFoundError(f"candidate file snapshot is missing: {backup}")
+    return out, backup
+
+
+def _discard_candidate_files(ctx: PipelineContext, value: str) -> None:
+    try:
+        validated = _validated_candidate_snapshot_dir(ctx, value)
+    except FileNotFoundError:
+        return
+    if validated is None:
+        return
+    _out, backup = validated
+    parent = backup.parent
+    try:
+        shutil.rmtree(backup)
+    except OSError:
+        # A committed candidate or rollback must not fail because Windows is
+        # still releasing a library file handle.  A later cleanup can retry.
+        return
+    try:
+        parent.rmdir()
+        parent.parent.rmdir()
+    except OSError:
+        pass
+
+
+def _restore_candidate_files(ctx: PipelineContext, value: str) -> None:
+    """Transactionally restore the managed files captured before an attempt."""
+
+    validated = _validated_candidate_snapshot_dir(ctx, value)
+    if validated is None:
+        return
+    out, backup = validated
+    baseline_files = sorted({
+        path.relative_to(backup)
+        for path in backup.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }, key=lambda path: path.as_posix())
+    current_files = sorted([
+        path
+        for path in out.rglob("*")
+        if path.is_file()
+        and not path.is_symlink()
+        and _candidate_managed_file(path.relative_to(out))
+    ], key=lambda path: path.relative_to(out).as_posix())
+    current_by_relative = {
+        path.relative_to(out): path
+        for path in current_files
+    }
+    # Keep staging under the live run rather than below the already-long
+    # snapshot parent.  Windows CopyFile2 still observes legacy MAX_PATH in
+    # some Docker Desktop/AV combinations; nesting the run name twice made a
+    # valid ``.ratsnest-libs`` path exceed that limit.  ``out`` is on the same
+    # volume as every target, so the final ``os.replace`` remains atomic.
+    transaction = Path(
+        tempfile.mkdtemp(prefix=_CANDIDATE_FILE_RESTORE_PREFIX, dir=out)
+    )
+    staged = transaction / "staged"
+    rollback = transaction / "rollback"
+    installed: list[Path] = []
+    try:
+        # Build and verify both trees before touching the live run.  In
+        # particular, a Windows copy failure under .ratsnest-libs leaves every
+        # target file byte-for-byte unchanged.
+        for relative in baseline_files:
+            target = staged / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup / relative, target)
+        for relative, source in current_by_relative.items():
+            target = rollback / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        staged_files = {
+            path.relative_to(staged)
+            for path in staged.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        }
+        if staged_files != set(baseline_files):
+            raise OSError("candidate restore staging is incomplete")
+
+        try:
+            for relative in baseline_files:
+                target = out / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(staged / relative, target)
+                installed.append(relative)
+        except BaseException:
+            # Roll back only paths already atomically installed.  Paths not
+            # yet installed were never touched.
+            for relative in reversed(installed):
+                target = out / relative
+                previous = rollback / relative
+                if previous.is_file():
+                    os.replace(previous, target)
+                else:
+                    target.unlink(missing_ok=True)
+            raise
+
+        # Removing candidate-only files is post-commit cleanup.  Failure may
+        # leave a harmless extra file, but can never delete restored baseline.
+        baseline_set = set(baseline_files)
+        for relative, current in current_by_relative.items():
+            if relative not in baseline_set:
+                try:
+                    current.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        _discard_candidate_files(ctx, value)
+    finally:
+        shutil.rmtree(transaction, ignore_errors=True)
+
+
+def _capture_candidate_baseline(
+    state: PipelineState,
+    ctx: PipelineContext,
+    transaction_id: str,
+) -> CandidateStateSnapshot:
+    return CandidateStateSnapshot(
+        results=[result.model_dump(mode="json") for result in state.results],
+        artifacts={
+            step.value: artifact.model_dump(mode="json")
+            for step, artifact in state.artifacts.items()
+        },
+        resume_candidates={
+            step.value: {
+                "artifact": artifact.model_dump(mode="json"),
+                "used_llm": used_llm,
+            }
+            for step, (artifact, used_llm) in state.resume_candidates.items()
+        },
+        connection_synthesis_checkpoint=(
+            state.connection_synthesis_checkpoint.model_dump(mode="json")
+            if state.connection_synthesis_checkpoint is not None
+            else None
+        ),
+        connection_synthesis_report=(
+            state.connection_synthesis_report.model_dump(mode="json")
+            if state.connection_synthesis_report is not None
+            else None
+        ),
+        capability_gaps=[
+            gap.model_dump(mode="json") for gap in state.capability_gaps
+        ],
+        release_resume_step=(
+            state.release_resume_step.value
+            if state.release_resume_step is not None
+            else None
+        ),
+        release_resume_token_digest=state.release_resume_token_digest,
+        file_snapshot_dir=_snapshot_candidate_files(ctx, transaction_id),
+    )
+
+
+def _restore_candidate_baseline(
+    state: PipelineState,
+    ctx: PipelineContext,
+    snapshot: CandidateStateSnapshot,
+) -> None:
+    """Rollback candidate state while retaining new revision and audit history."""
+
+    _restore_candidate_files(ctx, snapshot.file_snapshot_dir)
+    state.results = [StepResult.model_validate(item) for item in snapshot.results]
+    state.artifacts = {
+        PipelineStep(name): ARTIFACT_MODELS[PipelineStep(name)].model_validate(payload)
+        for name, payload in snapshot.artifacts.items()
+    }
+    state.resume_candidates = {
+        PipelineStep(name): (
+            ARTIFACT_MODELS[PipelineStep(name)].model_validate(raw["artifact"]),
+            bool(raw.get("used_llm")),
+        )
+        for name, raw in snapshot.resume_candidates.items()
+    }
+    state.connection_synthesis_checkpoint = (
+        ConnectionSynthesisCheckpoint.model_validate(
+            snapshot.connection_synthesis_checkpoint
+        )
+        if snapshot.connection_synthesis_checkpoint is not None
+        else None
+    )
+    state.connection_synthesis_report = (
+        ConnectionSynthesisReport.model_validate(snapshot.connection_synthesis_report)
+        if snapshot.connection_synthesis_report is not None
+        else None
+    )
+    state.capability_gaps = [
+        CapabilityGap.model_validate(item) for item in snapshot.capability_gaps
+    ]
+    state.release_resume_step = (
+        PipelineStep(snapshot.release_resume_step)
+        if snapshot.release_resume_step
+        else None
+    )
+    state.release_resume_token_digest = snapshot.release_resume_token_digest
+
+
+def _commit_candidate_baseline(
+    ctx: PipelineContext,
+    snapshot: CandidateStateSnapshot | None,
+) -> None:
+    if snapshot is not None:
+        _discard_candidate_files(ctx, snapshot.file_snapshot_dir)
+
+
 def _saved_error_signatures(
     saved: dict[str, Any],
 ) -> frozenset[tuple[str, str, str, bool]] | None:
@@ -17722,6 +19718,30 @@ class Pipeline:
     ) -> PipelineState:
         ctx = ctx or PipelineContext()
         limit = _ORDER_INDEX[until] if until is not None else len(self.steps) - 1
+        durable_scheduled = [
+            record
+            for record in state.replan_history
+            if record.status == "scheduled" and record.candidate_baseline is not None
+        ]
+        for record in state.replan_history:
+            if record.status != "scheduled":
+                continue
+            legacy_or_shadowed = (
+                record.candidate_baseline is None
+                or (
+                    durable_scheduled
+                    and record is not durable_scheduled[-1]
+                )
+            )
+            if legacy_or_shadowed:
+                # Older checkpoints recorded only the instruction, not the
+                # accepted state it was replacing.  Such an action cannot be
+                # resumed transactionally and must never inject stale feedback
+                # into the current prefix.
+                _commit_candidate_baseline(ctx, record.candidate_baseline)
+                record.candidate_baseline = None
+                record.status = "deferred"
+                record.after_score = record.before_score
         if ctx.artifact_first and not ctx.repair_release_issues:
             # Checkpoints created by the former fail-closed runner may contain
             # a scheduled full upstream replan for an ordinary release issue.
@@ -17730,6 +19750,8 @@ class Pipeline:
             # audit record but explicitly retire that pending action.
             for record in state.replan_history:
                 if record.status == "scheduled":
+                    _commit_candidate_baseline(ctx, record.candidate_baseline)
+                    record.candidate_baseline = None
                     record.status = "deferred"
                     record.after_score = record.before_score
         completed = state.completed
@@ -17781,6 +19803,36 @@ class Pipeline:
                 sum(len(check.message) for check in failed),
             )
 
+        def reopen_failed_step(target: PipelineStep) -> int:
+            """Re-enter one rejected gate from its restored trusted artifact."""
+
+            target_index = _ORDER_INDEX[target]
+            artifact = state.artifacts.get(target)
+            result = next(
+                (
+                    existing
+                    for existing in reversed(state.results)
+                    if existing.step == target
+                ),
+                None,
+            )
+            if artifact is not None:
+                state.resume_candidates[target] = (
+                    artifact,
+                    bool(result.used_llm if result is not None else False),
+                )
+            state.results = [
+                existing
+                for existing in state.results
+                if _ORDER_INDEX[existing.step] < target_index
+            ]
+            state.artifacts = {
+                artifact_step: value
+                for artifact_step, value in state.artifacts.items()
+                if _ORDER_INDEX[artifact_step] < target_index
+            }
+            return target_index
+
         def pending_replan(trigger: PipelineStep) -> ReplanRecord | None:
             return next(
                 (
@@ -17822,6 +19874,7 @@ class Pipeline:
                 ),
                 None,
             )
+            ctx.active_recovery_tool = ""
             if active_replan is not None:
                 ctx.repair_feedback = active_replan.feedback
             elif (
@@ -17835,6 +19888,13 @@ class Pipeline:
                         active_recovery.decision.strategy,
                     )
                 )[:6_000]
+                if (
+                    active_recovery.decision.tool_name
+                    in _LOCAL_REPAIR_TOOL_WHITELIST
+                ):
+                    ctx.active_recovery_tool = (
+                        active_recovery.decision.tool_name
+                    )
                 ctx.repair_feedback = (
                     "Agentic recovery plan. Preserve every immutable requirement.\n"
                     f"Hypothesis: {active_recovery.decision.hypothesis}\n"
@@ -17909,13 +19969,16 @@ class Pipeline:
             if active_recovery is not None:
                 after_score = score(result)
                 active_recovery.after_score = after_score
-                active_recovery.status = (
-                    "verified"
-                    if after_score[0] == 0
-                    else "improved"
-                    if after_score < active_recovery.before_score
-                    else "rejected"
-                )
+                if result.execution_blocked:
+                    active_recovery.status = "error"
+                else:
+                    active_recovery.status = (
+                        "verified"
+                        if after_score[0] == 0
+                        else "improved"
+                        if after_score < active_recovery.before_score
+                        else "rejected"
+                    )
                 active_recovery.observation = (
                     "Deterministic gate observation: "
                     + (
@@ -17927,6 +19990,21 @@ class Pipeline:
                         )[:10_000]
                     )
                 )
+                if active_recovery.candidate_baseline is not None:
+                    baseline = active_recovery.candidate_baseline
+                    if active_recovery.status in {"rejected", "error", "exhausted"}:
+                        _restore_candidate_baseline(state, ctx, baseline)
+                        active_recovery.candidate_baseline = None
+                        index = reopen_failed_step(
+                            PipelineStep(active_recovery.step)
+                        )
+                        completed_set = set(state.completed)
+                        emit_recovery("recovery_observed", active_recovery)
+                        if ctx.on_progress_checkpoint is not None:
+                            ctx.on_progress_checkpoint(state)
+                        continue
+                    _commit_candidate_baseline(ctx, baseline)
+                    active_recovery.candidate_baseline = None
                 emit_recovery("recovery_observed", active_recovery)
 
             can_continue = (
@@ -17940,6 +20018,8 @@ class Pipeline:
             if can_continue:
                 recovered = pending_replan(step.step)
                 if recovered is not None and not result.blocked:
+                    _commit_candidate_baseline(ctx, recovered.candidate_baseline)
+                    recovered.candidate_baseline = None
                     recovered.status = "recovered"
                     recovered.after_score = (0, 0, 0)
                     emit_replan("replan_recovered", recovered)
@@ -17950,6 +20030,46 @@ class Pipeline:
                 continue
 
             if result.blocked:
+                if (
+                    active_replan is not None
+                    and active_replan.candidate_baseline is not None
+                ):
+                    # The candidate must pass every stage through its trigger.
+                    # A failure at either the trigger or an intermediate stage
+                    # rejects the whole transaction; never branch a nested
+                    # replan from partially accepted candidate state.
+                    active_replan.status = "stagnated"
+                    active_replan.after_score = score(result)
+                    baseline = active_replan.candidate_baseline
+                    _restore_candidate_baseline(state, ctx, baseline)
+                    active_replan.candidate_baseline = None
+                    originating_recovery = next(
+                        (
+                            turn
+                            for turn in reversed(state.recovery_history)
+                            if turn.status == "acted"
+                            and turn.step == active_replan.trigger_step
+                            and turn.decision.action
+                            == RecoveryAction.REPLAN_UPSTREAM
+                        ),
+                        None,
+                    )
+                    if originating_recovery is not None:
+                        originating_recovery.status = "rejected"
+                        originating_recovery.after_score = active_replan.after_score
+                        originating_recovery.observation = (
+                            "Upstream candidate rolled back after deterministic "
+                            f"failure at {step.step.value}."
+                        )
+                        emit_recovery("recovery_observed", originating_recovery)
+                    emit_replan("replan_stagnated", active_replan)
+                    index = reopen_failed_step(
+                        PipelineStep(active_replan.trigger_step)
+                    )
+                    completed_set = set(state.completed)
+                    if ctx.on_progress_checkpoint is not None:
+                        ctx.on_progress_checkpoint(state)
+                    continue
                 step_artifact = state.artifacts.get(step.step)
                 suggested_rollback = (
                     step.rollback_target(
@@ -18086,6 +20206,12 @@ class Pipeline:
                             decision.strategy,
                         )
                     )[:6_000]
+                    local_tool = _bind_local_repair_tool(
+                        result,
+                        repair_instructions,
+                    )
+                    if local_tool not in _LOCAL_REPAIR_TOOL_WHITELIST:
+                        local_tool = "repair_current_step"
                     decision = decision.model_copy(
                         update={
                             "failure_ids": sorted(current_failure_ids),
@@ -18094,7 +20220,7 @@ class Pipeline:
                             # it to a real implementation and discards invented
                             # command names or arbitrary shell arguments.
                             "tool_name": {
-                                RecoveryAction.LOCAL_REPAIR: "replan_current_step",
+                                RecoveryAction.LOCAL_REPAIR: local_tool,
                                 RecoveryAction.REPLAN_UPSTREAM: "replan_upstream_step",
                                 RecoveryAction.RETRY_TOOL: "retry_current_step",
                                 RecoveryAction.INVESTIGATE_HARNESS: "run_step_gate",
@@ -18111,12 +20237,11 @@ class Pipeline:
                         }
                     )
                     repeated_stagnant_action = any(
-                        prior.decision.action == decision.action
-                        and prior.decision.target_step == decision.target_step
+                        _recovery_action_fingerprint(prior.decision)
+                        == _recovery_action_fingerprint(decision)
                         and prior.baseline_fingerprint
                         == _artifact_fingerprint(step_artifact)
                         and prior.status in {"rejected", "exhausted"}
-                        and prior.after_score == prior.before_score
                         for prior in related_recovery_turns
                     )
                     recovery_turn = RecoveryTurnRecord(
@@ -18159,6 +20284,11 @@ class Pipeline:
                             RecoveryAction.INVESTIGATE_HARNESS,
                         }
                     ):
+                        recovery_turn.candidate_baseline = _capture_candidate_baseline(
+                            state,
+                            ctx,
+                            recovery_turn.turn_id,
+                        )
                         recovery_turn.status = "acted"
                         state.revision += 1
                         recovery_turn.revision = state.revision
@@ -18187,19 +20317,14 @@ class Pipeline:
                             ctx.on_progress_checkpoint(state)
                         continue
 
-                rollback_to = suggested_rollback
+                rollback_to = suggested_rollback if decision is None else None
                 if (
                     decision is not None
                     and recovery_turn is not None
                     and recovery_turn.status != "exhausted"
+                    and decision.action == RecoveryAction.REPLAN_UPSTREAM
                 ):
-                    if decision.action == RecoveryAction.REPLAN_UPSTREAM:
-                        rollback_to = PipelineStep(str(decision.target_step))
-                    elif decision.action in {
-                        RecoveryAction.ASK_HUMAN,
-                        RecoveryAction.STOP,
-                    }:
-                        rollback_to = None
+                    rollback_to = PipelineStep(str(decision.target_step))
                 rollback_artifact = (
                     state.artifacts.get(rollback_to)
                     if rollback_to is not None
@@ -18266,6 +20391,11 @@ class Pipeline:
                         before_score=current_score,
                         feedback=feedback,
                         baseline_fingerprint=replan_baseline_fingerprint,
+                    )
+                    record.candidate_baseline = _capture_candidate_baseline(
+                        state,
+                        ctx,
+                        record.replan_id,
                     )
                     state.replan_history.append(record)
                     state.revision += 1

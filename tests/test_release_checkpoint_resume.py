@@ -30,6 +30,7 @@ from ratsnestpro.orchestration.pipeline import (
     PipelineStep,
     StepResult,
 )
+from ratsnestpro.orchestration.pipeline_contracts import RouteResult
 
 
 def _release_blocked_hardware(*, infrastructure_blocked: bool = False) -> dict[str, Any]:
@@ -142,6 +143,112 @@ def test_langgraph_uses_durable_checkpoint_when_hardware_summary_is_missing(
         ratsnestpro_agent._release_repair_resume_step(state)  # type: ignore[arg-type]
         == CANONICAL_STEPS[8]
     )
+
+
+def test_runtime_recovery_continues_terminal_temporal_from_durable_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_name = "workspace-run"
+    run_dir = tmp_path / "runs" / run_name
+    run_dir.mkdir(parents=True)
+    payload = _checkpoint_payload()
+    payload["steps"] = payload["steps"][:3]
+    (run_dir / "pipeline_state.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("RATSNESTPRO_WORKSPACE_ROOT", str(tmp_path))
+    captured: dict[str, Any] = {}
+
+    async def fake_status(_run_ref: dict[str, Any]) -> str:
+        return "timed_out"
+
+    async def fake_dispatch(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "mode": "temporal",
+            "status": "started",
+            "request_id": kwargs["request_id"],
+            "workflow_id": "continued-workflow",
+            "workspace_run_name": kwargs["workspace_run_name"],
+        }
+
+    monkeypatch.setattr(client, "hardware_workflow_execution_status", fake_status)
+    monkeypatch.setattr(client, "dispatch_hardware_workflow", fake_dispatch)
+    monkeypatch.setattr(client, "temporal_enabled", lambda: True)
+    monkeypatch.setattr(ratsnestpro_agent, "_hardware_requirement", lambda _state: "build")
+    monkeypatch.setattr(ratsnestpro_agent, "_workflow_event", lambda *_args, **_kwargs: None)
+    state = {
+        "incremental_resume": False,
+        "run_name": "display-run",
+        "workspace_run_name": run_name,
+        "execution_scope": "internal",
+        "project_name": "board",
+        "hardware": {},
+        "hardware_attempts": [],
+        "capability_profile": {},
+        "hardware_dispatch": {
+            "mode": "temporal",
+            "status": "wait_error",
+            "request_id": "request-1",
+            "workflow_id": "timed-out-workflow",
+            "workspace_run_name": run_name,
+        },
+    }
+
+    update = asyncio.run(
+        ratsnestpro_agent.hardware_dispatch_phase(
+            state,  # type: ignore[arg-type]
+            {"configurable": {"request_id": "request-1"}},  # type: ignore[arg-type]
+        )
+    )
+
+    assert captured["resume_from_step"] == CANONICAL_STEPS[3]
+    assert captured["requirement"] == payload["requirement"]
+    assert captured["request_id"] != "request-1"
+    assert update["hardware_dispatch"]["request_id"] == "request-1"
+    assert update["hardware_dispatch"]["continuation_index"] == 1
+    assert (
+        update["hardware_dispatch"]["resumed_from_workflow_id"]
+        == "timed-out-workflow"
+    )
+
+
+def test_runtime_recovery_attaches_to_running_temporal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_status(_run_ref: dict[str, Any]) -> str:
+        return "running"
+
+    async def unexpected_dispatch(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("a running workflow must not be duplicated")
+
+    monkeypatch.setattr(client, "hardware_workflow_execution_status", fake_status)
+    monkeypatch.setattr(client, "dispatch_hardware_workflow", unexpected_dispatch)
+    monkeypatch.setattr(ratsnestpro_agent, "_workflow_event", lambda *_args, **_kwargs: None)
+    existing = {
+        "mode": "temporal",
+        "status": "started",
+        "request_id": "request-1",
+        "workflow_id": "running-workflow",
+        "workspace_run_name": "workspace-run",
+    }
+    state = {
+        "run_name": "display-run",
+        "workspace_run_name": "workspace-run",
+        "project_name": "board",
+        "hardware_dispatch": existing,
+    }
+
+    update = asyncio.run(
+        ratsnestpro_agent.hardware_dispatch_phase(
+            state,  # type: ignore[arg-type]
+            {"configurable": {"request_id": "request-1"}},  # type: ignore[arg-type]
+        )
+    )
+
+    assert update == {"hardware_dispatch": existing}
 
 
 def test_full_checkpoint_with_final_erc_blocker_resumes_at_erc(
@@ -304,6 +411,44 @@ def test_checkpoint_resume_invalidates_only_from_failed_step_and_bumps_revision(
     assert captured["release_resume_token_digest"] == hashlib.sha256(
         b"workflow-1"
     ).hexdigest()
+
+
+def test_explicit_resume_retains_failed_artifact_as_repair_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = tmp_path / "pipeline_state.json"
+    payload = _checkpoint_payload()
+    route_index = CANONICAL_STEPS.index("route_signals")
+    payload["steps"][route_index]["used_llm"] = True
+    payload["intermediate_artifacts"]["route_signals"] = RouteResult(
+        method="freerouting",
+        total_connections=62,
+        routed_connections=59,
+        unconnected=3,
+        dsn_path="board.dsn",
+        ses_path="board.ses",
+    ).model_dump(mode="json")
+    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(
+        "agents.ratsnestpro.tools.restore_pipeline_state",
+        lambda **_kwargs: _prefix_state(route_index),
+    )
+
+    restored = _load_pipeline_state(
+        checkpoint,
+        "Build a board",
+        "board",
+        resume_from_step=PipelineStep.ROUTE_SIGNALS,
+        resume_token="workflow-retain-route-candidate",
+    )
+
+    candidate, used_llm = restored.resume_candidates[PipelineStep.ROUTE_SIGNALS]
+    assert isinstance(candidate, RouteResult)
+    assert candidate.unconnected == 3
+    assert candidate.dsn_path == "board.dsn"
+    assert used_llm is True
 
 
 def test_execution_blocked_checkpoint_retries_the_failed_step(

@@ -394,6 +394,76 @@ def _architect_requirement() -> str:
     )
 
 
+def test_flattened_pinout_aliases_collapse_to_unique_composite_pin() -> None:
+    aliases = [
+        {
+            "symbol_lib_id": "MCU_Test:Controller",
+            "pin_number": number,
+            "symbol_pin_name": name,
+            "aliases": ["BOOT0", "NRST"],
+            "evidence_ids": ["https://manufacturer.example/device.pdf#page=30"],
+        }
+        for number, name in (("5", "PA14"), ("6", "PB2"), ("7", "PF0"))
+    ]
+    evidence = {
+        "evidence_contract": {"schema_version": 1, "producer": "architect_phase"},
+        "verified_pin_aliases": aliases,
+        "datasheet": {
+            "matched_pages": [{
+                "page": 30,
+                "text": "PB2 PF0 PA15 PA14-BOOT0 PA13 NRST LQFP64",
+            }],
+        },
+    }
+    requirement = (
+        "build a controller\n\nGROUNDED ARCHITECT EVIDENCE — contract:\n"
+        + json.dumps(evidence)
+    )
+
+    verified = pipeline_module._verified_pin_aliases(requirement)
+
+    assert [
+        (item.pin_number, item.symbol_pin_name, item.aliases)
+        for item in verified
+    ] == [("5", "PA14", ["BOOT0"])]
+
+
+def test_control_normalizer_rewires_boot_pulldown_to_verified_pin(
+    monkeypatch,
+) -> None:
+    pin_map = {
+        "MCU_Test:Controller": [
+            {"number": "1", "name": "VSS"},
+            {"number": "2", "name": "VDD"},
+            {"number": "5", "name": "PA14"},
+            {"number": "6", "name": "PB2"},
+        ],
+        "Device:R": [
+            {"number": "1", "name": "~"},
+            {"number": "2", "name": "~"},
+        ],
+        "Device:D": [
+            {"number": "1", "name": "K"},
+            {"number": "2", "name": "A"},
+        ],
+    }
+    monkeypatch.setattr(pipeline_module.symbols, "symbol_pins", lambda lib_id: pin_map[lib_id])
+    intent = _control_intent(boot_pin="PB2")
+    intent.nets.append(NetIntent(
+        name="SWCLK",
+        pins=[LogicalPin(ref="U1", pin="PA14")],
+    ))
+
+    repaired = pipeline_module._normalize_control_support(
+        _architect_requirement(),
+        _control_selection(),
+        intent,
+    )
+    view = _ConnectivityView.build(_control_selection(), repaired)
+
+    assert view.part_nets(_control_selection().parts[1]) == {"GND", "SWCLK"}
+
+
 def test_verified_alias_and_pull_role_drive_boot_gate(monkeypatch) -> None:
     pin_map = {
         "MCU_Test:Controller": [
@@ -1066,3 +1136,69 @@ def test_architect_alias_extraction_requires_datasheet_colocation() -> None:
             "evidence_ids": ["https://manufacturer.example/device.pdf#page=42"],
         }
     ]
+
+
+def test_architect_alias_extraction_uses_nearest_pin_in_flattened_pinout() -> None:
+    candidates = [{
+        "lib_id": "MCU_Test:Controller",
+        "pins": [
+            {"number": "12", "name": "NRST", "type": "input"},
+            {"number": "13", "name": "PF0", "type": "bidirectional"},
+            {"number": "29", "name": "PB2", "type": "bidirectional"},
+            {"number": "45", "name": "PA13", "type": "bidirectional"},
+            {"number": "46", "name": "PA14", "type": "bidirectional"},
+            {"number": "47", "name": "PA15", "type": "bidirectional"},
+        ],
+    }]
+    datasheet = {
+        "source_url": "https://manufacturer.example/device.pdf",
+        "matched_pages": [{
+            "page": 30,
+            "text": (
+                "LQFP64 pinout PB2 PC11 NRST PF0-OSC_IN "
+                "PA15 PA14-BOOT0 PA13 PA12"
+            ),
+        }],
+    }
+
+    aliases = ratsnestpro_agent._verified_pin_aliases_from_evidence(
+        candidates,
+        datasheet,
+    )
+
+    assert aliases == [
+        {
+            "symbol_lib_id": "MCU_Test:Controller",
+            "pin_number": "46",
+            "symbol_pin_name": "PA14",
+            "aliases": ["BOOT0"],
+            "evidence_ids": ["https://manufacturer.example/device.pdf#page=30"],
+        }
+    ]
+
+
+def test_architect_alias_extraction_rejects_ambiguous_singleton_controls() -> None:
+    candidates = [{
+        "lib_id": "MCU_Test:Controller",
+        "pins": [
+            {"number": "5", "name": "PA14", "type": "bidirectional"},
+            {"number": "6", "name": "PB2", "type": "bidirectional"},
+        ],
+    }]
+    datasheet = {
+        "source_url": "https://manufacturer.example/device.pdf",
+        "matched_pages": [{
+            "page": 42,
+            "text": (
+                "PA14 provides BOOT0 and NRST functions.\n"
+                "PB2 provides BOOT0 and NRST functions."
+            ),
+        }],
+    }
+
+    aliases = ratsnestpro_agent._verified_pin_aliases_from_evidence(
+        candidates,
+        datasheet,
+    )
+
+    assert aliases == []

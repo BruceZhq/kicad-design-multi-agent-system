@@ -46,6 +46,7 @@ from ratsnestpro.orchestration.ahe import (
     CapabilityGap,
 )
 from ratsnestpro.orchestration.pipeline import (
+    ARTIFACT_MODELS,
     Pipeline,
     PipelineContext,
     PipelineState,
@@ -859,6 +860,29 @@ def _load_pipeline_state(
         invalidate_from_step=invalidate_from_step,
         artifact_first=True,
     )
+    if (
+        explicit_invalidation is not None
+        and requirement_invalidation is None
+        and invalidate_from_step == explicit_invalidation
+        and isinstance(artifacts.get(explicit_invalidation.value), dict)
+    ):
+        # Explicit checkpoint continuation invalidates the failed StepResult,
+        # not the already materialized entity that the repair loop must edit.
+        # A real requirement amendment may invalidate an earlier dependency;
+        # in that case the downstream artifact is intentionally not retained.
+        try:
+            candidate = ARTIFACT_MODELS[explicit_invalidation].model_validate(
+                artifacts[explicit_invalidation.value]
+            )
+        except ValidationError:
+            pass
+        else:
+            step_index = list(PipelineStep).index(explicit_invalidation)
+            saved_step = steps[step_index] if step_index < len(steps) else {}
+            restored.resume_candidates[explicit_invalidation] = (
+                candidate,
+                bool(saved_step.get("used_llm")) if isinstance(saved_step, dict) else False,
+            )
     if (
         explicit_invalidation is None
         and len(restored.results) < persisted_completed_steps

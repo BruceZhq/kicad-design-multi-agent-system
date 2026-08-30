@@ -89,6 +89,26 @@ class FailureEnvelope(ContractModel):
     evidence: dict[str, Any] = Field(default_factory=dict)
 
 
+class CandidateStateSnapshot(ContractModel):
+    """Durable last-known-good state retained while a candidate is evaluated.
+
+    The payload deliberately stays pipeline-model agnostic to avoid an import
+    cycle.  ``pipeline.py`` owns validation when restoring these dictionaries.
+    Audit events exclude this potentially large run-local payload.
+    """
+
+    schema_version: Literal[1] = 1
+    results: list[dict[str, Any]] = Field(default_factory=list)
+    artifacts: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    resume_candidates: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    connection_synthesis_checkpoint: dict[str, Any] | None = None
+    connection_synthesis_report: dict[str, Any] | None = None
+    capability_gaps: list[dict[str, Any]] = Field(default_factory=list)
+    release_resume_step: str | None = None
+    release_resume_token_digest: str = ""
+    file_snapshot_dir: str = ""
+
+
 class RepairRecord(ContractModel):
     patch_id: str = Field(default_factory=lambda: str(uuid4()))
     kind: Literal["harness", "design"] = "harness"
@@ -120,6 +140,7 @@ class ReplanRecord(ContractModel):
     after_score: tuple[int, int, int] | None = None
     feedback: str = ""
     baseline_fingerprint: str = ""
+    candidate_baseline: CandidateStateSnapshot | None = None
 
 
 class CapabilityGap(ContractModel):
@@ -191,6 +212,7 @@ class RecoveryTurnRecord(ContractModel):
     used_llm: bool = False
     skill_name: str = Field(default="", max_length=120)
     skill_digest: str = Field(default="", max_length=128)
+    candidate_baseline: CandidateStateSnapshot | None = None
 
 
 _REF_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Z]{1,4}\d+[A-Z]?)(?![A-Za-z0-9_])")
@@ -407,7 +429,10 @@ def ahe_event(
     if gap is not None:
         payload["gap"] = gap.model_dump(mode="json")
     if replan is not None:
-        payload["replan"] = replan.model_dump(mode="json")
+        payload["replan"] = replan.model_dump(
+            mode="json",
+            exclude={"candidate_baseline"},
+        )
     if attribution is not None:
         payload["attribution"] = attribution.model_dump(mode="json")
     if recovery is not None:
@@ -415,7 +440,10 @@ def ahe_event(
         # The event bridge receives only structural fields so cross-run
         # telemetry cannot leak prompts or proprietary board details.
         payload["recovery"] = {
-            **recovery.model_dump(mode="json"),
+            **recovery.model_dump(
+                mode="json",
+                exclude={"candidate_baseline"},
+            ),
             "action": recovery.decision.action.value,
             "origin": recovery.decision.origin.value,
             "target_step": recovery.decision.target_step,

@@ -49,6 +49,48 @@ def temporal_enabled() -> bool:
     return bool(settings.RATSNESTPRO_TEMPORAL_ENABLED)
 
 
+async def hardware_workflow_execution_status(run_ref: dict[str, Any]) -> str:
+    """Return a conservative normalized status for an existing workflow.
+
+    A LangGraph replay must not blindly attach to a Temporal execution that is
+    already terminal.  Conversely, an unavailable Temporal service must not
+    cause a second workflow to be created, so transport/query failures remain
+    ``unknown`` and are treated as attach-only by the caller.
+    """
+
+    if run_ref.get("mode") != "temporal" or not run_ref.get("workflow_id"):
+        return "not_found"
+    try:
+        client = await connect_temporal()
+        handle = client.get_workflow_handle(str(run_ref["workflow_id"]))
+        description = await asyncio.wait_for(
+            handle.describe(),
+            timeout=min(
+                15.0,
+                float(settings.RATSNESTPRO_AGENT_CALL_TIMEOUT_SECONDS),
+            ),
+        )
+    except RPCError as exc:
+        return "not_found" if exc.status == RPCStatusCode.NOT_FOUND else "unknown"
+    except Exception:  # Temporal unavailability must fail closed against duplication.
+        return "unknown"
+
+    raw_status = getattr(description.status, "name", str(description.status))
+    normalized = str(raw_status).strip().lower().replace("-", "_")
+    for status in (
+        "timed_out",
+        "terminated",
+        "canceled",
+        "cancelled",
+        "completed",
+        "failed",
+        "running",
+    ):
+        if status in normalized:
+            return "canceled" if status == "cancelled" else status
+    return "unknown"
+
+
 async def connect_temporal() -> Client:
     global _temporal_client
     if _temporal_client is not None:

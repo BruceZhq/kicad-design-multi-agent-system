@@ -845,6 +845,79 @@ def _workspace_run_name(state: RatsNestWorkflowState) -> str:
     )
 
 
+def _recover_misclassified_resume_workspace(
+    state: RatsNestWorkflowState,
+    fallback: str,
+) -> str:
+    """Recover a workspace orphaned by an older router's false amendment.
+
+    Older checkpoints could classify a procedural sentence such as "every
+    modification must be validated" as a board-contract amendment. That
+    created a fresh, nearly empty workspace before the failure was noticed.
+    Only migrate that narrowly identifiable case, and only to an exact
+    workspace path already attested by this checkpoint's Hardware attempts.
+    """
+
+    prior_intent = state.get("intent", {})
+    if not isinstance(prior_intent, dict) or prior_intent.get("context_relation") != "amend":
+        return fallback
+    prior_request = str(state.get("latest_request", "")).strip()
+    if not prior_request:
+        return fallback
+    corrected = classify_intent(
+        prior_request,
+        prior_intent=str(state.get("workflow_mode", "build")),
+        has_active_context=True,
+    )
+    if corrected.context_relation != "resume":
+        return fallback
+
+    execution_scope = str(state.get("execution_scope", "")).strip()
+    project_name = str(state.get("project_name", "")).strip()
+    runs_root = _workspace_root() / "runs"
+
+    def checkpoint_score(name: str) -> tuple[int, int, int] | None:
+        if not name or _SAFE_NAME.search(name):
+            return None
+        if execution_scope and f"--{execution_scope}--" not in name:
+            return None
+        try:
+            payload = json.loads(
+                (runs_root / name / "pipeline_state.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError, TypeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        checkpoint_project = str(payload.get("project_name", "")).strip()
+        if project_name and checkpoint_project and checkpoint_project != project_name:
+            return None
+        steps = payload.get("steps", [])
+        if not isinstance(steps, list) or any(not isinstance(item, dict) for item in steps):
+            return None
+        return (
+            len(steps),
+            int(payload.get("completed_steps", 0) or 0),
+            int(payload.get("revision", 0) or 0),
+        )
+
+    selected = fallback
+    selected_score = checkpoint_score(fallback) or (-1, -1, -1)
+    attempts = state.get("hardware_attempts", [])
+    if not isinstance(attempts, list):
+        return selected
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        raw_directory = str(attempt.get("run_directory", "")).strip()
+        candidate = Path(raw_directory).name
+        score = checkpoint_score(candidate)
+        if score is not None and score > selected_score:
+            selected = candidate
+            selected_score = score
+    return selected
+
+
 def _is_negated_mention(text: str, start: int) -> bool:
     clause_start = max(
         (text.rfind(separator, 0, start) for separator in ".!?。！？;\n"),
@@ -1046,6 +1119,7 @@ _CONTROL_PIN_ALIAS_RE = re.compile(
     r"JTMS|JTCK|TMS|TCK|GPIO0|IO0|ENABLE|EN)(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
+_CONTROL_PIN_ALIAS_MAX_GAP = 64
 
 
 def _verified_pin_aliases_from_evidence(
@@ -1055,9 +1129,10 @@ def _verified_pin_aliases_from_evidence(
     """Extract only aliases explicitly co-located with a real symbol pin.
 
     This is deliberately deterministic. A pin name must exist in the grounded
-    KiCad candidate and occur on the same bounded datasheet line as the
-    alternate function. Every record carries the source URL and page; prose
-    from the Architect model is never parsed as electrical evidence.
+    KiCad candidate and be the unique nearest pin on the same bounded
+    datasheet line as the alternate function. Every record carries the source
+    URL and page; prose from the Architect model is never parsed as electrical
+    evidence.
     """
 
     pages = datasheet.get("matched_pages", [])
@@ -1069,6 +1144,12 @@ def _verified_pin_aliases_from_evidence(
         pins = candidate.get("pins", [])
         if not lib_id or not isinstance(pins, list):
             continue
+        direct_pin_names = {
+            str(pin.get("name", "")).strip().casefold()
+            for pin in pins
+            if isinstance(pin, dict) and str(pin.get("name", "")).strip()
+        }
+        eligible_pins: list[tuple[str, str, re.Pattern[str]]] = []
         for pin in pins:
             if not isinstance(pin, dict):
                 continue
@@ -1082,44 +1163,94 @@ def _verified_pin_aliases_from_evidence(
                 rf"(?<![A-Za-z0-9]){re.escape(pin_name)}(?![A-Za-z0-9])",
                 re.IGNORECASE,
             )
-            for page in pages[:32]:
-                if not isinstance(page, dict):
+            eligible_pins.append((number, pin_name, pin_pattern))
+        for page in pages[:32]:
+            if not isinstance(page, dict):
+                continue
+            source_url = str(
+                page.get("source_url") or datasheet.get("source_url") or ""
+            ).strip()
+            page_number = page.get("page")
+            text = str(page.get("text", ""))
+            if not source_url.startswith("https://") or page_number is None:
+                continue
+            for line in text.splitlines():
+                bounded_line = line[:1_000]
+                pin_mentions = [
+                    (match.start(), match.end(), number, pin_name)
+                    for number, pin_name, pin_pattern in eligible_pins
+                    for match in pin_pattern.finditer(bounded_line)
+                ]
+                if not pin_mentions:
                     continue
-                source_url = str(
-                    page.get("source_url") or datasheet.get("source_url") or ""
-                ).strip()
-                page_number = page.get("page")
-                text = str(page.get("text", ""))
-                if not source_url.startswith("https://") or page_number is None:
-                    continue
-                for line in text.splitlines():
-                    if not pin_pattern.search(line):
+                for alias_match in _CONTROL_PIN_ALIAS_RE.finditer(bounded_line):
+                    alias = alias_match.group(0).upper()
+                    if alias.casefold() in direct_pin_names:
                         continue
-                    aliases = {
-                        match.group(0).upper()
-                        for match in _CONTROL_PIN_ALIAS_RE.finditer(line[:1_000])
-                        if match.group(0).casefold() != pin_name.casefold()
+                    distances = [
+                        (
+                            0
+                            if re.fullmatch(
+                                r"[-/_:()]+",
+                                (
+                                    bounded_line[end : alias_match.start()]
+                                    if end <= alias_match.start()
+                                    else bounded_line[alias_match.end() : start]
+                                ),
+                            )
+                            else 1,
+                            max(
+                                start - alias_match.end(),
+                                alias_match.start() - end,
+                                0,
+                            ),
+                            number,
+                            pin_name,
+                        )
+                        for start, end, number, pin_name in pin_mentions
+                    ]
+                    nearest_rank = min(item[:2] for item in distances)
+                    nearest_pins = {
+                        (number, pin_name)
+                        for structure, distance, number, pin_name in distances
+                        if (structure, distance) == nearest_rank
                     }
-                    if not aliases:
+                    if (
+                        nearest_rank[1] > _CONTROL_PIN_ALIAS_MAX_GAP
+                        or len(nearest_pins) != 1
+                    ):
                         continue
+                    number, pin_name = nearest_pins.pop()
                     key = (lib_id, number, pin_name)
                     record = merged.setdefault(
                         key,
                         {"aliases": set(), "evidence_ids": set()},
                     )
-                    record["aliases"].update(aliases)
+                    record["aliases"].add(alias)
                     record["evidence_ids"].add(
                         f"{source_url}#page={page_number}"
                     )
+    alias_targets: dict[tuple[str, str], set[tuple[str, str]]] = {}
+    for (lib_id, number, pin_name), values in merged.items():
+        for alias in values["aliases"]:
+            alias_targets.setdefault((lib_id, alias), set()).add((number, pin_name))
+    ambiguous_aliases = {
+        key for key, targets in alias_targets.items() if len(targets) != 1
+    }
     return [
         VerifiedPinAlias(
             symbol_lib_id=lib_id,
             pin_number=number,
             symbol_pin_name=pin_name,
-            aliases=sorted(values["aliases"]),
+            aliases=sorted(
+                alias
+                for alias in values["aliases"]
+                if (lib_id, alias) not in ambiguous_aliases
+            ),
             evidence_ids=sorted(values["evidence_ids"]),
         ).model_dump(mode="json")
         for (lib_id, number, pin_name), values in sorted(merged.items())
+        if any((lib_id, alias) not in ambiguous_aliases for alias in values["aliases"])
     ]
 
 
@@ -1794,13 +1925,18 @@ async def initialize(
     prior_workspace_run_name = str(state.get("workspace_run_name", "")).strip()
     workspace_run_name = (
         prior_workspace_run_name
-        if incremental_resume and prior_workspace_run_name
+        if reuses_context and prior_workspace_run_name
         else _workspace_run_key(
             run_name,
             requirement,
             execution_scope,
         )
     )
+    if incremental_resume:
+        workspace_run_name = _recover_misclassified_resume_workspace(
+            state,
+            workspace_run_name,
+        )
     message_updates: list[Any]
     if intent.context_relation == "new":
         message_updates = [
@@ -3520,7 +3656,11 @@ def _profile_ahe_budget(state: RatsNestWorkflowState) -> dict[str, int]:
     }
 
 
-def _release_repair_resume_step(state: RatsNestWorkflowState) -> str | None:
+def _release_repair_resume_step(
+    state: RatsNestWorkflowState,
+    *,
+    allow_runtime_recovery: bool = False,
+) -> str | None:
     """Return the only safe next step from the persisted pipeline checkpoint.
 
     LangGraph can be cancelled while it is awaiting Temporal, before the final
@@ -3529,9 +3669,7 @@ def _release_repair_resume_step(state: RatsNestWorkflowState) -> str | None:
     fallback for legacy/in-memory callers.
     """
 
-    from agents.ratsnestpro.temporal.contracts import CANONICAL_STEPS
-
-    if not state.get("incremental_resume"):
+    if not state.get("incremental_resume") and not allow_runtime_recovery:
         return None
 
     raw_steps: Any = None
@@ -3575,6 +3713,41 @@ def _release_repair_resume_step(state: RatsNestWorkflowState) -> str | None:
     ):
         return "manufacture"
     return None
+
+
+def _frozen_hardware_requirement(
+    state: RatsNestWorkflowState,
+    *,
+    resume_from_step: str | None,
+) -> str:
+    """Use the checkpoint's exact Hardware input for a continuation.
+
+    Architect/Parts summaries and recovery narration may evolve between
+    control-plane revisions. They must not alter the immutable requirement
+    identity used to restore a verified EDA prefix. A genuine user amendment
+    does not set ``incremental_resume`` and therefore still receives a newly
+    rendered requirement and the normal dependency invalidation path.
+    """
+
+    rendered = _hardware_requirement(state)
+    if not resume_from_step:
+        return rendered
+    try:
+        checkpoint = (
+            _workspace_root()
+            / "runs"
+            / _workspace_run_name(state)
+            / "pipeline_state.json"
+        )
+        payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return rendered
+    if not isinstance(payload, dict):
+        return rendered
+    if str(payload.get("project_name", "")) != str(state.get("project_name", "")):
+        return rendered
+    frozen = str(payload.get("requirement", ""))
+    return frozen if frozen.strip() else rendered
 
 
 async def _run_hardware(state: RatsNestWorkflowState) -> dict[str, Any]:
@@ -3741,34 +3914,73 @@ async def hardware_dispatch_phase(
 
     from agents.ratsnestpro.temporal.client import (
         dispatch_hardware_workflow,
+        hardware_workflow_execution_status,
         temporal_enabled,
     )
 
     existing_ref = dict(state.get("hardware_dispatch", {}))
     workspace_run_name = _workspace_run_name(state)
     request_id = str(config.get("configurable", {}).get("request_id", ""))
-    if (
+    matching_existing_dispatch = (
         existing_ref.get("mode") == "temporal"
         and existing_ref.get("workflow_id")
         and existing_ref.get("request_id") == request_id
         and existing_ref.get("status") in {"started", "attached", "wait_error"}
         and existing_ref.get("workspace_run_name", existing_ref.get("run_name"))
         == workspace_run_name
-    ):
+    )
+    continuation_index = 0
+    resume_from_step = _release_repair_resume_step(state)
+    temporal_request_id = request_id
+    if matching_existing_dispatch:
+        execution_status = await hardware_workflow_execution_status(existing_ref)
+        restartable_terminal = execution_status in {
+            "failed",
+            "timed_out",
+            "terminated",
+            "canceled",
+            "not_found",
+        }
+        runtime_resume_step = (
+            _release_repair_resume_step(state, allow_runtime_recovery=True)
+            if restartable_terminal
+            else None
+        )
+        if not runtime_resume_step:
+            _workflow_event(
+                "hardware-engineer:dispatch",
+                "attached",
+                detail=str(existing_ref["workflow_id"]),
+            )
+            return {"hardware_dispatch": existing_ref}
+
+        # A terminal Temporal execution cannot be reused.  Give the durable
+        # continuation its own workflow identity while retaining the original
+        # request ID as the LangGraph replay owner.
+        continuation_index = int(existing_ref.get("continuation_index", 0) or 0) + 1
+        temporal_request_id = (
+            f"{request_id}.continuation.{continuation_index}.{runtime_resume_step}"
+        )
+        resume_from_step = runtime_resume_step
         _workflow_event(
             "hardware-engineer:dispatch",
-            "attached",
-            detail=str(existing_ref["workflow_id"]),
+            "continuing",
+            detail=(
+                f"{existing_ref['workflow_id']} -> {runtime_resume_step} "
+                f"({execution_status})"
+            ),
         )
-        return {"hardware_dispatch": existing_ref}
 
     selected_model = config.get("configurable", {}).get(
         "model",
         settings.DEFAULT_MODEL,
     )
     args: dict[str, Any] = {
-        "request_id": request_id,
-        "requirement": _hardware_requirement(state),
+        "request_id": temporal_request_id,
+        "requirement": _frozen_hardware_requirement(
+            state,
+            resume_from_step=resume_from_step,
+        ),
         "run_name": state["run_name"],
         "workspace_run_name": workspace_run_name,
         "execution_scope": str(state.get("execution_scope", "legacy")),
@@ -3792,12 +4004,22 @@ async def hardware_dispatch_phase(
         "governance_scope_token": str(
             config.get("configurable", {}).get("governance_scope_token", "")
         ),
-        "resume_from_step": _release_repair_resume_step(state),
+        "resume_from_step": resume_from_step,
     }
     enabled = temporal_enabled()
     _workflow_event("hardware-engineer:dispatch", "started", attempt=args["attempt"])
     try:
         run_ref = await dispatch_hardware_workflow(**args)
+        if continuation_index:
+            run_ref.update(
+                {
+                    "request_id": request_id,
+                    "temporal_request_id": temporal_request_id,
+                    "continuation_index": continuation_index,
+                    "resumed_from_workflow_id": str(existing_ref["workflow_id"]),
+                    "resume_from_step": resume_from_step,
+                }
+            )
     except Exception as exc:  # noqa: BLE001 - durable runtime boundary
         run_ref = {
             "mode": "temporal",

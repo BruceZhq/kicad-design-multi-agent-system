@@ -9,7 +9,7 @@ from pydantic import BaseModel
 import ratsnestpro.orchestration.pipeline as pipeline_module
 from ratsnestpro.domain.contracts import RequirementSpec
 from ratsnestpro.eda.vendor.pcb import PcbBoard
-from ratsnestpro.eda.vendor.sexpr import find_all, find_first, tag_of
+from ratsnestpro.eda.vendor.sexpr import Atom, find_all, find_first, tag_of
 from ratsnestpro.orchestration.pipeline import (
     CheckResult,
     ErcStep,
@@ -253,3 +253,178 @@ def test_silkscreen_repair_edits_real_entity_and_keeps_drc_monotonic(
     )
 
     assert str(find_first(repaired_reference, "layer")[1]) == "F.Fab"
+
+
+def test_silkscreen_repair_prefers_reference_over_package_outline(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    pcb_path = tmp_path / "board.kicad_pcb"
+    report_path = tmp_path / "board.drc.json"
+    board = PcbBoard.blank()
+    board.set_board_outline(0, 0, 20, 20)
+    board.add_footprint(
+        lib_id="Resistor_SMD:R_0805_2012Metric",
+        reference="R1",
+        value="1k",
+        x=10,
+        y=10,
+    )
+    footprint = find_all(board.root, "footprint")[0]
+    outline_uuid = "f6faf536-5a84-4d14-a6ae-a26a18a41936"
+    footprint.append([
+        Atom("fp_line"),
+        [Atom("start"), Atom("-1"), Atom("0")],
+        [Atom("end"), Atom("1"), Atom("0")],
+        [
+            Atom("stroke"),
+            [Atom("width"), Atom("0.15")],
+            [Atom("type"), Atom("default")],
+        ],
+        [Atom("layer"), "F.SilkS"],
+        [Atom("uuid"), outline_uuid],
+    ])
+    board.save(pcb_path)
+    reference = next(
+        child
+        for child in footprint
+        if isinstance(child, list)
+        and tag_of(child) == "property"
+        and len(child) > 1
+        and str(child[1]) == "Reference"
+    )
+    reference_uuid = str(find_first(reference, "uuid")[1])
+    report_path.write_text(json.dumps({
+        "violations": [{
+            "type": "silk_overlap",
+            "severity": "warning",
+            "description": "Silkscreen overlap",
+            "items": [
+                {
+                    "description": "Reference field of R1",
+                    "uuid": reference_uuid,
+                    "pos": {"x": 10, "y": 10},
+                },
+                {
+                    "description": "Segment of R1 on F.Silkscreen",
+                    "uuid": outline_uuid,
+                    "pos": {"x": 10, "y": 10},
+                },
+            ],
+        }],
+        "unconnected_items": [],
+        "schematic_parity": [],
+    }), encoding="utf-8")
+
+    def clean_candidate(_cli: str, _pcb: Path, candidate: Path) -> _DrcSnapshot:
+        candidate.write_text(json.dumps({
+            "violations": [],
+            "unconnected_items": [],
+            "schematic_parity": [],
+        }), encoding="utf-8")
+        return _DrcSnapshot(findings=(), non_connectivity_errors=(), gaps=())
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_kicad_drc_snapshot",
+        clean_candidate,
+    )
+
+    assert _repair_silkscreen_entities("kicad-cli", pcb_path, report_path)
+    repaired = PcbBoard.load(pcb_path)
+    repaired_footprint = find_all(repaired.root, "footprint")[0]
+    repaired_reference = next(
+        child
+        for child in repaired_footprint
+        if isinstance(child, list)
+        and tag_of(child) == "property"
+        and len(child) > 1
+        and str(child[1]) == "Reference"
+    )
+    repaired_outline = next(
+        child
+        for child in find_all(repaired_footprint, "fp_line")
+        if str(find_first(child, "uuid")[1]) == outline_uuid
+    )
+
+    assert str(find_first(repaired_reference, "layer")[1]) == "F.Fab"
+    assert str(find_first(repaired_outline, "layer")[1]) == "F.SilkS"
+
+
+def test_silkscreen_repair_rolls_back_when_connectivity_regresses(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    pcb_path = tmp_path / "board.kicad_pcb"
+    report_path = tmp_path / "board.drc.json"
+    board = PcbBoard.blank()
+    board.set_board_outline(0, 0, 20, 20)
+    board.add_footprint(
+        lib_id="Resistor_SMD:R_0805_2012Metric",
+        reference="R1",
+        value="1k",
+        x=10,
+        y=10,
+    )
+    board.save(pcb_path)
+    footprint = find_all(board.root, "footprint")[0]
+    reference = next(
+        child
+        for child in footprint
+        if isinstance(child, list)
+        and tag_of(child) == "property"
+        and len(child) > 1
+        and str(child[1]) == "Reference"
+    )
+    reference_uuid = str(find_first(reference, "uuid")[1])
+    report_path.write_text(json.dumps({
+        "violations": [{
+            "type": "silk_over_copper",
+            "severity": "warning",
+            "description": "Silkscreen clipped by solder mask",
+            "items": [{
+                "description": "Reference field of R1",
+                "uuid": reference_uuid,
+                "pos": {"x": 10, "y": 10},
+            }],
+        }],
+        "unconnected_items": [],
+        "schematic_parity": [],
+    }), encoding="utf-8")
+    original_pcb = pcb_path.read_bytes()
+    original_report = report_path.read_bytes()
+
+    def regressed_candidate(
+        _cli: str,
+        _pcb: Path,
+        candidate: Path,
+    ) -> _DrcSnapshot:
+        candidate.write_text(json.dumps({
+            "violations": [],
+            "unconnected_items": [{
+                "type": "unconnected_items",
+                "severity": "error",
+                "description": "Missing connection between items",
+            }],
+            "schematic_parity": [],
+        }), encoding="utf-8")
+        return _DrcSnapshot(
+            findings=("kicad_cli:unconnected_items:Missing connection",),
+            non_connectivity_errors=(),
+            gaps=(),
+            reported_unconnected=1,
+        )
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_kicad_drc_snapshot",
+        regressed_candidate,
+    )
+
+    assert not _repair_silkscreen_entities(
+        "kicad-cli",
+        pcb_path,
+        report_path,
+    )
+    assert pcb_path.read_bytes() == original_pcb
+    assert report_path.read_bytes() == original_report

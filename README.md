@@ -60,20 +60,6 @@ flowchart TD
 
 两例均为 `release_ready` 并登记可信 Manifest。当前只有 NE555 具有完整单/多 Agent 配对：单 Agent 为 `delivered_with_issues`，多 Agent 为 `release_ready`；这是一个 pair 的真实观察，不构成总体成功率结论。证据、耗时口径和 N/A 指标见 [Release-ready 收敛报告](evals/reports/release-ready-convergence-20260829.md)。
 
-### 历史五案例 E2E 基线
-
-2026-07-30 的 `generalfix-v6` 固定矩阵覆盖 RP2040、STM32G431、ESP32-C3、nRF52840 和 STM32F072 五类板卡需求。结果按证据层级报告：
-
-| 可核查指标 | 结果 | 含义 |
-|---|---:|---|
-| SSE 请求完整结束 | 5/5 | 长任务事件流未中断 |
-| Hardware Engineer 完成 17 步 | 4/5 | 流水线走到末尾，不等于电气正确 |
-| 生成非空 `.kicad_sch` 与 `.kicad_pcb` | 4/5 | 保留了可编辑工程草稿 |
-| 生成非空 Freerouting `.dsn` 与 `.ses` | 2/5 | 两个案例进入真实路由链路 |
-| `release_ready=true` | 0/5 | ERC/DRC 或连通性未通过，系统全部拒绝误放行 |
-
-完整口径、逐案例根因和实际文件统计见[五案例独立审计](docs/ratsnestpro/test-results/five-case-e2e-general-fixes-2026-07-30.md)。`completed_with_issues` 只表示“执行完毕并保留可编辑草稿”，不能解释为可制造。
-
 ### 当前能力边界
 
 - 当前回归证明了多智能体编排、长任务恢复、真实 KiCad 产物、确定性门禁，并在两个受支持黄金板型上形成严格发布正例；尚未证明对任意自由需求稳定生成可制造 PCB。

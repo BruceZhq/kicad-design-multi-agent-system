@@ -123,6 +123,14 @@ _NEGATED_AMEND_RE = re.compile(
     r"[^。；;\n]{0,40}(?:新增|添加|增加|删除|移除|替换|改成|改为|调整|修改|变更|再加|还要))",
     re.IGNORECASE,
 )
+_PROCEDURAL_MODIFICATION_RE = re.compile(
+    r"(?:\b(?:each|every|any)\s+(?:change|modification|repair)\s+"
+    r"(?:must|shall|should)\b[^.;\n]{0,160}"
+    r"(?:verif|validat|test|rollback)|"
+    r"(?:每次|所有|任何)(?:修改|变更|修复)[^。；;\n]{0,160}"
+    r"(?:验证|校验|检查|测试|回滚))",
+    re.IGNORECASE,
+)
 _NEGATED_BUILD_RE = re.compile(
     r"(?:\b(?:do\s+not|don't|must\s+not|without)\b[^.\n]{0,40}"
     r"\b(?:design|generate|build|create)\b[^.\n]{0,30}\b(?:pcb|board)\b|"
@@ -249,6 +257,10 @@ def classify_intent(
     continuation_text = _NEGATED_CONTINUE_RE.sub("", requirement)
     has_continue = bool(_CONTINUE_ACTION_RE.search(continuation_text))
     amendment_text = _NEGATED_AMEND_RE.sub("", requirement)
+    # Recovery policy can describe how every candidate modification must be
+    # verified or rolled back.  That is an execution constraint, not a user
+    # amendment to the board contract.
+    amendment_text = _PROCEDURAL_MODIFICATION_RE.sub("", amendment_text)
     has_amendment = bool(_AMEND_ACTION_RE.search(amendment_text))
     explicit_new_context = requests_new_context(requirement)
     negated_build = bool(_NEGATED_BUILD_RE.search(requirement))
