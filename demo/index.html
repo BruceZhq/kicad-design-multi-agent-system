@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="KiCad Design Multi-Agent System static product demo" />
+    <meta name="description" content="KiCad Design Multi-Agent System real E2E recording and architecture" />
     <title>KiCad Design Multi-Agent System · Demo</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -26,69 +26,57 @@
             共同约束器件证据、工程产物与交付状态。
           </p>
           <div class="actions">
-            <button id="run-demo" type="button">运行 60 秒流程演示</button>
-            <button id="reset-demo" class="secondary" type="button">重置</button>
+            <a class="button" href="#real-e2e">观看真实 E2E</a>
+            <a class="button secondary" href="https://github.com/BruceZhq/kicad-design-multi-agent-system">查看源码</a>
           </div>
-          <p class="disclosure">静态交互演示 · 使用模拟数据 · 不调用真实 LLM、KiCad 或内部服务</p>
+          <p class="disclosure">真实流程录像 · 等待段已加速</p>
         </div>
 
         <aside class="request-card">
-          <div class="card-label">示例需求</div>
-          <h2>工业边缘网关电源与通信板</h2>
+          <div class="card-label">真实黄金用例</div>
+          <h2>STM32G070RBT6 最小控制板</h2>
           <dl>
-            <div><dt>输入</dt><dd>24 V DC / 双 CAN / 以太网</dd></div>
-            <div><dt>约束</dt><dd>四层板、宽温、可制造</dd></div>
-            <div><dt>交付</dt><dd>KiCad、BOM、Gerber、风险报告</dd></div>
+            <div><dt>输入</dt><dd>5 V DC / AP2112K-3.3 / STM32G070</dd></div>
+            <div><dt>约束</dt><dd>双层板、SWD、I²C、UART、可制造</dd></div>
+            <div><dt>交付</dt><dd>KiCad、BOM、CPL、Gerber、审查报告</dd></div>
           </dl>
-          <div class="status"><i></i><span id="run-status">等待执行</span></div>
+          <div class="status done"><i></i><span>已核验终态 · release_ready</span></div>
         </aside>
       </section>
 
-      <section class="workspace" aria-live="polite">
-        <div class="panel agents">
-          <div class="panel-heading">
-            <span>Agent 团队</span>
-            <small>LangGraph shared state</small>
-          </div>
-          <ol id="agent-list">
-            <li data-step="1"><b>01</b><div><strong>Supervisor</strong><span>意图路由与任务编排</span></div></li>
-            <li data-step="2"><b>02</b><div><strong>Architect</strong><span>需求固化与设计依据</span></div></li>
-            <li data-step="3"><b>03</b><div><strong>Parts Specialist</strong><span>器件、符号与封装证据</span></div></li>
-            <li data-step="4"><b>04</b><div><strong>Hardware Engineer</strong><span>Temporal 耐久工程执行</span></div></li>
-            <li data-step="5"><b>05</b><div><strong>Reviewer</strong><span>ERC、DRC 与交付审查</span></div></li>
-          </ol>
+      <section id="real-e2e" class="evidence">
+        <div class="section-copy evidence-heading">
+          <p class="eyebrow">REAL E2E EVIDENCE</p>
+          <h2>从登录到 release_ready 的端到端演示</h2>
+          <p>录像覆盖登录、组建团队、提交需求、角色交接、Temporal 17 步执行、Reviewer 与发布产物；等待阶段仅做时间压缩。</p>
         </div>
 
-        <div class="panel console">
-          <div class="panel-heading">
-            <span>有序事件流</span>
-            <small>AG-UI over SSE</small>
+        <div class="evidence-layout">
+          <div class="video-shell">
+            <video controls preload="metadata" playsinline poster="assets/RatsNest-real-STM32G070-E2E-poster.png" aria-label="RatsNest STM32G070 真实端到端执行录像">
+              <source src="assets/RatsNest-real-STM32G070-E2E-evidence.mp4" type="video/mp4" />
+              当前浏览器不支持 HTML5 视频，请使用下方链接下载观看。
+            </video>
+            <div class="video-meta">
+              <span>05:00</span><span>1600 × 900</span><span>H.264</span><span>等待段已加速</span>
+            </div>
           </div>
-          <div id="event-stream" class="event-stream">
-            <p class="empty">点击“运行流程演示”查看模拟事件。</p>
-          </div>
-          <div id="approval" class="approval" hidden>
-            <div><strong>需要人工确认</strong><span>器件替代方案已附官方来源与封装差异。</span></div>
-            <button id="approve" type="button">批准替代并继续</button>
-          </div>
-        </div>
 
-        <div class="panel artifacts">
-          <div class="panel-heading">
-            <span>可审查产物</span>
-            <small>content-addressed manifest</small>
-          </div>
-          <ul id="artifact-list">
-            <li><span>project.kicad_sch</span><em>等待</em></li>
-            <li><span>project.kicad_pcb</span><em>等待</em></li>
-            <li><span>bom.csv</span><em>等待</em></li>
-            <li><span>gerber.zip</span><em>等待</em></li>
-            <li><span>review-report.md</span><em>等待</em></li>
-          </ul>
-          <div class="gate">
-            <span>Evidence Gate</span>
-            <strong id="gate-status">尚未执行</strong>
-          </div>
+          <aside class="evidence-card">
+            <div class="card-label">RELEASE RESULT</div>
+            <h3>release_ready 结果</h3>
+            <dl class="metrics">
+              <div><dt>流水线</dt><dd>17 / 17</dd></div>
+              <div><dt>ERC / DRC</dt><dd>0 / 0</dd></div>
+              <div><dt>未连接</dt><dd>0</dd></div>
+              <div><dt>路由闭环</dt><dd>14/14 nets · 62/62 connections</dd></div>
+              <div><dt>交付产物</dt><dd>60 项</dd></div>
+            </dl>
+            <p class="truth-note">
+              真实流程剪辑，纯等待段已加速；执行界面、发布终态与交付指标均来自实际运行。
+            </p>
+            <a class="download" href="assets/RatsNest-real-STM32G070-E2E-evidence.mp4" download>下载演示视频 · 8.1 MB</a>
+          </aside>
         </div>
       </section>
 
@@ -114,6 +102,5 @@
       <span>KiCad Design Multi-Agent System</span>
       <span>Derived from JoshuaC215/agent-service-toolkit under the MIT License.</span>
     </footer>
-    <script src="app.js"></script>
   </body>
 </html>

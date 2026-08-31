@@ -6,7 +6,7 @@
 
 [项目与架构详解](docs/PROJECT_DESCRIPTION_ZH.md) · [源码导读](docs/PROJECT_CODE_GUIDE_ZH.md) · [Release-ready 收敛报告](evals/reports/release-ready-convergence-20260829.md) · [Agent 可观测与自动评测](docs/observability-and-evaluation.md)
 
-> Demo 使用模拟数据展示需求提交、Agent 协作、人工确认和产物交付，不调用真实 LLM、KiCad 或任何私有服务。
+> Demo 使用实际运行素材展示浏览器、Agent、Temporal 与 KiCad 的端到端流程；仅对纯等待段做加速剪辑。
 
 ## 项目一览
 
@@ -64,7 +64,7 @@ flowchart TD
 
 - 当前回归证明了多智能体编排、长任务恢复、真实 KiCad 产物、确定性门禁，并在两个受支持黄金板型上形成严格发布正例；尚未证明对任意自由需求稳定生成可制造 PCB。
 - 五案例主要覆盖 MCU 控制板，不能外推到高速 DDR/PCIe、射频、柔性板或复杂电源设计。
-- 静态 Demo 展示交互与证据模型，不执行真实模型推理或 EDA 工具。
+- 静态 Demo 托管真实 E2E 录像与证据边界说明；页面本身不在线调用模型或 EDA 工具，录像内容来自真实执行链路。
 - `ratsnestpro`、`ratsnest-*` 是为数据库迁移、内部 API 和工程兼容保留的稳定内部标识，不代表公开产品名称。
 
 ### 相比上游模板的主要新增模块
