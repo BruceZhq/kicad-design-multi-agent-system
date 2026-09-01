@@ -72,9 +72,20 @@ from ratsnestpro.orchestration.ahe import (
     ahe_event,
     attribute_failure,
     make_failure,
+    make_missing_mutation_failure,
+)
+from ratsnestpro.orchestration.component_preparation import (
+    ComponentPreparationInput,
+    ComponentPreparationService,
+    PreparedComponentManifest,
+    validate_prepared_selection,
+)
+from ratsnestpro.orchestration.component_preparation import (
+    requirement_digest as component_requirement_digest,
 )
 from ratsnestpro.orchestration.component_resolution import (
     ComponentResolutionService,
+    IdentityMode,
     LibraryClosureResult,
     ResolutionStatus,
     SymbolOnlyPlaceholderSpec,
@@ -100,11 +111,16 @@ from ratsnestpro.orchestration.design_closure import (
     validate_component_closure_freshness,
 )
 from ratsnestpro.orchestration.entity_repairs import (
+    CadActionBatch,
+    CadActionKind,
+    CadActionObservation,
+    CadActionResult,
     EntityRepairPlan,
     RepairExecutionPolicy,
     classify_kicad_report,
 )
 from ratsnestpro.orchestration.footprint_search import footprint_candidates
+from ratsnestpro.orchestration.manufacturing_bom import split_manufacturing_bom
 from ratsnestpro.orchestration.pipeline_contracts import (
     BoardPartition,
     BoardZone,
@@ -158,7 +174,11 @@ from ratsnestpro.orchestration.selection_grounding import (
     failed_symbol_candidates,
     requirement_symbol_hints,
 )
-from ratsnestpro.orchestration.skill_runtime import SkillMode, select_skill
+from ratsnestpro.orchestration.skill_runtime import (
+    SkillMode,
+    allowed_capabilities,
+    select_skill,
+)
 
 # --------------------------------------------------------------------------- #
 # The pinned step sequence
@@ -258,6 +278,10 @@ class PipelineState:
     connection_synthesis_report: ConnectionSynthesisReport | None = None
     release_resume_step: PipelineStep | None = None
     release_resume_token_digest: str = ""
+    # Durable checkpoint lineage.  The generation is monotonic even when an
+    # explicit rollback legitimately shortens the completed-step prefix.
+    checkpoint_generation: int = 0
+    checkpoint_state_sha256: str = ""
 
     def artifact(self, step: PipelineStep) -> BaseModel | None:
         return self.artifacts.get(step)
@@ -403,11 +427,14 @@ class PipelineContext:
     max_agentic_recovery_turns_per_step: int = 6
     max_total_agentic_recovery_turns: int = 24
     active_recovery_tool: str = ""
+    active_cad_action_batch: CadActionBatch | None = None
+    active_cad_action_observation: CadActionObservation | None = None
 
 
 _MAX_REPAIR_ARTIFACT_CHARS = 80_000
 _ERC_EVIDENCE_CONTRACT_VERSION = 1
 _DIRECT_LOCAL_REPAIR_TOOLS = frozenset({
+    "apply_cad_action_batch",
     "repair_route_connectivity",
     "repair_physical_track_width",
 })
@@ -432,6 +459,17 @@ def _artifact_fingerprint(artifact: BaseModel | None) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
 
 
+def _artifact_sha256(artifact: BaseModel | None) -> str:
+    """Return the full immutable binding used by source-IR CAD actions."""
+
+    payload = (
+        artifact.model_dump_json(exclude={"rationale"})
+        if artifact is not None
+        else "null"
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _recovery_action_fingerprint(decision: RecoveryDecision) -> str:
     """Identify the executable recovery proposal, not merely its broad class."""
 
@@ -442,6 +480,11 @@ def _recovery_action_fingerprint(decision: RecoveryDecision) -> str:
         "tool_name": decision.tool_name,
         "strategy": " ".join(decision.strategy.casefold().split()),
         "repair_instructions": " ".join(instructions.casefold().split()),
+        "cad_action_batch": (
+            decision.cad_action_batch.model_dump(mode="json")
+            if decision.cad_action_batch is not None
+            else None
+        ),
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -845,6 +888,289 @@ def _recovery_entity_context(
     return context
 
 
+_SCHEMATIC_CAD_ACTIONS = frozenset({
+    CadActionKind.UPSERT_NET_PIN,
+    CadActionKind.REMOVE_NET_PIN,
+    CadActionKind.SET_NO_CONNECT,
+})
+_PCB_CAD_ACTIONS = frozenset(set(CadActionKind) - _SCHEMATIC_CAD_ACTIONS)
+_CAD_ACTIONS_BY_STEP: dict[PipelineStep, frozenset[CadActionKind]] = {
+    PipelineStep.SCH_CONNECTIONS: _SCHEMATIC_CAD_ACTIONS,
+    PipelineStep.LAYOUT_WRITE: frozenset({
+        CadActionKind.MOVE_FOOTPRINT,
+        CadActionKind.ROTATE_FOOTPRINT,
+        CadActionKind.SWAP_FOOTPRINT_POSITIONS,
+    }),
+    PipelineStep.ROUTE_SIGNALS: frozenset({
+        CadActionKind.RIPUP_NET,
+        CadActionKind.ADD_TRACK,
+        CadActionKind.ADD_VIA,
+        CadActionKind.RESIZE_TRACK,
+        CadActionKind.REFILL_ZONES,
+    }),
+    # The final DRC report has the richest entity evidence.  It may authorize
+    # a bounded physical edit, but Manufacture still reruns DRC and regenerates
+    # every derived output before the candidate can be retained.
+    PipelineStep.MANUFACTURE: _PCB_CAD_ACTIONS,
+}
+
+
+def _cad_action_capability(operation: CadActionKind) -> str:
+    prefix = "eda.schematic" if operation in _SCHEMATIC_CAD_ACTIONS else "eda.pcb"
+    return f"{prefix}.{operation.value}"
+
+
+def _live_pcb_path(
+    state: PipelineState,
+    artifact: BaseModel | None = None,
+) -> Path | None:
+    if isinstance(artifact, PcbWriteResult):
+        candidate = Path(artifact.pcb_path)
+    else:
+        write = state.artifact(PipelineStep.LAYOUT_WRITE)
+        candidate = Path(write.pcb_path) if isinstance(write, PcbWriteResult) else None
+    return candidate if candidate is not None and candidate.is_file() else None
+
+
+def _cad_action_context(
+    state: PipelineState,
+    result: StepResult,
+    artifact: BaseModel | None,
+) -> dict[str, Any] | None:
+    """Expose only actions backed by a real executor and current artifact."""
+
+    configured = _CAD_ACTIONS_BY_STEP.get(result.step, frozenset())
+    if not configured:
+        return None
+    try:
+        granted = allowed_capabilities(result.step, mode=SkillMode.EXECUTE)
+    except (FileNotFoundError, KeyError, ValueError):
+        return None
+    operations = sorted(
+        (
+            operation
+            for operation in configured
+            if _cad_action_capability(operation) in granted
+        ),
+        key=lambda operation: operation.value,
+    )
+    if not operations:
+        return None
+    if result.step == PipelineStep.SCH_CONNECTIONS:
+        if not isinstance(artifact, NetlistIntent):
+            return None
+        return {
+            "executor": "source_ir",
+            "owner_step": result.step.value,
+            "base_artifact_fingerprint": _artifact_sha256(artifact),
+            "allowed_operations": [operation.value for operation in operations],
+            "current_no_connects": [
+                pin.model_dump(mode="json") for pin in artifact.no_connect_pins
+            ],
+        }
+
+    pcb_path = _live_pcb_path(state, artifact)
+    if pcb_path is None:
+        return None
+    if result.step in {PipelineStep.ROUTE_SIGNALS, PipelineStep.MANUFACTURE} and not (
+        kicad_cli_available()
+    ):
+        return None
+    try:
+        from ratsnestpro.eda import routing
+        from ratsnestpro.eda.vendor.pcb import PcbBoard
+
+        board = PcbBoard.load(pcb_path)
+        footprints_snapshot = board.list_footprints()[:96]
+        nets_snapshot = board.list_nets()[:128]
+        tracks_snapshot = board.list_tracks()[:128]
+        fingerprint = routing.artifact_fingerprint(pcb_path)
+    except Exception:  # noqa: BLE001 - unreadable evidence grants no mutation
+        return None
+    return {
+        "executor": "pcbnew_candidate",
+        "owner_step": result.step.value,
+        "base_artifact_fingerprint": fingerprint,
+        "allowed_operations": [operation.value for operation in operations],
+        "pcb_path": str(pcb_path),
+        "footprints": footprints_snapshot,
+        "nets": nets_snapshot,
+        "tracks": tracks_snapshot,
+    }
+
+
+def _validated_cad_action_batch(
+    state: PipelineState,
+    result: StepResult,
+    artifact: BaseModel | None,
+    batch: CadActionBatch | None,
+) -> tuple[CadActionBatch | None, FailureEnvelope | None]:
+    if batch is None:
+        return None, None
+    context = _cad_action_context(state, result, artifact)
+    if context is None:
+        operation = batch.actions[0].operation.value
+        return None, make_missing_mutation_failure(
+            step=result.step.value,
+            requested_action=operation,
+            message="no governed executor is available for this artifact stage",
+        )
+    allowed = set(context["allowed_operations"])
+    unsupported = [
+        action.operation.value
+        for action in batch.actions
+        if action.operation.value not in allowed
+    ]
+    if unsupported:
+        requested = unsupported[0]
+        return None, make_missing_mutation_failure(
+            step=result.step.value,
+            requested_action=requested,
+            affected_refs=[
+                action.target.reference
+                for action in batch.actions
+                if action.operation.value == requested and action.target.reference
+            ],
+            evidence={"allowed_operations": sorted(allowed)},
+        )
+    if batch.owner_step != result.step.value:
+        return None, None
+    if batch.base_artifact_fingerprint != context["base_artifact_fingerprint"]:
+        return None, None
+    return batch, None
+
+
+def _pin_assignment(plan: NetlistIntent, pin: LogicalPin) -> str | None:
+    key = pin.key().casefold()
+    for net in plan.nets:
+        if any(candidate.key().casefold() == key for candidate in net.pins):
+            return net.name
+    if any(candidate.key().casefold() == key for candidate in plan.no_connect_pins):
+        return "__NO_CONNECT__"
+    return None
+
+
+def _apply_schematic_cad_action_batch(
+    artifact: NetlistIntent,
+    batch: CadActionBatch,
+) -> tuple[NetlistIntent, CadActionObservation]:
+    """Apply an atomic typed source-IR patch; KiCad text is never edited."""
+
+    before = _artifact_sha256(artifact)
+    if before != batch.base_artifact_fingerprint:
+        return artifact, CadActionObservation(
+            batch_id=batch.batch_id,
+            idempotency_key=batch.idempotency_key,
+            status="rejected",
+            artifact_path="pipeline://schematic_connections",
+            before_fingerprint=before,
+            pending_success_checks=batch.success_checks,
+            detail="source-IR fingerprint no longer matches the planned batch",
+        )
+    candidate = artifact.model_copy(deep=True)
+    action_results: list[CadActionResult] = []
+    for action in batch.actions:
+        target = LogicalPin(
+            ref=str(action.target.reference),
+            pin=str(action.target.pin),
+        )
+        assigned = _pin_assignment(candidate, target)
+        expected = action.preconditions.expected_net
+        if expected is not None and assigned != expected:
+            return artifact, CadActionObservation(
+                batch_id=batch.batch_id,
+                idempotency_key=batch.idempotency_key,
+                status="rejected",
+                artifact_path="pipeline://schematic_connections",
+                before_fingerprint=before,
+                action_results=action_results + [CadActionResult(
+                    action_id=action.action_id,
+                    operation=action.operation,
+                    status="rejected",
+                    detail=f"expected net {expected!r}, observed {assigned!r}",
+                )],
+                pending_success_checks=batch.success_checks,
+                detail="a source-IR precondition failed; no action was committed",
+            )
+        if action.operation == CadActionKind.UPSERT_NET_PIN:
+            net_name = str(action.target.net)
+            existing = candidate.net(net_name)
+            patch = NetlistPatch(
+                additional_parts=candidate.additional_parts,
+                upsert_nets=[NetIntent(
+                    name=net_name,
+                    kind=existing.kind if existing is not None else "signal",
+                    pins=[target],
+                    purpose=existing.purpose if existing is not None else "",
+                )],
+                remove_no_connect_pins=[target],
+            )
+        elif action.operation == CadActionKind.REMOVE_NET_PIN:
+            patch = NetlistPatch(
+                additional_parts=candidate.additional_parts,
+                remove_pins=[target],
+            )
+        elif action.operation == CadActionKind.SET_NO_CONNECT:
+            patch = NetlistPatch(
+                additional_parts=candidate.additional_parts,
+                add_no_connect_pins=[target],
+            )
+        else:
+            return artifact, CadActionObservation(
+                batch_id=batch.batch_id,
+                idempotency_key=batch.idempotency_key,
+                status="rejected",
+                artifact_path="pipeline://schematic_connections",
+                before_fingerprint=before,
+                action_results=action_results,
+                pending_success_checks=batch.success_checks,
+                detail=f"{action.operation.value} is not a source-IR action",
+            )
+        candidate = _apply_netlist_patch(candidate, patch)
+        action_results.append(CadActionResult(
+            action_id=action.action_id,
+            operation=action.operation,
+            status="applied",
+            detail=f"{target.key()} now resolves to {_pin_assignment(candidate, target)!r}",
+        ))
+    after = _artifact_sha256(candidate)
+    return candidate, CadActionObservation(
+        batch_id=batch.batch_id,
+        idempotency_key=batch.idempotency_key,
+        status="applied" if after != before else "rejected",
+        artifact_path="pipeline://schematic_connections",
+        before_fingerprint=before,
+        after_fingerprint=after,
+        action_results=action_results,
+        pending_success_checks=batch.success_checks,
+        detail=(
+            "typed source-IR actions committed; deterministic connection gates pending"
+            if after != before
+            else "batch produced no source-IR change"
+        ),
+    )
+
+
+def _apply_pcb_cad_action_batch(
+    state: PipelineState,
+    ctx: PipelineContext,
+    artifact: BaseModel,
+) -> CadActionObservation | None:
+    batch = ctx.active_cad_action_batch
+    pcb_path = _live_pcb_path(state, artifact)
+    if batch is None or pcb_path is None:
+        return None
+    from ratsnestpro.eda import routing
+
+    observation = routing.apply_cad_action_batch(
+        pcb_path,
+        batch,
+        run_dir=ctx.out_dir or pcb_path.parent,
+    )
+    ctx.active_cad_action_observation = observation
+    return observation
+
+
 def _plan_agentic_recovery(
     *,
     state: PipelineState,
@@ -914,10 +1240,19 @@ def _plan_agentic_recovery(
             "after_score": turn.after_score,
             "expected_observation": turn.decision.expected_observation,
             "observation": turn.observation[:1_500],
+            "cad_actions": (
+                [
+                    action.operation.value
+                    for action in turn.decision.cad_action_batch.actions
+                ]
+                if turn.decision.cad_action_batch is not None
+                else []
+            ),
         }
         for turn in state.recovery_history
         if turn.step == result.step.value
     ][-6:]
+    cad_context = _cad_action_context(state, result, artifact)
     observation = {
         "project_name": state.project_name,
         "current_step": result.step.value,
@@ -948,6 +1283,7 @@ def _plan_agentic_recovery(
             suggested_target.value if suggested_target is not None else None
         ),
         "local_repair_available": local_repair_available,
+        "cad_action_context": cad_context,
         "prior_recovery_turns": prior_turns,
     }
     system = (
@@ -958,7 +1294,12 @@ def _plan_agentic_recovery(
         "action and target lists. A repeated action with unchanged score must be "
         "replaced by a different causal hypothesis. Put concise repair guidance "
         "in tool_args.repair_instructions and the measurable expected result in "
-        "expected_observation. Return only the RecoveryDecision JSON contract; "
+        "expected_observation. When cad_action_context is present and a concrete "
+        "entity edit is justified, prefer a typed cad_action_batch: copy its exact "
+        "owner_step and base_artifact_fingerprint, use only listed operations, add "
+        "preconditions, and name the deterministic checks that must pass. Never "
+        "invent coordinates absent from observations; choose inspection/replan "
+        "instead. Return only the RecoveryDecision JSON contract; "
         "do not expose hidden chain-of-thought.\n\n"
         + skill_instructions[:16_000]
     )
@@ -1249,6 +1590,7 @@ class PipelineStepBase(ABC):
         # bounded repair implementation. The total task budget prevents loops.
         can_repair = (
             blocked
+            and not ctx.active_recovery_tool
             and repair_scope
             and (ctx.ahe_enabled or design_recovery_scope)
             and strategy_available
@@ -1790,7 +2132,7 @@ def _ground_mpns(parts: list[SelectedPart]) -> None:
         if not sel.available():
             return
         for p in parts:
-            if p.role == "mounting_hole" or not p.value:
+            if p.prepared_record_id or p.role == "mounting_hole" or not p.value:
                 continue
             cands = sel.suggest(p.value, p.footprint, limit=1)
             if cands:
@@ -4230,8 +4572,12 @@ def _ground_selected_parts(
                 part.symbol = compatible_symbol
     _normalize_grounded_values(parts, requirement)
     for part in parts:
-        part.mpn = ""
-        part.lcsc = ""
+        # A prepared component is a locked upstream fact. Re-grounding after
+        # resume may revalidate its installed files, but must not erase the
+        # supplier identity that the content-addressed manifest already froze.
+        if not part.prepared_record_id:
+            part.mpn = ""
+            part.lcsc = ""
     _ground_mpns(parts)
     _bind_selected_footprints(parts)
 
@@ -4482,7 +4828,7 @@ def _close_component_libraries(
     )
     constraints = tuple(identity_constraints)
     trusted_identities: dict[str, str] = {}
-    trusted_modes: dict[str, str] = {}
+    trusted_modes: dict[str, IdentityMode] = {}
     trusted_provenance: dict[str, str] = {}
     fixed_refs: set[str] = set()
     allow_equivalent_refs: set[str] = set()
@@ -4518,6 +4864,162 @@ def _close_component_libraries(
         allow_unverified_placeholders=bool(
             ctx is not None and ctx.artifact_first
         ),
+    )
+
+
+def _prepare_and_persist_components(
+    plan: SelectionPlan,
+    state: PipelineState,
+    ctx: PipelineContext,
+    *,
+    preserve_requested_identities: bool = False,
+) -> tuple[SelectionPlan, LibraryClosureResult]:
+    """Freeze every physical part before schematic synthesis can consume it."""
+
+    if not plan.parts:
+        closure = _close_component_libraries(
+            plan,
+            ctx,
+            preserve_requested_identities=preserve_requested_identities,
+            identity_constraints=_state_identity_constraints(state),
+        )
+        return plan, closure
+
+    constraints = _state_identity_constraints(state)
+    directives: dict[str, ComponentPreparationInput] = {}
+    for part in plan.parts:
+        constraint = identity_constraint_for_part(part, constraints)
+        trusted_mode = (
+            constraint.mode
+            if constraint is not None
+            else part.identity_mode
+            if preserve_requested_identities and part.identity_mode
+            else ""
+        )
+        directives[part.ref] = ComponentPreparationInput(
+            trusted_requested_identity=(
+                constraint.requested_identity
+                if constraint is not None
+                else part.requested_identity
+                if preserve_requested_identities
+                else ""
+            ),
+            trusted_identity_mode=trusted_mode,  # type: ignore[arg-type]
+            trusted_identity_provenance=(
+                constraint.provenance
+                if constraint is not None
+                else part.identity_provenance
+                if preserve_requested_identities
+                else ""
+            ),
+            fixed_identity=bool(
+                constraint is not None and constraint.mode == "fixed_exact"
+            ),
+            allow_equivalent=bool(
+                constraint is not None and constraint.allow_equivalent
+            ),
+            # A placeholder may still be generated as diagnostic evidence, but
+            # PreparedComponentManifest keeps it electrically blocked and the
+            # Selection gate prevents it reaching schematic synthesis.
+            allow_unverified_placeholder=ctx.artifact_first,
+            pin_evidence=ctx.component_pin_evidence.get(part.ref),
+            manufacturer=part.manufacturer,
+            model_3d_path=part.model_3d_path,
+        )
+    service = ComponentPreparationService(
+        resolution_service=ComponentResolutionService(project_dir=ctx.out_dir),
+    )
+    prepared = service.prepare(
+        plan,
+        state.requirement_text,
+        inputs=directives,
+        mutate_selection=True,
+    )
+    out_dir = (
+        Path(ctx.out_dir)
+        if ctx.out_dir
+        else Path(tempfile.mkdtemp(prefix="rnp_component_preparation_"))
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "prepared-components.json"
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(prepared.manifest.model_dump_json(indent=2), encoding="utf-8")
+    temporary.replace(path)
+    selection = prepared.selection.model_copy(
+        update={"prepared_manifest_path": str(path)}
+    )
+    return selection, prepared.closure
+
+
+def _prepared_component_manifest_check(
+    state: PipelineState,
+    plan: SelectionPlan,
+) -> CheckResult:
+    path = Path(plan.prepared_manifest_path) if plan.prepared_manifest_path else None
+    if path is None or not path.is_file():
+        return CheckResult(
+            name="prepared_component_manifest",
+            ok=False,
+            message="prepared component manifest is missing before schematic synthesis",
+            blocks_execution=True,
+            reason_code="prepared_component_manifest_missing",
+            affected_refs=[part.ref for part in plan.parts],
+        )
+    blockers: list[str] = []
+    affected_refs: set[str] = set()
+    manifest: PreparedComponentManifest | None = None
+    try:
+        manifest = PreparedComponentManifest.model_validate_json(
+            path.read_text(encoding="utf-8")
+        )
+        validation = validate_prepared_selection(plan, manifest)
+        blockers.extend(validation.blockers)
+        if manifest.requirement_sha256 != component_requirement_digest(
+            state.requirement_text
+        ):
+            blockers.append("prepared_manifest_requirement_mismatch")
+        records = {record.ref: record for record in manifest.records}
+        parts = {part.ref: part for part in plan.parts}
+        for ref, record in records.items():
+            for asset in record.assets:
+                asset_path = Path(asset.source_path)
+                if not asset_path.is_file() or sha256_file(asset_path) != asset.sha256:
+                    blockers.append(f"{ref}:{asset.kind}_asset_changed")
+                    affected_refs.add(ref)
+        blockers.extend(manifest.electrical_blockers)
+        affected_refs.update(
+            blocker.partition(":")[0]
+            for blocker in manifest.electrical_blockers
+            if blocker.partition(":")[0] in parts
+        )
+        ready = manifest.electrical_status == "ready" and not blockers
+    except Exception as exc:  # noqa: BLE001 - invalid evidence fails closed
+        blockers = [f"manifest_invalid:{type(exc).__name__}:{exc}"]
+        ready = False
+    return CheckResult(
+        name="prepared_component_manifest",
+        ok=ready,
+        message=(
+            "all selected parts have locked identity, package, symbol semantics, "
+            "pin/pad and content-addressed asset evidence"
+            if ready
+            else f"prepared component blockers: {blockers}"
+        ),
+        blocks_execution=not ready,
+        reason_code="" if ready else "prepared_component_contract_failed",
+        affected_refs=sorted(affected_refs),
+        evidence={
+            "electrical_status": (
+                manifest.electrical_status
+                if manifest is not None
+                else "blocked"
+            ),
+            "procurement_status": (
+                manifest.procurement_status
+                if manifest is not None
+                else "blocked"
+            ),
+        },
     )
 
 
@@ -4900,11 +5402,7 @@ class SelectionStep(PipelineStepBase):
         # Ground names and procurement data exactly as later selection deltas
         # are grounded before they can be merged into this plan.
         _ground_selected_parts(plan.parts, state.requirement_text)
-        closure = _close_component_libraries(
-            plan,
-            ctx,
-            identity_constraints=_state_identity_constraints(state),
-        )
+        plan, closure = _prepare_and_persist_components(plan, state, ctx)
         return _persist_component_closure(plan, closure, ctx), used
 
     def replan(
@@ -4954,15 +5452,20 @@ class SelectionStep(PipelineStepBase):
                 key = part.ref.upper()
                 if key not in by_ref:
                     by_ref[key] = part.model_copy(deep=True)
+        if set(by_ref) == {part.ref.upper() for part in artifact.parts}:
+            # Connectivity feedback does not invalidate a verified Locked BOM.
+            # Preserve its exact manifest and supplier snapshot instead of
+            # silently preparing the same components again.
+            return artifact, used
         replanned = SelectionPlan(
             parts=list(by_ref.values()),
             rationale=candidate.rationale or artifact.rationale,
         )
-        closure = _close_component_libraries(
+        replanned, closure = _prepare_and_persist_components(
             replanned,
+            state,
             ctx,
             preserve_requested_identities=True,
-            identity_constraints=_state_identity_constraints(state),
         )
         return _persist_component_closure(replanned, closure, ctx), used
 
@@ -5045,11 +5548,11 @@ class SelectionStep(PipelineStepBase):
         _ground_selected_parts(patch.upsert_parts, state.requirement_text)
         patch = _bounded_selection_patch(state, artifact, patch, checks)
         repaired = _apply_selection_patch(artifact, patch)
-        closure = _close_component_libraries(
+        repaired, closure = _prepare_and_persist_components(
             repaired,
+            state,
             ctx,
             preserve_requested_identities=True,
-            identity_constraints=_state_identity_constraints(state),
         )
         return _persist_component_closure(repaired, closure, ctx), used
 
@@ -5108,6 +5611,13 @@ class SelectionStep(PipelineStepBase):
                 f"physical BOM: {missing_identities}"
             ),
         ))
+        if artifact.parts:
+            prepared_check = _prepared_component_manifest_check(state, artifact)
+            checks.append(prepared_check)
+            if not prepared_check.ok:
+                # Asset identity, package, pin/pad and provenance are upstream
+                # facts. Do not let schematic synthesis discover them later.
+                return checks
         sym_root = config.symbol_dir()
         fp_root = config.footprint_dir()
         if sym_root is not None and fp_root is not None and artifact.parts:
@@ -7723,6 +8233,26 @@ class SchConnectionsStep(PipelineStepBase):
         checks: list[CheckResult],
     ) -> tuple[BaseModel, bool]:
         assert isinstance(artifact, NetlistIntent)
+        if (
+            ctx.active_recovery_tool == "apply_cad_action_batch"
+            and ctx.active_cad_action_batch is not None
+        ):
+            candidate, observation = _apply_schematic_cad_action_batch(
+                artifact,
+                ctx.active_cad_action_batch,
+            )
+            ctx.active_cad_action_observation = observation
+            if observation.status not in {"applied", "already_applied"}:
+                return artifact, False
+            selection = state.artifact(PipelineStep.SELECTION)
+            return (
+                _normalize_netlist_intent(
+                    state.requirement_text,
+                    selection if isinstance(selection, SelectionPlan) else None,
+                    candidate,
+                ),
+                False,
+            )
         if not artifact.nets:
             # An empty object is schema-valid because checkpoints and
             # deterministic checks must be able to represent an incomplete
@@ -7885,6 +8415,36 @@ class SchConnectionsStep(PipelineStepBase):
                 repaired,
             ),
             used,
+        )
+
+    def replan(
+        self,
+        state: PipelineState,
+        ctx: PipelineContext,
+        knowledge: str,
+        artifact: BaseModel,
+        feedback: str,
+    ) -> tuple[BaseModel, bool]:
+        """Turn downstream ERC evidence into a bounded source-IR delta."""
+
+        assert isinstance(artifact, NetlistIntent)
+        if not artifact.nets:
+            return self.propose(state, ctx, knowledge)
+        return self.repair(
+            state,
+            ctx,
+            knowledge,
+            artifact,
+            [CheckResult(
+                name="downstream_schematic_verification",
+                ok=False,
+                message=feedback[:12_000],
+                affected_refs=sorted(set(re.findall(
+                    r"(?<![A-Za-z0-9_])([A-Z]{1,4}\d+[A-Z]?)"
+                    r"(?![A-Za-z0-9_])",
+                    feedback,
+                )))[:64],
+            )],
         )
 
     def prepare_resumed_artifact(
@@ -14347,6 +14907,104 @@ class LayoutWriteStep(PipelineStepBase):
         ))
         return checks
 
+    def repair(
+        self,
+        state: PipelineState,
+        ctx: PipelineContext,
+        knowledge: str,
+        artifact: BaseModel,
+        checks: list[CheckResult],
+    ) -> tuple[BaseModel, bool]:
+        assert isinstance(artifact, PcbWriteResult)
+        batch = ctx.active_cad_action_batch
+        if (
+            ctx.active_recovery_tool != "apply_cad_action_batch"
+            or batch is None
+        ):
+            return artifact, False
+        observation = _apply_pcb_cad_action_batch(state, ctx, artifact)
+        if observation is None or observation.status not in {
+            "applied",
+            "already_applied",
+        }:
+            return artifact, False
+
+        from ratsnestpro.eda.vendor.pcb import PcbBoard
+
+        pcb_path = Path(artifact.pcb_path)
+        selection = state.artifact(PipelineStep.SELECTION)
+        prior_plan = state.artifact(PipelineStep.LAYOUT_GENERAL)
+        if not isinstance(selection, SelectionPlan) or not isinstance(
+            prior_plan,
+            PcbPlacementPlan,
+        ):
+            return artifact, False
+        try:
+            board = PcbBoard.load(pcb_path)
+            entries = {
+                str(item.get("reference", "")): item
+                for item in board.list_footprints()
+                if item.get("reference") and item.get("at")
+            }
+            if set(entries) != {part.ref for part in selection.parts}:
+                return artifact, False
+            plan = PcbPlacementPlan(
+                board_width=prior_plan.board_width,
+                board_height=prior_plan.board_height,
+                placements=[
+                    PcbPlacement(
+                        ref=part.ref,
+                        x=float(entries[part.ref]["at"]["x"]),
+                        y=float(entries[part.ref]["at"]["y"]),
+                        rotation=float(entries[part.ref]["at"]["rotation"]),
+                        side=(
+                            "back"
+                            if str(entries[part.ref].get("layer", "")).startswith("B.")
+                            else "front"
+                        ),
+                    )
+                    for part in selection.parts
+                ],
+                rationale=(
+                    f"{prior_plan.rationale}; typed CAD placement candidate "
+                    f"{batch.batch_id}"
+                ),
+            )
+        except Exception:  # noqa: BLE001 - rejected candidate rolls back outside
+            return artifact, False
+        if any(
+            not check.ok and check.severity == Severity.ERROR
+            for check in LayoutGeneralStep().check(state, plan)
+        ):
+            return artifact, False
+        overlaps, out_of_bounds = _placement_geometry_violations(state, plan)
+        state.artifacts[PipelineStep.LAYOUT_GENERAL] = plan
+        baseline_path = pcb_path.with_name(f"{pcb_path.stem}.unrouted.kicad_pcb")
+        shutil.copy2(pcb_path, baseline_path)
+        return artifact.model_copy(
+            update={
+                "overlaps": overlaps,
+                "out_of_bounds": out_of_bounds,
+                "component_count": len(entries),
+            }
+        ), False
+
+    def repair_applicable(
+        self,
+        state: PipelineState,
+        artifact: BaseModel,
+        checks: list[CheckResult],
+    ) -> bool:
+        return (
+            isinstance(artifact, PcbWriteResult)
+            and Path(artifact.pcb_path).is_file()
+            and any(
+                not check.ok
+                and check.name in {"no_courtyard_overlap", "within_board"}
+                for check in checks
+            )
+        )
+
     def summarize(self, artifact: BaseModel) -> str:
         assert isinstance(artifact, PcbWriteResult)
         return (
@@ -17582,6 +18240,55 @@ class RouteSignalsStep(PipelineStepBase):
         checks: list[CheckResult],
     ) -> tuple[BaseModel, bool]:
         assert isinstance(artifact, RouteResult)
+        if ctx.active_recovery_tool == "apply_cad_action_batch":
+            batch = ctx.active_cad_action_batch
+            write = state.artifact(PipelineStep.LAYOUT_WRITE)
+            cli = kicad_cli_available()
+            if batch is None or not isinstance(write, PcbWriteResult) or not cli:
+                return artifact, False
+            pcb_path = Path(write.pcb_path)
+            before_report = pcb_path.with_suffix(".cad-action-before.drc.json")
+            after_report = pcb_path.with_suffix(".cad-action-after.drc.json")
+            baseline = _run_kicad_drc_snapshot(cli, pcb_path, before_report)
+            if baseline.parse_error:
+                return artifact, False
+            observation = _apply_pcb_cad_action_batch(state, ctx, artifact)
+            if observation is None or observation.status not in {
+                "applied",
+                "already_applied",
+            }:
+                return artifact, False
+            after = _run_kicad_drc_snapshot(cli, pcb_path, after_report)
+            new_non_connectivity = set(after.non_connectivity_errors).difference(
+                baseline.non_connectivity_errors
+            )
+            if after.parse_error or new_non_connectivity:
+                ctx.active_cad_action_observation = observation.model_copy(
+                    update={
+                        "status": "rejected",
+                        "detail": (
+                            f"{observation.detail}; authoritative DRC rejected "
+                            f"new non-connectivity errors: {sorted(new_non_connectivity)}"
+                        ),
+                    }
+                )
+                return artifact, False
+            try:
+                from ratsnestpro.eda.vendor.pcb import PcbBoard
+
+                routed_tracks = len(PcbBoard.load(pcb_path).list_tracks())
+            except Exception:  # noqa: BLE001 - telemetry is not a release proof
+                routed_tracks = artifact.routed_tracks
+            candidate = _synchronize_route_result_with_drc(artifact, after)
+            return candidate.model_copy(
+                update={
+                    "routed_tracks": routed_tracks,
+                    "note": (
+                        f"{candidate.note}; typed CAD action batch "
+                        f"{batch.batch_id} verified by KiCad DRC"
+                    ),
+                }
+            ), False
         if ctx.active_recovery_tool == "repair_route_connectivity":
             repaired = _repair_drc_connectivity_gaps(state, ctx, artifact)
             return (
@@ -18415,7 +19122,8 @@ class ManufactureStep(PipelineStepBase):
             drc_warnings = _drc_warning_messages(drc_report_path)
 
         # --- BOM + component release manifest from the selection -----------
-        bom_path = out_dir / f"{state.project_name}_bom.csv"
+        production_bom_path = out_dir / f"{state.project_name}_production_bom.csv"
+        procurement_bom_path = out_dir / f"{state.project_name}_procurement_bom.csv"
         unresolved_manifest_path = (
             out_dir / f"{state.project_name}_unresolved_components.json"
         )
@@ -18452,36 +19160,32 @@ class ManufactureStep(PipelineStepBase):
                     for ref in closure_refs
                 )
         nonrelease_refs = {issue["ref"] for issue in component_issues}
-        if isinstance(sel, SelectionPlan):
-            with bom_path.open("w", newline="", encoding="utf-8") as fh:
-                wr = csv.writer(fh)
-                wr.writerow([
-                    "Reference",
-                    "Value",
-                    "Footprint",
-                    "MPN",
-                    "LCSC",
-                    "DNP",
-                    "ReleaseReady",
-                    "IdentityMode",
-                    "IdentityProvenance",
-                    "Resolution",
-                    "ResolutionDetail",
-                ])
-                for part in sel.parts:
-                    wr.writerow([
-                        part.ref,
-                        part.value,
-                        part.footprint,
-                        part.mpn,
-                        part.lcsc,
-                        "yes" if part.dnp else "",
-                        "no" if part.ref in nonrelease_refs else "yes",
-                        part.identity_mode,
-                        part.identity_provenance,
-                        part.resolution_status,
-                        part.resolution_detail,
-                    ])
+        prepared_manifest: PreparedComponentManifest | None = None
+        if isinstance(sel, SelectionPlan) and sel.prepared_manifest_path:
+            try:
+                prepared_manifest = PreparedComponentManifest.model_validate_json(
+                    Path(sel.prepared_manifest_path).read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                prepared_manifest = None
+        bom_split = (
+            split_manufacturing_bom(sel, prepared_manifest)
+            if isinstance(sel, SelectionPlan)
+            else None
+        )
+        if bom_split is not None:
+            with production_bom_path.open(
+                "w",
+                newline="",
+                encoding="utf-8",
+            ) as stream:
+                csv.writer(stream).writerows(bom_split.production_csv_rows())
+            with procurement_bom_path.open(
+                "w",
+                newline="",
+                encoding="utf-8",
+            ) as stream:
+                csv.writer(stream).writerows(bom_split.procurement_csv_rows())
 
         unresolved_components: list[dict[str, Any]] = []
         release_proofs: list[dict[str, Any]] = []
@@ -18736,7 +19440,37 @@ class ManufactureStep(PipelineStepBase):
 
         return (
             ManufactureResult(
-                bom_path=str(bom_path) if isinstance(sel, SelectionPlan) else "",
+                bom_path=(
+                    str(production_bom_path)
+                    if production_bom_path.is_file()
+                    else ""
+                ),
+                production_bom_path=(
+                    str(production_bom_path)
+                    if production_bom_path.is_file()
+                    else ""
+                ),
+                procurement_bom_path=(
+                    str(procurement_bom_path)
+                    if procurement_bom_path.is_file()
+                    else ""
+                ),
+                production_bom_ready=(
+                    bom_split.production_ready if bom_split is not None else False
+                ),
+                procurement_bom_ready=(
+                    bom_split.procurement_ready if bom_split is not None else False
+                ),
+                production_bom_blockers=(
+                    list(bom_split.production_blockers)
+                    if bom_split is not None
+                    else ["selection_unavailable"]
+                ),
+                procurement_bom_blockers=(
+                    list(bom_split.procurement_blockers)
+                    if bom_split is not None
+                    else ["selection_unavailable"]
+                ),
                 cpl_path=str(cpl_path) if isinstance(plan, PcbPlacementPlan) else "",
                 unresolved_manifest_path=str(unresolved_manifest_path),
                 component_release_ready=not component_issues,
@@ -18828,8 +19562,33 @@ class ManufactureStep(PipelineStepBase):
                     f"{artifact.component_release_blockers}"
                 ),
             ),
-            CheckResult(name="bom_written", ok=bool(artifact.bom_path),
-                        message="BOM not written"),
+            CheckResult(
+                name="production_bom_written",
+                ok=bool(artifact.production_bom_path),
+                message="production/build BOM not written",
+            ),
+            CheckResult(
+                name="production_bom_ready",
+                ok=artifact.production_bom_ready,
+                message=(
+                    "production BOM is not closed against prepared EDA assets: "
+                    f"{artifact.production_bom_blockers}"
+                ),
+            ),
+            CheckResult(
+                name="procurement_bom_written",
+                ok=bool(artifact.procurement_bom_path),
+                message="procurement BOM not written",
+            ),
+            CheckResult(
+                name="procurement_bom_ready",
+                ok=artifact.procurement_bom_ready,
+                severity=Severity.WARNING,
+                message=(
+                    "supplier/availability evidence is incomplete: "
+                    f"{artifact.procurement_bom_blockers}"
+                ),
+            ),
             CheckResult(name="cpl_written", ok=bool(artifact.cpl_path),
                         message="CPL not written"),
             CheckResult(
@@ -18904,6 +19663,16 @@ class ManufactureStep(PipelineStepBase):
         checks: list[CheckResult],
     ) -> tuple[BaseModel, bool]:
         assert isinstance(artifact, ManufactureResult)
+        if ctx.active_recovery_tool == "apply_cad_action_batch":
+            observation = _apply_pcb_cad_action_batch(state, ctx, artifact)
+            if observation is None or observation.status not in {
+                "applied",
+                "already_applied",
+            }:
+                return artifact, False
+            # Every output and release receipt must be regenerated from the
+            # mutated board; stale Gerbers/BOM/CPL are never retained.
+            return self.propose(state, ctx, knowledge)
         if any(
             not check.ok and check.name == "requirement_invariants_written"
             for check in checks
@@ -19875,6 +20644,8 @@ class Pipeline:
                 None,
             )
             ctx.active_recovery_tool = ""
+            ctx.active_cad_action_batch = None
+            ctx.active_cad_action_observation = None
             if active_replan is not None:
                 ctx.repair_feedback = active_replan.feedback
             elif (
@@ -19895,6 +20666,10 @@ class Pipeline:
                     ctx.active_recovery_tool = (
                         active_recovery.decision.tool_name
                     )
+                    if ctx.active_recovery_tool == "apply_cad_action_batch":
+                        ctx.active_cad_action_batch = (
+                            active_recovery.decision.cad_action_batch
+                        )
                 ctx.repair_feedback = (
                     "Agentic recovery plan. Preserve every immutable requirement.\n"
                     f"Hypothesis: {active_recovery.decision.hypothesis}\n"
@@ -19979,8 +20754,16 @@ class Pipeline:
                         if after_score < active_recovery.before_score
                         else "rejected"
                     )
+                cad_observation = (
+                    "CAD action observation: "
+                    + ctx.active_cad_action_observation.model_dump_json()
+                    + "\n"
+                    if ctx.active_cad_action_observation is not None
+                    else ""
+                )
                 active_recovery.observation = (
-                    "Deterministic gate observation: "
+                    cad_observation
+                    + "Deterministic gate observation: "
                     + (
                         "all error checks passed"
                         if not result.error_checks
@@ -20112,6 +20895,12 @@ class Pipeline:
                         type(step).repair is not PipelineStepBase.repair
                         or type(step).replan is not PipelineStepBase.replan
                         or result.used_llm
+                        or _cad_action_context(
+                            state,
+                            result,
+                            step_artifact,
+                        )
+                        is not None
                     )
                 )
                 related_recovery_turns = [
@@ -20159,6 +20948,31 @@ class Pipeline:
                         suggested_target=suggested_rollback,
                         local_repair_available=local_repair_available,
                     )
+                    validated_batch, batch_failure = _validated_cad_action_batch(
+                        state,
+                        result,
+                        step_artifact,
+                        decision.cad_action_batch,
+                    )
+                    if batch_failure is not None:
+                        if all(
+                            existing.failure_id != batch_failure.failure_id
+                            for existing in result.failures
+                        ):
+                            result.failures.append(batch_failure)
+                        current_failure_ids.add(batch_failure.failure_id)
+                        decision = deterministic_fallback
+                        decision_used_llm = False
+                        validated_batch = None
+                    elif (
+                        decision.cad_action_batch is not None
+                        and validated_batch is None
+                    ):
+                        # A stale fingerprint or wrong owner is not an
+                        # executable proposal. Re-observe instead of applying
+                        # it to a different artifact revision.
+                        decision = deterministic_fallback
+                        decision_used_llm = False
                     hard_conflict = any(
                         failure.recoverability == Recoverability.HARD_CONFLICT
                         for failure in result.failures
@@ -20210,6 +21024,11 @@ class Pipeline:
                         result,
                         repair_instructions,
                     )
+                    if (
+                        decision.action == RecoveryAction.LOCAL_REPAIR
+                        and validated_batch is not None
+                    ):
+                        local_tool = "apply_cad_action_batch"
                     if local_tool not in _LOCAL_REPAIR_TOOL_WHITELIST:
                         local_tool = "repair_current_step"
                     decision = decision.model_copy(
@@ -20230,6 +21049,11 @@ class Pipeline:
                             "tool_args": {
                                 "repair_instructions": repair_instructions,
                             },
+                            "cad_action_batch": (
+                                validated_batch
+                                if decision.action == RecoveryAction.LOCAL_REPAIR
+                                else None
+                            ),
                             "expected_observation": (
                                 decision.expected_observation.strip()
                                 or deterministic_fallback.expected_observation

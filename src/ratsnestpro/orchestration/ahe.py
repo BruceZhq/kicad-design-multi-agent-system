@@ -12,9 +12,10 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from ratsnestpro.domain.contracts import ContractModel
+from ratsnestpro.orchestration.entity_repairs import CadActionBatch
 
 
 class FailureCategory(StrEnum):
@@ -70,6 +71,7 @@ class RecoveryAction(StrEnum):
 
 GOVERNED_HARNESS_REASON_CODES = frozenset({
     "generic_capability_closure_contradiction",
+    "missing_mutation_capability",
     "verified_pin_alias_resolution_lost",
 })
 
@@ -179,10 +181,21 @@ class RecoveryDecision(ContractModel):
     strategy: str = Field(default="", max_length=240)
     tool_name: str = Field(default="", max_length=240)
     tool_args: dict[str, Any] = Field(default_factory=dict)
+    cad_action_batch: CadActionBatch | None = None
     hypothesis: str = Field(default="", max_length=8_000)
     expected_observation: str = Field(default="", max_length=4_000)
     success_checks: list[str] = Field(default_factory=list, max_length=64)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _bind_cad_batch_to_owned_local_repair(self) -> RecoveryDecision:
+        if self.cad_action_batch is None:
+            return self
+        if self.action != RecoveryAction.LOCAL_REPAIR:
+            raise ValueError("a CAD action batch requires action=local_repair")
+        if self.target_step != self.cad_action_batch.owner_step:
+            raise ValueError("CAD action batch owner_step must equal target_step")
+        return self
 
 
 class RecoveryTurnRecord(ContractModel):
@@ -262,6 +275,7 @@ def make_failure(
     repair_available: bool,
     origin: FailureOrigin | None = None,
     reason_code: str = "",
+    required_capability: str | None = None,
     affected_refs: list[str] | None = None,
     evidence: dict[str, Any] | None = None,
 ) -> FailureEnvelope:
@@ -308,9 +322,11 @@ def make_failure(
         recoverability = Recoverability.HITL_REQUIRED
     refs = list(dict.fromkeys(affected_refs or _REF_RE.findall(message)))
     stable_reason_code = reason_code.strip() or "check_failed"
-    signature_source = (
-        f"{step}|{check_name}|{category.value}|{stable_reason_code}"
-    )
+    signature_source = f"{step}|{check_name}|{category.value}|{stable_reason_code}"
+    if required_capability:
+        # Preserve historical signatures while distinguishing newly observed
+        # missing mutation primitives from one another.
+        signature_source += f"|{required_capability}"
     signature = hashlib.sha256(signature_source.encode("utf-8")).hexdigest()[:20]
     return FailureEnvelope(
         failure_id=f"{step}:{check_name}:{signature}",
@@ -321,13 +337,60 @@ def make_failure(
         recoverability=recoverability,
         origin=resolved_origin,
         reason_code=stable_reason_code,
-        required_capability=_required_capability(category),
+        required_capability=required_capability or _required_capability(category),
         message=message,
         affected_refs=refs,
         evidence={
             "check_name": check_name,
             "reason_code": stable_reason_code,
             "message": message,
+            **(evidence or {}),
+        },
+    )
+
+
+def make_missing_mutation_failure(
+    *,
+    step: str,
+    requested_action: str,
+    message: str = "",
+    affected_refs: list[str] | None = None,
+    evidence: dict[str, Any] | None = None,
+) -> FailureEnvelope:
+    """Record an unsupported CAD primitive as governed harness evidence.
+
+    The stable reason code lets EHE aggregate the same missing capability
+    across runs.  The normalized action remains part of both the check name and
+    required capability, so unrelated missing primitives never collapse into a
+    single signature.  A clear harness sentinel is used only when the finding
+    has no component reference (for example a board-wide zone operation).
+    """
+
+    normalized = re.sub(
+        r"[^a-z0-9_]+",
+        "_",
+        requested_action.strip().casefold(),
+    ).strip("_")
+    if not normalized:
+        normalized = "unknown"
+    namespace = (
+        "eda.schematic"
+        if normalized in {"upsert_net_pin", "remove_net_pin", "set_no_connect"}
+        else "eda.pcb"
+    )
+    required = f"{namespace}.mutation.{normalized}"
+    return make_failure(
+        step=step,
+        check_name=f"cad_action:{normalized}",
+        message=message or f"CAD mutation action {requested_action!r} is unavailable",
+        repair_available=False,
+        origin=FailureOrigin.HARNESS,
+        reason_code="missing_mutation_capability",
+        required_capability=required,
+        affected_refs=affected_refs or ["__CAD_MUTATION__"],
+        evidence={
+            "requested_action": requested_action,
+            "required_capability": required,
             **(evidence or {}),
         },
     )

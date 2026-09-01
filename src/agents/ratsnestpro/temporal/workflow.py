@@ -15,6 +15,7 @@ from agents.ratsnestpro.temporal.contracts import (
     CANONICAL_STEPS,
     COMPENSATE_ACTIVITY,
     EXECUTE_STEP_ACTIVITY,
+    READ_CHECKPOINT_ACTIVITY,
     READ_RESULT_ACTIVITY,
     ROUTING_STEPS,
     WORKFLOW_NAME,
@@ -173,13 +174,14 @@ class RatsNestHardwareWorkflow:
     ) -> dict[str, Any]:
         result_path = str(summary.get("pipeline_result_path", ""))
         if result_path:
-            payload = await workflow.execute_activity(
+            loaded_payload = await workflow.execute_activity(
                 READ_RESULT_ACTIVITY,
                 {"pipeline_result_path": result_path},
                 result_type=dict,
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=self._retry_policy(2),
             )
+            payload: dict[str, Any] = dict(loaded_payload)
         else:
             error = str(summary.get("error", "pipeline stopped without a result file"))
             payload = {
@@ -204,6 +206,45 @@ class RatsNestHardwareWorkflow:
         if compensation is not None:
             payload["temporal"]["compensation"] = compensation
         return payload
+
+    async def _reconcile_checkpoint(
+        self,
+        input: dict[str, Any],
+        summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Prefer the latest committed receipt after an Activity-side failure."""
+
+        command = {
+            "run_name": str(input.get("run_name", "design")),
+            "pipeline_state_path": str(summary.get("pipeline_state_path", "")),
+        }
+        try:
+            latest = await workflow.execute_activity(
+                READ_CHECKPOINT_ACTIVITY,
+                command,
+                result_type=dict,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=self._retry_policy(2),
+            )
+        except Exception:  # noqa: BLE001 - original Activity failure stays primary
+            return summary
+        if latest.get("status") not in {"ok", "legacy"}:
+            return summary
+        current_receipt = summary.get("checkpoint_receipt", {})
+        latest_receipt = latest.get("checkpoint_receipt", {})
+        current_generation = (
+            int(current_receipt.get("generation", 0) or 0)
+            if isinstance(current_receipt, dict)
+            else 0
+        )
+        latest_generation = (
+            int(latest_receipt.get("generation", 0) or 0)
+            if isinstance(latest_receipt, dict)
+            else 0
+        )
+        if latest_generation and latest_generation < current_generation:
+            return summary
+        return {**summary, **latest}
 
     @workflow.run
     async def run(self, input: dict[str, Any]) -> dict[str, Any]:
@@ -414,6 +455,7 @@ class RatsNestHardwareWorkflow:
             )
             return await self._final_result(input, last_summary, terminal_status="completed")
         except ActivityError as exc:
+            last_summary = await self._reconcile_checkpoint(input, last_summary)
             if self._cancel_requested:
                 compensation = await self._compensate(
                     input,
@@ -447,7 +489,12 @@ class RatsNestHardwareWorkflow:
                 run_directory=str(last_summary.get("run_directory", "")),
                 reason=compensation_reason,
             )
-            self._update(status="failed", phase=current_step, detail=progress_detail)
+            self._update(
+                status="failed",
+                phase=current_step,
+                completed_steps=int(last_summary.get("completed_steps", 0) or 0),
+                detail=progress_detail,
+            )
             return {
                 "status": "error",
                 "outcome": "execution_blocked",
@@ -458,6 +505,13 @@ class RatsNestHardwareWorkflow:
                 "error": activity_failure,
                 "release_blockers": release_blockers,
                 "run_directory": str(last_summary.get("run_directory", "")),
+                "pipeline_state_path": str(
+                    last_summary.get("pipeline_state_path", "")
+                ),
+                "pipeline_result_path": str(
+                    last_summary.get("pipeline_result_path", "")
+                ),
+                "checkpoint_receipt": last_summary.get("checkpoint_receipt"),
                 "artifacts": list(last_summary.get("artifacts", [])),
                 "temporal": {
                     "workflow_id": workflow.info().workflow_id,

@@ -23,7 +23,9 @@ from agents.ratsnestpro.temporal.contracts import (
     CANONICAL_STEPS,
     COMPENSATE_ACTIVITY,
     EXECUTE_STEP_ACTIVITY,
+    READ_CHECKPOINT_ACTIVITY,
     READ_RESULT_ACTIVITY,
+    checkpoint_receipt,
     compact_pipeline_result,
     safe_name,
 )
@@ -427,6 +429,18 @@ async def _execute_pipeline_step(command: dict[str, Any]) -> dict[str, Any]:
     summary["manifest_path"] = str(manifest_path)
     summary["manifest_digest"] = _manifest_content_digest(manifest)
     summary["activity_attempt"] = activity.info().attempt
+    state_path = str(summary.get("pipeline_state_path", ""))
+    if state_path:
+        try:
+            state_payload = json.loads(
+                _within_workspace(state_path).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError, TypeError):
+            state_payload = {}
+        if isinstance(state_payload, dict):
+            receipt = checkpoint_receipt(state_payload.get("checkpoint_receipt"))
+            if receipt is not None:
+                summary["checkpoint_receipt"] = receipt
     return summary
 
 
@@ -481,6 +495,50 @@ async def read_pipeline_result(command: dict[str, Any]) -> dict[str, Any]:
             non_retryable=True,
         )
     return payload
+
+
+@activity.defn(name=READ_CHECKPOINT_ACTIVITY)
+async def read_pipeline_checkpoint(command: dict[str, Any]) -> dict[str, Any]:
+    """Reconcile Temporal progress with the latest committed state receipt."""
+
+    state_value = str(command.get("pipeline_state_path", "")).strip()
+    if state_value:
+        path = _within_workspace(state_value)
+    else:
+        run_name = safe_name(str(command.get("run_name", "")), "design")
+        path = _workspace_root() / "runs" / run_name / "pipeline_state.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"status": "missing", "pipeline_state_path": str(path)}
+    except (OSError, ValueError, TypeError) as exc:
+        raise ApplicationError(
+            f"checkpoint reconciliation failed: {type(exc).__name__}: {exc}",
+            type="TransientPipelineError",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ApplicationError(
+            "pipeline_state.json must contain an object",
+            type="PermanentPipelineError",
+            non_retryable=True,
+        )
+    receipt = checkpoint_receipt(payload.get("checkpoint_receipt"))
+    if receipt is None:
+        return {
+            "status": "legacy",
+            "completed_steps": int(payload.get("completed_steps", 0) or 0),
+            "pipeline_state_path": str(path),
+            "run_directory": str(path.parent),
+        }
+    return {
+        "status": "ok",
+        "completed_steps": receipt["committed_step_index"],
+        "expected_step": receipt["next_step"],
+        "pipeline_state_path": str(path),
+        "pipeline_result_path": str(path.with_name("pipeline_result.json")),
+        "run_directory": str(path.parent),
+        "checkpoint_receipt": receipt,
+    }
 
 
 @activity.defn(name=COMPENSATE_ACTIVITY)

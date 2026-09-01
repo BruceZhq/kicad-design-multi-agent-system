@@ -10,6 +10,7 @@ from temporalio.worker import Worker
 from agents.ratsnestpro.temporal.activities import (
     compensate_pipeline_run,
     execute_pipeline_step,
+    read_pipeline_checkpoint,
     read_pipeline_result,
     verify_workspace_writable,
 )
@@ -27,6 +28,7 @@ async def main() -> None:
         workflows=[RatsNestHardwareWorkflow],
         activities=[
             execute_pipeline_step,
+            read_pipeline_checkpoint,
             read_pipeline_result,
             compensate_pipeline_run,
         ],

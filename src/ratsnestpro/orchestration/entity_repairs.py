@@ -12,8 +12,9 @@ import re
 from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any, Literal
+from uuid import uuid4
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from ratsnestpro.domain.contracts import ContractModel
 
@@ -33,6 +34,310 @@ class RepairExecutionPolicy(StrEnum):
 
     BOUNDED_CANDIDATE = "bounded_candidate"
     MANUAL_REVIEW = "manual_review"
+
+
+class CadEntityKind(StrEnum):
+    """KiCad PCB entities that the governed mutation worker can address."""
+
+    FOOTPRINT = "footprint"
+    NET = "net"
+    TRACK = "track"
+    VIA = "via"
+    ZONE = "zone"
+    SILKSCREEN = "silkscreen"
+    PIN = "pin"
+
+
+class CadActionKind(StrEnum):
+    """Closed action vocabulary accepted by the KiCad worker."""
+
+    MOVE_FOOTPRINT = "move_footprint"
+    ROTATE_FOOTPRINT = "rotate_footprint"
+    SWAP_FOOTPRINT_POSITIONS = "swap_footprint_positions"
+    RIPUP_NET = "ripup_net"
+    ADD_TRACK = "add_track"
+    ADD_VIA = "add_via"
+    RESIZE_TRACK = "resize_track"
+    REFILL_ZONES = "refill_zones"
+    MOVE_SILKSCREEN = "move_silkscreen"
+    UPSERT_NET_PIN = "upsert_net_pin"
+    REMOVE_NET_PIN = "remove_net_pin"
+    SET_NO_CONNECT = "set_no_connect"
+
+
+class CadPoint(ContractModel):
+    x_mm: float = Field(ge=-1_000.0, le=1_000.0)
+    y_mm: float = Field(ge=-1_000.0, le=1_000.0)
+
+
+class CadTarget(ContractModel):
+    """Stable identity for one governed CAD mutation target."""
+
+    kind: CadEntityKind
+    reference: str | None = Field(default=None, min_length=1, max_length=32)
+    net: str | None = Field(default=None, min_length=1, max_length=240)
+    item_uuid: str | None = Field(default=None, min_length=1, max_length=160)
+    pin: str | None = Field(default=None, min_length=1, max_length=48)
+    field: Literal["reference", "value"] | None = None
+
+    @model_validator(mode="after")
+    def _require_entity_identity(self) -> CadTarget:
+        if self.kind == CadEntityKind.FOOTPRINT and not self.reference:
+            raise ValueError("a footprint target requires reference")
+        if self.kind == CadEntityKind.NET and not self.net:
+            raise ValueError("a net target requires net")
+        if self.kind in {CadEntityKind.TRACK, CadEntityKind.VIA} and not (
+            self.item_uuid or self.net
+        ):
+            raise ValueError("a track/via target requires item_uuid or net")
+        if self.kind == CadEntityKind.SILKSCREEN and not (
+            self.reference and self.field
+        ):
+            raise ValueError("a silkscreen target requires reference and field")
+        if self.kind == CadEntityKind.PIN and not (self.reference and self.pin):
+            raise ValueError("a pin target requires reference and pin")
+        return self
+
+
+class CadPrecondition(ContractModel):
+    """Optional observations that must remain true immediately before mutation."""
+
+    expected_position: CadPoint | None = None
+    expected_rotation_degrees: float | None = Field(default=None, ge=-360.0, le=360.0)
+    expected_net: str | None = Field(default=None, min_length=1, max_length=240)
+    expected_layer: str | None = Field(
+        default=None,
+        pattern=r"^(?:F|B|In\d+)\.(?:Cu|SilkS)$",
+    )
+    expected_item_count: int | None = Field(default=None, ge=0, le=100_000)
+    require_unlocked: bool = True
+
+
+class CadAction(ContractModel):
+    """One bounded, typed PCB mutation; no arbitrary code or S-expression."""
+
+    action_id: str = Field(
+        default_factory=lambda: str(uuid4()),
+        min_length=8,
+        max_length=160,
+        pattern=r"^[A-Za-z0-9_.:-]+$",
+    )
+    operation: CadActionKind
+    target: CadTarget
+    preconditions: CadPrecondition = Field(default_factory=CadPrecondition)
+    position: CadPoint | None = None
+    start: CadPoint | None = None
+    end: CadPoint | None = None
+    rotation_degrees: float | None = Field(default=None, ge=-360.0, le=360.0)
+    other_reference: str | None = Field(default=None, min_length=1, max_length=32)
+    layer: str | None = Field(
+        default=None,
+        pattern=r"^(?:F|B|In\d+)\.(?:Cu|SilkS)$",
+    )
+    layer_pair: tuple[str, str] | None = None
+    width_mm: float | None = Field(default=None, ge=0.025, le=20.0)
+    diameter_mm: float | None = Field(default=None, ge=0.1, le=20.0)
+    drill_mm: float | None = Field(default=None, ge=0.05, le=19.0)
+
+    @model_validator(mode="after")
+    def _validate_operation_contract(self) -> CadAction:
+        expected_kinds: dict[CadActionKind, set[CadEntityKind]] = {
+            CadActionKind.MOVE_FOOTPRINT: {CadEntityKind.FOOTPRINT},
+            CadActionKind.ROTATE_FOOTPRINT: {CadEntityKind.FOOTPRINT},
+            CadActionKind.SWAP_FOOTPRINT_POSITIONS: {CadEntityKind.FOOTPRINT},
+            CadActionKind.RIPUP_NET: {CadEntityKind.NET},
+            CadActionKind.ADD_TRACK: {CadEntityKind.NET},
+            CadActionKind.ADD_VIA: {CadEntityKind.NET},
+            CadActionKind.RESIZE_TRACK: {CadEntityKind.TRACK, CadEntityKind.NET},
+            CadActionKind.REFILL_ZONES: {CadEntityKind.ZONE},
+            CadActionKind.MOVE_SILKSCREEN: {CadEntityKind.SILKSCREEN},
+            CadActionKind.UPSERT_NET_PIN: {CadEntityKind.PIN},
+            CadActionKind.REMOVE_NET_PIN: {CadEntityKind.PIN},
+            CadActionKind.SET_NO_CONNECT: {CadEntityKind.PIN},
+        }
+        if self.target.kind not in expected_kinds[self.operation]:
+            raise ValueError(
+                f"{self.operation.value} cannot target {self.target.kind.value}"
+            )
+
+        required: dict[CadActionKind, set[str]] = {
+            CadActionKind.MOVE_FOOTPRINT: {"position"},
+            CadActionKind.ROTATE_FOOTPRINT: {"rotation_degrees"},
+            CadActionKind.SWAP_FOOTPRINT_POSITIONS: {"other_reference"},
+            CadActionKind.RIPUP_NET: set(),
+            CadActionKind.ADD_TRACK: {"start", "end", "layer", "width_mm"},
+            CadActionKind.ADD_VIA: {
+                "position",
+                "layer_pair",
+                "diameter_mm",
+                "drill_mm",
+            },
+            CadActionKind.RESIZE_TRACK: {"width_mm"},
+            CadActionKind.REFILL_ZONES: set(),
+            CadActionKind.MOVE_SILKSCREEN: {"position", "layer"},
+            CadActionKind.UPSERT_NET_PIN: set(),
+            CadActionKind.REMOVE_NET_PIN: set(),
+            CadActionKind.SET_NO_CONNECT: set(),
+        }
+        optional_fields = {
+            "position",
+            "start",
+            "end",
+            "rotation_degrees",
+            "other_reference",
+            "layer",
+            "layer_pair",
+            "width_mm",
+            "diameter_mm",
+            "drill_mm",
+        }
+        provided = {
+            name for name in optional_fields if getattr(self, name) is not None
+        }
+        missing = required[self.operation] - provided
+        unexpected = provided - required[self.operation]
+        if missing:
+            raise ValueError(
+                f"{self.operation.value} is missing {', '.join(sorted(missing))}"
+            )
+        if unexpected:
+            raise ValueError(
+                f"{self.operation.value} does not accept "
+                f"{', '.join(sorted(unexpected))}"
+            )
+        if self.operation == CadActionKind.ADD_TRACK and self.start == self.end:
+            raise ValueError("a track start and end must differ")
+        if self.operation == CadActionKind.ADD_TRACK and not str(self.layer).endswith(
+            ".Cu"
+        ):
+            raise ValueError("a track must be placed on a copper layer")
+        if self.operation == CadActionKind.ADD_VIA:
+            if self.drill_mm is not None and self.diameter_mm is not None:
+                if self.drill_mm >= self.diameter_mm:
+                    raise ValueError("via drill must be smaller than its diameter")
+            assert self.layer_pair is not None
+            for layer_name in self.layer_pair:
+                if not re.fullmatch(r"(?:F|B|In\d+)\.Cu", layer_name):
+                    raise ValueError("via layer_pair must contain copper layers")
+            if self.layer_pair[0] == self.layer_pair[1]:
+                raise ValueError("via layer_pair must contain two different layers")
+        if self.operation == CadActionKind.MOVE_SILKSCREEN and not str(
+            self.layer
+        ).endswith(".SilkS"):
+            raise ValueError("silkscreen text must stay on a silkscreen layer")
+        if (
+            self.operation == CadActionKind.SWAP_FOOTPRINT_POSITIONS
+            and self.other_reference == self.target.reference
+        ):
+            raise ValueError("cannot swap a footprint with itself")
+        if self.operation == CadActionKind.UPSERT_NET_PIN and not self.target.net:
+            raise ValueError("upsert_net_pin requires a target net")
+        return self
+
+
+class CadActionBatch(ContractModel):
+    """An atomic, fingerprint-bound set of actions for one owner pipeline step."""
+
+    schema_version: Literal[1] = 1
+    batch_id: str = Field(
+        default_factory=lambda: str(uuid4()),
+        min_length=8,
+        max_length=160,
+        pattern=r"^[A-Za-z0-9_.:-]+$",
+    )
+    idempotency_key: str = Field(
+        default_factory=lambda: str(uuid4()),
+        min_length=8,
+        max_length=160,
+        pattern=r"^[A-Za-z0-9_.:-]+$",
+    )
+    owner_step: str = Field(
+        pattern=(
+            r"^(?:schematic_connections|layout_(?:partition|critical|general|write)|"
+            r"route_(?:plan|planes|signals|fab)|manufacture)$"
+        )
+    )
+    base_artifact_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    actions: list[CadAction] = Field(min_length=1, max_length=32)
+    success_checks: list[str] = Field(min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def _validate_atomic_batch(self) -> CadActionBatch:
+        action_ids = [action.action_id for action in self.actions]
+        if len(action_ids) != len(set(action_ids)):
+            raise ValueError("CAD action_id values must be unique within a batch")
+        allowed_owners = {
+            CadActionKind.MOVE_FOOTPRINT: {
+                "layout_critical",
+                "layout_general",
+                "layout_write",
+            },
+            CadActionKind.ROTATE_FOOTPRINT: {
+                "layout_critical",
+                "layout_general",
+                "layout_write",
+            },
+            CadActionKind.SWAP_FOOTPRINT_POSITIONS: {
+                "layout_critical",
+                "layout_general",
+                "layout_write",
+            },
+            CadActionKind.MOVE_SILKSCREEN: {"layout_write", "route_fab"},
+            CadActionKind.RIPUP_NET: {"route_signals"},
+            CadActionKind.ADD_TRACK: {"route_signals"},
+            CadActionKind.ADD_VIA: {"route_signals"},
+            CadActionKind.RESIZE_TRACK: {"route_signals"},
+            CadActionKind.REFILL_ZONES: {"route_planes", "route_signals"},
+            CadActionKind.UPSERT_NET_PIN: {"schematic_connections"},
+            CadActionKind.REMOVE_NET_PIN: {"schematic_connections"},
+            CadActionKind.SET_NO_CONNECT: {"schematic_connections"},
+        }
+        pcb_operations = {
+            CadActionKind.MOVE_FOOTPRINT,
+            CadActionKind.ROTATE_FOOTPRINT,
+            CadActionKind.SWAP_FOOTPRINT_POSITIONS,
+            CadActionKind.RIPUP_NET,
+            CadActionKind.ADD_TRACK,
+            CadActionKind.ADD_VIA,
+            CadActionKind.RESIZE_TRACK,
+            CadActionKind.REFILL_ZONES,
+            CadActionKind.MOVE_SILKSCREEN,
+        }
+        for operation in pcb_operations:
+            allowed_owners[operation].add("manufacture")
+        incompatible = [
+            action.operation.value
+            for action in self.actions
+            if self.owner_step not in allowed_owners[action.operation]
+        ]
+        if incompatible:
+            raise ValueError(
+                "CAD actions are not owned by the batch step: "
+                + ", ".join(incompatible)
+            )
+        return self
+
+
+class CadActionResult(ContractModel):
+    action_id: str
+    operation: CadActionKind
+    status: Literal["applied", "skipped", "rejected", "error"]
+    detail: str = ""
+
+
+class CadActionObservation(ContractModel):
+    """Observed worker result; release checks remain authoritative downstream."""
+
+    batch_id: str
+    idempotency_key: str
+    status: Literal["applied", "already_applied", "rejected", "error"]
+    artifact_path: str = ""
+    batch_fingerprint: str = ""
+    before_fingerprint: str = ""
+    after_fingerprint: str = ""
+    action_results: list[CadActionResult] = Field(default_factory=list)
+    pending_success_checks: list[str] = Field(default_factory=list)
+    detail: str = ""
 
 
 class FindingPosition(ContractModel):

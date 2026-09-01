@@ -3,7 +3,7 @@ name: "schematic-engineering"
 description: "Plan, inspect, edit, materialize, and verify candidate KiCad schematics when a schematic pipeline step needs engineering judgment or evidence-guided recovery."
 mode: "execute"
 applies_to_steps: ["schematic_connections", "schematic_pinmap", "schematic_layout", "schematic_materialize", "erc"]
-allowed_capabilities: ["artifact.read", "artifact.diff", "artifact.write_candidate", "artifact.checkpoint", "artifact.rollback", "knowledge.search", "eda.schematic.inspect", "eda.schematic.edit_candidate", "eda.schematic.materialize", "eda.schematic.render", "eda.erc.run", "workflow.replan", "workflow.request_human", "workflow.record_harness_gap"]
+allowed_capabilities: ["artifact.read", "artifact.diff", "artifact.write_candidate", "artifact.checkpoint", "artifact.rollback", "knowledge.search", "eda.schematic.inspect", "eda.schematic.edit_candidate", "eda.schematic.upsert_net_pin", "eda.schematic.remove_net_pin", "eda.schematic.set_no_connect", "eda.schematic.materialize", "eda.schematic.render", "eda.erc.run", "workflow.replan", "workflow.request_human", "workflow.record_harness_gap"]
 required_gates: ["immutable_requirements", "symbol_pin_evidence", "schematic_structure", "erc"]
 write_scope: ["run_workspace", "candidate_artifacts"]
 ---

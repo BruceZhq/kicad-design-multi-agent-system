@@ -10,6 +10,7 @@ context; this module always reports the real execution outcome.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -19,10 +20,17 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from ratsnestpro.orchestration.entity_repairs import (
+    CadActionBatch,
+    CadActionObservation,
+    CadActionResult,
+)
+
 # net name -> list of (ref, pad_number)
 NetMap = dict[str, list[list[str]]]
 
 _WORKER = Path(__file__).with_name("_route_worker.py")
+_CAD_ACTION_WORKER = Path(__file__).with_name("_cad_action_worker.py")
 
 
 def _router_timeout(layer_count: int) -> int:
@@ -63,6 +71,341 @@ def _as_int(value: object, default: int) -> int:
         except (TypeError, ValueError):
             return default
     return default
+
+
+def artifact_fingerprint(path: str | os.PathLike[str]) -> str:
+    """Return the full SHA-256 used to bind a mutation to one PCB revision."""
+
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def cad_action_batch_fingerprint(batch: CadActionBatch) -> str:
+    """Return a canonical digest for idempotency-key collision detection."""
+
+    payload = json.dumps(
+        batch.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _cad_observation(
+    batch: CadActionBatch,
+    *,
+    status: str,
+    pcb: Path,
+    batch_fingerprint: str,
+    before_fingerprint: str = "",
+    after_fingerprint: str = "",
+    action_results: list[CadActionResult] | None = None,
+    detail: str = "",
+) -> CadActionObservation:
+    return CadActionObservation.model_validate({
+        "batch_id": batch.batch_id,
+        "idempotency_key": batch.idempotency_key,
+        "status": status,
+        "artifact_path": str(pcb),
+        "batch_fingerprint": batch_fingerprint,
+        "before_fingerprint": before_fingerprint,
+        "after_fingerprint": after_fingerprint,
+        "action_results": action_results or [],
+        "pending_success_checks": batch.success_checks,
+        "detail": detail,
+    })
+
+
+def _run_scoped_pcb(
+    pcb_path: str | os.PathLike[str],
+    run_dir: str | os.PathLike[str] | None,
+) -> tuple[Path, Path]:
+    pcb = Path(pcb_path).resolve()
+    root = Path(run_dir).resolve() if run_dir is not None else pcb.parent
+    try:
+        pcb.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("PCB artifact must be inside the run workspace") from exc
+    if pcb.suffix.lower() != ".kicad_pcb":
+        raise ValueError("CAD actions accept only a .kicad_pcb artifact")
+    if not pcb.is_file() or pcb.stat().st_size <= 0:
+        raise ValueError("CAD action PCB artifact is missing or empty")
+    return pcb, root
+
+
+def _receipt_path(root: Path, idempotency_key: str) -> Path:
+    safe_name = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+    return root / ".ratsnestpro" / "cad-actions" / f"{safe_name}.json"
+
+
+def _read_receipt(path: Path) -> dict[str, object] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _write_receipt(
+    path: Path,
+    batch_fingerprint: str,
+    observation: CadActionObservation,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(f".{os.getpid()}.tmp")
+    temp_path.write_text(
+        json.dumps(
+            {
+                "batch_fingerprint": batch_fingerprint,
+                "observation": observation.model_dump(mode="json"),
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    os.replace(temp_path, path)
+
+
+def apply_cad_action_batch(
+    pcb_path: str | os.PathLike[str],
+    batch: CadActionBatch,
+    *,
+    run_dir: str | os.PathLike[str] | None = None,
+    timeout_seconds: int = 120,
+) -> CadActionObservation:
+    """Atomically execute a fingerprint-bound batch through KiCad ``pcbnew``.
+
+    The worker writes a separate candidate.  This function replaces the real
+    run artifact only after the worker reports success and the saved candidate
+    can be fingerprinted.  ERC/DRC and release gates remain downstream checks;
+    they are reported as ``pending_success_checks`` in the observation.
+    """
+
+    if not isinstance(batch, CadActionBatch):
+        batch = CadActionBatch.model_validate(batch)
+    try:
+        pcb, root = _run_scoped_pcb(pcb_path, run_dir)
+    except (OSError, ValueError) as exc:
+        unresolved = Path(pcb_path).resolve()
+        return _cad_observation(
+            batch,
+            status="rejected",
+            pcb=unresolved,
+            batch_fingerprint=cad_action_batch_fingerprint(batch),
+            detail=str(exc),
+        )
+
+    batch_digest = cad_action_batch_fingerprint(batch)
+    before = artifact_fingerprint(pcb)
+    receipt_path = _receipt_path(root, batch.idempotency_key)
+    receipt = _read_receipt(receipt_path)
+    if receipt is not None:
+        receipt_digest = str(receipt.get("batch_fingerprint") or "")
+        if receipt_digest != batch_digest:
+            return _cad_observation(
+                batch,
+                status="rejected",
+                pcb=pcb,
+                batch_fingerprint=batch_digest,
+                before_fingerprint=before,
+                detail="idempotency key is already bound to a different CAD batch",
+            )
+        prior_raw = receipt.get("observation")
+        if isinstance(prior_raw, dict):
+            try:
+                prior = CadActionObservation.model_validate(prior_raw)
+            except ValueError:
+                prior = None
+            if (
+                prior is not None
+                and prior.status in {"applied", "already_applied"}
+                and prior.after_fingerprint
+                and before == prior.after_fingerprint
+            ):
+                return prior.model_copy(
+                    update={
+                        "status": "already_applied",
+                        "detail": "idempotent replay; artifact already contains the batch",
+                    }
+                )
+
+    if before != batch.base_artifact_fingerprint:
+        observation = _cad_observation(
+            batch,
+            status="rejected",
+            pcb=pcb,
+            batch_fingerprint=batch_digest,
+            before_fingerprint=before,
+            detail="artifact fingerprint no longer matches the planned CAD batch",
+        )
+        return observation
+
+    kpy = kicad_python()
+    if not kpy:
+        observation = _cad_observation(
+            batch,
+            status="error",
+            pcb=pcb,
+            batch_fingerprint=batch_digest,
+            before_fingerprint=before,
+            detail="KiCad-python is unavailable; no CAD action was executed",
+        )
+        return observation
+
+    timeout = max(10, min(int(timeout_seconds), 600))
+    with tempfile.TemporaryDirectory(prefix=".cad_action_", dir=root) as temp_dir:
+        temp_root = Path(temp_dir)
+        batch_path = temp_root / "batch.json"
+        candidate_path = temp_root / pcb.name
+        batch_path.write_text(batch.model_dump_json(), encoding="utf-8")
+        try:
+            process = subprocess.run(
+                [
+                    kpy,
+                    str(_CAD_ACTION_WORKER),
+                    str(pcb),
+                    str(candidate_path),
+                    str(batch_path),
+                    str(root),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
+        except Exception as exc:  # noqa: BLE001 - returned as a typed observation
+            observation = _cad_observation(
+                batch,
+                status="error",
+                pcb=pcb,
+                batch_fingerprint=batch_digest,
+                before_fingerprint=before,
+                detail=f"CAD worker invocation failed: {exc}",
+            )
+            return observation
+
+        worker_result: dict[str, object] = {}
+        for line in process.stdout.splitlines():
+            if not line.startswith("RESULT "):
+                continue
+            try:
+                decoded = json.loads(line[len("RESULT "):])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(decoded, dict):
+                worker_result = decoded
+        if not worker_result:
+            tail = (process.stdout or process.stderr)[-600:]
+            observation = _cad_observation(
+                batch,
+                status="error",
+                pcb=pcb,
+                batch_fingerprint=batch_digest,
+                before_fingerprint=before,
+                detail=f"CAD worker returned no structured result; tail={tail!r}",
+            )
+            return observation
+
+        raw_results = worker_result.get("action_results")
+        try:
+            action_results = [
+                CadActionResult.model_validate(result)
+                for result in raw_results
+                if isinstance(result, dict)
+            ] if isinstance(raw_results, list) else []
+        except ValueError as exc:
+            observation = _cad_observation(
+                batch,
+                status="error",
+                pcb=pcb,
+                batch_fingerprint=batch_digest,
+                before_fingerprint=before,
+                detail=f"CAD worker returned an invalid action receipt: {exc}",
+            )
+            return observation
+        error = str(worker_result.get("error") or "")
+        if not worker_result.get("ok") or error:
+            observation = _cad_observation(
+                batch,
+                status="error",
+                pcb=pcb,
+                batch_fingerprint=batch_digest,
+                before_fingerprint=before,
+                action_results=action_results,
+                detail=error or "CAD worker rejected the candidate",
+            )
+            return observation
+        if not candidate_path.is_file() or candidate_path.stat().st_size <= 0:
+            observation = _cad_observation(
+                batch,
+                status="error",
+                pcb=pcb,
+                batch_fingerprint=batch_digest,
+                before_fingerprint=before,
+                action_results=action_results,
+                detail="CAD worker reported success without a candidate artifact",
+            )
+            return observation
+
+        candidate_fingerprint = artifact_fingerprint(candidate_path)
+        reported_fingerprint = str(worker_result.get("after_fingerprint") or "")
+        if reported_fingerprint != candidate_fingerprint:
+            observation = _cad_observation(
+                batch,
+                status="error",
+                pcb=pcb,
+                batch_fingerprint=batch_digest,
+                before_fingerprint=before,
+                action_results=action_results,
+                detail="CAD candidate fingerprint differs from the worker receipt",
+            )
+            return observation
+        if candidate_fingerprint == before:
+            observation = _cad_observation(
+                batch,
+                status="rejected",
+                pcb=pcb,
+                batch_fingerprint=batch_digest,
+                before_fingerprint=before,
+                after_fingerprint=candidate_fingerprint,
+                action_results=action_results,
+                detail="CAD batch produced no artifact change",
+            )
+            return observation
+
+        # Recheck the source after the worker completes so a stale process can
+        # never overwrite a concurrent pipeline revision.
+        if artifact_fingerprint(pcb) != before:
+            observation = _cad_observation(
+                batch,
+                status="rejected",
+                pcb=pcb,
+                batch_fingerprint=batch_digest,
+                before_fingerprint=before,
+                action_results=action_results,
+                detail="source PCB changed concurrently; candidate was discarded",
+            )
+            return observation
+        os.replace(candidate_path, pcb)
+
+    after = artifact_fingerprint(pcb)
+    observation = _cad_observation(
+        batch,
+        status="applied",
+        pcb=pcb,
+        batch_fingerprint=batch_digest,
+        before_fingerprint=before,
+        after_fingerprint=after,
+        action_results=action_results,
+        detail="candidate committed; downstream success checks are required",
+    )
+    _write_receipt(receipt_path, batch_digest, observation)
+    return observation
 
 
 @dataclass

@@ -255,9 +255,11 @@ LLM 的布局意图会被编译为带 digest 的 placement constraint sidecar。
 
 ### AHE
 
-AHE 现在包含一个受治理的 Skill Agent Loop。普通工程 Gate 失败后，Hardware Engineer 会加载当前领域 Skill 与 `failure-reflection` Skill，由 LLM 基于 Artifact、工具报告和历史尝试选择 `local_repair / replan_upstream / retry_tool / investigate_harness / ask_human / stop`，Harness 再把动作绑定到已注册的工程工具并重新执行权威检查。外层 17 步顺序保持稳定，内层具备 Plan–Act–Observe–Reflect 与 ReAct 式改路能力。
+AHE 现在包含一个受治理的 Skill Agent Loop。普通工程 Gate 失败后，Hardware Engineer 会加载当前领域 Skill 与 `failure-reflection` Skill，由 LLM 基于 Artifact、工具报告和历史尝试选择 `local_repair / replan_upstream / retry_tool / investigate_harness / ask_human / stop`，Harness 再把动作绑定到已注册的工程工具并重新执行权威检查。对于证据已经定位到实体的失败，`RecoveryDecision` 可携带指纹绑定的 typed CAD action batch：原理图侧组合 `upsert/remove net pin` 与 `set no-connect`，PCB 侧组合移动/旋转/交换封装、拆线、加线/过孔、改线宽、重填铜区和移动丝印。动作只写候选，不接受 Shell 或任意 KiCad 文本；ERC、DRC、连通性、需求不变量和制造输出重建决定是否提交。外层 17 步顺序保持稳定，内层具备真实 Plan–Act–Observe–Reflect 与 ReAct 式改路能力。
 
 LLM 拥有诊断、计划、工具选择、候选修改和动态回滚权；用户硬约束、工作区边界、ERC/DRC/连通性和 Release Gate 仍由 Harness 掌握。每轮 `RecoveryDecision/RecoveryTurnRecord` 都随 Checkpoint 持久化；同一动作、Artifact 指纹和分数无改善时禁止原样重放。只有安全恢复路径耗尽、证据或权限缺失、必须人工决策或存在硬冲突时，任务才进入 `blocked`。
+
+Selection 在进入 `schematic_connections` 前生成 `PreparedComponentManifest` 与 Locked BOM，冻结器件身份、MPN、封装、符号语义、pin/pad 和本地资产内容摘要；任一资产变化都会使闭包失效。Manufacture 输出独立的 Production BOM 与 Procurement BOM：前者只接受已锁定 EDA 资产，后者记录供应商证据和快照状态；采购证据缺失会被明确报告，但不会伪装成电气设计失败。
 
 ### EHE
 
@@ -304,6 +306,7 @@ flowchart LR
 - `event_seq`/`state_version` 保证事件单调性；Kafka 使用稳定 event ID 去重。
 - SSE 断线使用 `Last-Event-ID` 回放；Redis XREAD 超时被视为空闲 heartbeat，而不是任务失败。
 - Java/Python 重启后以 `run_id + request_id` reconciliation，不创建重复 Workflow。
+- 每次工程提交写入单调递增的 `CheckpointReceipt`，绑定 generation、revision、步骤、父状态摘要和 Artifact 摘要；合法回滚使用新 generation，过期 Activity 无法覆盖新状态。Temporal Activity 异常时主动读取最新 receipt 对账，因此恢复从最后已提交安全点继续，而不是依赖旧的内存摘要猜测进度。
 - 人工反馈以 `base_revision` CAS 创建新 Revision，旧产物不可覆盖。
 
 ## 记忆系统：短期、长期与防幻觉

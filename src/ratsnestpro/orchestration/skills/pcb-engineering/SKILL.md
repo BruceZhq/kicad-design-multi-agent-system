@@ -3,7 +3,7 @@ name: "pcb-engineering"
 description: "Plan and execute evidence-guided KiCad PCB placement, routing, verification, and manufacturing-candidate recovery across PCB pipeline steps."
 mode: "execute"
 applies_to_steps: ["layout_partition", "layout_critical", "layout_general", "layout_write", "route_plan", "route_planes", "route_signals", "route_fab", "manufacture"]
-allowed_capabilities: ["artifact.read", "artifact.diff", "artifact.write_candidate", "artifact.checkpoint", "artifact.rollback", "knowledge.search", "eda.pcb.inspect", "eda.pcb.edit_candidate", "eda.pcb.render", "eda.pcb.route_candidate", "eda.pcb.measure", "eda.drc.run", "workflow.replan", "workflow.request_human", "workflow.record_harness_gap"]
+allowed_capabilities: ["artifact.read", "artifact.diff", "artifact.write_candidate", "artifact.checkpoint", "artifact.rollback", "knowledge.search", "eda.pcb.inspect", "eda.pcb.edit_candidate", "eda.pcb.move_footprint", "eda.pcb.rotate_footprint", "eda.pcb.swap_footprint_positions", "eda.pcb.ripup_net", "eda.pcb.add_track", "eda.pcb.add_via", "eda.pcb.resize_track", "eda.pcb.refill_zones", "eda.pcb.move_silkscreen", "eda.pcb.render", "eda.pcb.route_candidate", "eda.pcb.measure", "eda.drc.run", "workflow.replan", "workflow.request_human", "workflow.record_harness_gap"]
 required_gates: ["immutable_requirements", "footprint_binding", "placement_constraints", "connectivity", "drc", "manufacturing_outputs"]
 write_scope: ["run_workspace", "candidate_artifacts"]
 ---

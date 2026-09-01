@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 CANONICAL_STEPS: tuple[str, ...] = (
     "requirements",
@@ -30,10 +30,72 @@ ROUTING_STEPS = frozenset({"route_plan", "route_planes", "route_signals", "route
 
 EXECUTE_STEP_ACTIVITY = "ratsnest.execute_pipeline_step"
 READ_RESULT_ACTIVITY = "ratsnest.read_pipeline_result"
+READ_CHECKPOINT_ACTIVITY = "ratsnest.read_pipeline_checkpoint"
 COMPENSATE_ACTIVITY = "ratsnest.compensate_pipeline_run"
 WORKFLOW_NAME = "ratsnest.hardware-engineer.v1"
 
 _SAFE_NAME = re.compile(r"[^a-zA-Z0-9_.-]+")
+
+
+class CheckpointReceipt(TypedDict):
+    """Small authoritative receipt for one committed pipeline checkpoint."""
+
+    schema_version: int
+    generation: int
+    state_revision: int
+    committed_step_index: int
+    next_step: str
+    state_sha256: str
+    artifact_manifest_digest: str
+    transition_kind: Literal["forward", "rollback", "invalidate"]
+    parent_state_sha256: str
+    replan_id: str
+
+
+def checkpoint_receipt(value: Any) -> CheckpointReceipt | None:
+    """Validate a persisted receipt without trusting a partial projection."""
+
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        return None
+    try:
+        generation = int(value["generation"])
+        revision = int(value["state_revision"])
+        committed = int(value["committed_step_index"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    transition = str(value.get("transition_kind", ""))
+    state_sha256 = str(value.get("state_sha256", ""))
+    artifact_digest = str(value.get("artifact_manifest_digest", ""))
+    if (
+        generation < 1
+        or revision < 0
+        or committed < 0
+        or committed > len(CANONICAL_STEPS)
+        or transition not in {"forward", "rollback", "invalidate"}
+        or not re.fullmatch(r"[0-9a-f]{64}", state_sha256)
+        or not re.fullmatch(r"[0-9a-f]{64}", artifact_digest)
+    ):
+        return None
+    next_step = str(value.get("next_step", ""))
+    expected_next = (
+        CANONICAL_STEPS[committed]
+        if committed < len(CANONICAL_STEPS)
+        else ""
+    )
+    if next_step != expected_next:
+        return None
+    return CheckpointReceipt(
+        schema_version=1,
+        generation=generation,
+        state_revision=revision,
+        committed_step_index=committed,
+        next_step=next_step,
+        state_sha256=state_sha256,
+        artifact_manifest_digest=artifact_digest,
+        transition_kind=transition,  # type: ignore[typeddict-item]
+        parent_state_sha256=str(value.get("parent_state_sha256", "")),
+        replan_id=str(value.get("replan_id", "")),
+    )
 
 
 def safe_name(value: str, fallback: str) -> str:
@@ -173,6 +235,9 @@ def compact_pipeline_result(payload: dict[str, Any], expected_step: str) -> dict
         "error": str(payload.get("error", "")),
         "error_type": str(payload.get("error_type", "")),
     }
+    receipt = checkpoint_receipt(payload.get("checkpoint_receipt"))
+    if receipt is not None:
+        compact["checkpoint_receipt"] = receipt
     compact["checkpoint_digest"] = hashlib.sha256(
         json.dumps(compact, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()

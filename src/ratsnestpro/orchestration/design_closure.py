@@ -60,7 +60,7 @@ def _canonical_digest(value: Any) -> str:
 class LibrarySourceEvidence(ContractModel):
     """One exact library file observed while closing a component."""
 
-    kind: Literal["symbol", "footprint"]
+    kind: Literal["symbol", "footprint", "model_3d"]
     lib_id: str = Field(min_length=3, max_length=240)
     source_path: str = Field(min_length=1, max_length=2_000)
     sha256: str = Field(pattern=_SHA256_PATTERN)
@@ -97,6 +97,20 @@ class ComponentClosureEntry(ContractModel):
     footprint_pad_numbers: list[str] = Field(default_factory=list, max_length=512)
     pin_pad_bindings: list[PinPadBinding] = Field(default_factory=list, max_length=512)
     evidence: list[LibrarySourceEvidence] = Field(default_factory=list, max_length=8)
+    # References to the upstream prepared-component receipt.  Defaults keep
+    # persisted v1 manifests and direct legacy callers valid.
+    prepared_record_id: str = Field(
+        default="",
+        pattern=r"^(?:|[0-9a-f]{64})$",
+    )
+    asset_lock_digest: str = Field(
+        default="",
+        pattern=r"^(?:|[0-9a-f]{64})$",
+    )
+    manufacturer: str = Field(default="", max_length=160)
+    mpn: str = Field(default="", max_length=160)
+    lcsc: str = Field(default="", max_length=40)
+    supplier_evidence_ids: list[str] = Field(default_factory=list, max_length=32)
     release_ready: bool
     blockers: list[str] = Field(default_factory=list, max_length=32)
 
@@ -108,8 +122,15 @@ class ComponentClosureEntry(ContractModel):
         if mapped != pin_numbers or not mapped.issubset(pad_numbers):
             if self.release_ready:
                 raise ValueError("release-ready closure requires a complete pin-pad mapping")
-        if self.release_ready and (self.blockers or len(self.evidence) != 2):
+        evidence_kinds = {item.kind for item in self.evidence}
+        if self.release_ready and (
+            self.blockers or not {"symbol", "footprint"}.issubset(evidence_kinds)
+        ):
             raise ValueError("release-ready closure requires two current library sources")
+        if bool(self.prepared_record_id) is not bool(self.asset_lock_digest):
+            raise ValueError(
+                "prepared_record_id and asset_lock_digest must be supplied together"
+            )
         if self.release_ready is not (not self.blockers):
             raise ValueError("release_ready must agree with blockers")
         return self
@@ -118,11 +139,22 @@ class ComponentClosureEntry(ContractModel):
 class ComponentClosureManifest(ContractModel):
     """Versioned BOM closure receipt produced before schematic generation."""
 
-    schema_version: Literal["ratsnestpro.component-closure.v1"] = (
+    schema_version: Literal[
+        "ratsnestpro.component-closure.v1",
+        "ratsnestpro.component-closure.v2",
+    ] = (
         "ratsnestpro.component-closure.v1"
     )
     generated_at: datetime
     components: list[ComponentClosureEntry] = Field(min_length=1, max_length=1_000)
+    requirement_sha256: str = Field(
+        default="",
+        pattern=r"^(?:|[0-9a-f]{64})$",
+    )
+    prepared_manifest_sha256: str = Field(
+        default="",
+        pattern=r"^(?:|[0-9a-f]{64})$",
+    )
     release_ready: bool
     blockers: list[str] = Field(default_factory=list, max_length=4_000)
     manifest_sha256: str = Field(pattern=_SHA256_PATTERN)
@@ -138,12 +170,33 @@ class ComponentClosureManifest(ContractModel):
             raise ValueError("manifest blockers do not equal component blockers")
         if self.release_ready is not (not self.blockers):
             raise ValueError("manifest release_ready must agree with blockers")
-        expected_digest = _canonical_digest(
-            self.model_dump(mode="json", exclude={"manifest_sha256"})
-        )
+        payload = self.model_dump(mode="json", exclude={"manifest_sha256"})
+        if self.schema_version == "ratsnestpro.component-closure.v1":
+            # A v1 digest was computed before prepared-component references
+            # existed.  Reconstruct that exact projection so old checkpoint
+            # manifests remain readable after this additive contract change.
+            payload.pop("requirement_sha256", None)
+            payload.pop("prepared_manifest_sha256", None)
+            for component in payload.get("components", []):
+                for field in (
+                    "prepared_record_id",
+                    "asset_lock_digest",
+                    "manufacturer",
+                    "mpn",
+                    "lcsc",
+                    "supplier_evidence_ids",
+                ):
+                    component.pop(field, None)
+        expected_digest = _canonical_digest(payload)
         if self.manifest_sha256 != expected_digest:
             raise ValueError("component closure manifest digest is invalid")
         return self
+
+    @property
+    def locked_bom_sha256(self) -> str:
+        """The closure receipt itself is the immutable locked-BOM identity."""
+
+        return self.manifest_sha256
 
 
 class ClosureFreshnessReport(ContractModel):
@@ -155,7 +208,7 @@ class ClosureFreshnessReport(ContractModel):
 
 
 def _source_evidence(
-    kind: Literal["symbol", "footprint"],
+    kind: Literal["symbol", "footprint", "model_3d"],
     lib_id: str,
     path: Path | None,
     observed_at: datetime,
@@ -261,6 +314,12 @@ def build_component_closure_manifest(
                     footprint_path(part.footprint) if part.footprint else None,
                     timestamp,
                 ),
+                _source_evidence(
+                    "model_3d",
+                    part.model_3d_path,
+                    Path(part.model_3d_path) if part.model_3d_path else None,
+                    timestamp,
+                ),
             )
             if item is not None
         ]
@@ -268,6 +327,22 @@ def build_component_closure_manifest(
             blockers.append("symbol_evidence_missing")
         if not any(item.kind == "footprint" for item in evidence):
             blockers.append("footprint_evidence_missing")
+        if part.asset_lock_digest:
+            current_asset_lock = _canonical_digest({
+                "symbol_lib_id": part.symbol,
+                "footprint_lib_id": part.footprint,
+                "assets": [
+                    {
+                        "kind": item.kind,
+                        "asset_id": item.lib_id,
+                        "sha256": item.sha256,
+                        "size_bytes": item.size_bytes,
+                    }
+                    for item in evidence
+                ],
+            })
+            if current_asset_lock != part.asset_lock_digest:
+                blockers.append("prepared_asset_lock_mismatch")
         if resolution is not None and not resolution.release_ready:
             blockers.append(f"resolver:{resolution.reason_code}")
 
@@ -299,6 +374,12 @@ def build_component_closure_manifest(
             footprint_pad_numbers=pad_numbers,
             pin_pad_bindings=bindings,
             evidence=evidence,
+            prepared_record_id=part.prepared_record_id,
+            asset_lock_digest=part.asset_lock_digest,
+            manufacturer=part.manufacturer,
+            mpn=part.mpn,
+            lcsc=part.lcsc,
+            supplier_evidence_ids=part.supplier_evidence_ids,
             release_ready=not blockers,
             blockers=list(dict.fromkeys(blockers)),
         ))
@@ -309,9 +390,11 @@ def build_component_closure_manifest(
         for blocker in component.blockers
     ]
     payload = {
-        "schema_version": "ratsnestpro.component-closure.v1",
+        "schema_version": "ratsnestpro.component-closure.v2",
         "generated_at": timestamp.isoformat().replace("+00:00", "Z"),
         "components": [item.model_dump(mode="json") for item in entries],
+        "requirement_sha256": selection.requirement_sha256,
+        "prepared_manifest_sha256": selection.prepared_manifest_sha256,
         "release_ready": not blockers,
         "blockers": blockers,
     }

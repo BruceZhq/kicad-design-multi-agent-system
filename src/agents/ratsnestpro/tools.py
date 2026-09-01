@@ -342,6 +342,31 @@ class PipelineCheckpointRegressionError(RuntimeError):
     """Raised when a stale Activity tries to overwrite newer committed work."""
 
 
+def _checkpoint_content_digest(payload: dict[str, Any]) -> str:
+    canonical = {
+        key: value for key, value in payload.items() if key != "checkpoint_receipt"
+    }
+    return hashlib.sha256(
+        json.dumps(
+            canonical,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _checkpoint_artifact_digest(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload.get("intermediate_artifacts", {}),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _reject_same_revision_checkpoint_regression(
     path: Path,
     payload: dict[str, Any],
@@ -433,10 +458,94 @@ def _write_pipeline_state(
             else None
         ),
     }
+    current: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                current = loaded
+        except (OSError, ValueError, TypeError):
+            current = {}
+    current_receipt = current.get("checkpoint_receipt", {})
+    current_generation = (
+        int(current_receipt.get("generation", 0))
+        if isinstance(current_receipt, dict)
+        else 0
+    )
+    current_state_sha256 = (
+        str(current_receipt.get("state_sha256", ""))
+        if isinstance(current_receipt, dict)
+        else ""
+    ) or (_checkpoint_content_digest(current) if current else "")
+    if (
+        current
+        and state.checkpoint_state_sha256
+        and state.checkpoint_state_sha256 != current_state_sha256
+    ):
+        raise PipelineCheckpointRegressionError(
+            "pipeline checkpoint parent digest changed; refusing stale writer"
+        )
+    if (
+        state.checkpoint_generation
+        and state.checkpoint_generation != current_generation
+    ):
+        raise PipelineCheckpointRegressionError(
+            "pipeline checkpoint generation changed; refusing stale writer"
+        )
+
     _reject_same_revision_checkpoint_regression(path, payload)
+    current_steps = int(current.get("completed_steps", 0)) if current else 0
+    next_steps = int(payload["completed_steps"])
+    current_revision = int(current.get("revision", 0)) if current else 0
+    next_revision = int(payload["revision"])
+    transition_kind = "forward"
+    if current and next_steps < current_steps:
+        if next_revision <= current_revision:
+            raise PipelineCheckpointRegressionError(
+                "checkpoint rollback requires a newer state revision"
+            )
+        transition_kind = "rollback"
+    elif current and (
+        current.get("requirement_contract") != payload.get("requirement_contract")
+    ):
+        transition_kind = "invalidate"
+    generation = current_generation + 1
+    state_sha256 = _checkpoint_content_digest(payload)
+    replan_id = ""
+    if state.replan_history:
+        latest_replan = state.replan_history[-1]
+        if latest_replan.status == "scheduled":
+            replan_id = latest_replan.replan_id
+    payload["checkpoint_receipt"] = {
+        "schema_version": 1,
+        "generation": generation,
+        "state_revision": next_revision,
+        "committed_step_index": next_steps,
+        "next_step": (
+            list(PipelineStep)[next_steps].value
+            if next_steps < len(PipelineStep)
+            else ""
+        ),
+        "state_sha256": state_sha256,
+        "artifact_manifest_digest": _checkpoint_artifact_digest(payload),
+        "transition_kind": transition_kind,
+        "parent_state_sha256": current_state_sha256,
+        "replan_id": replan_id,
+    }
     temporary = path.with_suffix(f"{path.suffix}.tmp")
     temporary.write_text(_json(payload), encoding="utf-8")
     temporary.replace(path)
+    state.checkpoint_generation = generation
+    state.checkpoint_state_sha256 = state_sha256
+
+
+def _pipeline_checkpoint_receipt(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    receipt = payload.get("checkpoint_receipt") if isinstance(payload, dict) else None
+    return dict(receipt) if isinstance(receipt, dict) else {}
 
 
 def _checkpoint_pipeline_step(
@@ -613,13 +722,9 @@ def _record_ahe_event(
             and resolved_gap_closed
         ):
             safe_events.append(safe_event)
-        if strict_harness_observation:
+        if strict_harness_observation and isinstance(failure_payload, dict):
             failure = failure_payload
-            signature = (
-                str(failure.get("signature", ""))
-                if isinstance(failure, dict)
-                else ""
-            )
+            signature = str(failure.get("signature", ""))
             run_count, project_count = memory.harness_recurrence(signature)
             if signature and run_count >= 2 and project_count >= 2:
                 promoted = sanitize_ahe_event({
@@ -919,6 +1024,17 @@ def _load_pipeline_state(
             raise ValueError(
                 "consumed resume checkpoint no longer contains its verified upstream prefix"
             )
+    receipt = payload.get("checkpoint_receipt")
+    if isinstance(receipt, dict):
+        restored.checkpoint_generation = int(receipt.get("generation", 0) or 0)
+        restored.checkpoint_state_sha256 = str(
+            receipt.get("state_sha256", "")
+        )
+    else:
+        # Legacy checkpoints join the monotonic receipt chain on their next
+        # successful write without discarding their verified prefix.
+        restored.checkpoint_generation = 0
+        restored.checkpoint_state_sha256 = _checkpoint_content_digest(payload)
     return restored
 
 
@@ -2226,6 +2342,7 @@ def _run_pcb_pipeline_unlocked(
                     "requested_llm_mode": requested_mode.value,
                     "effective_llm_mode": mode.value,
                     "pipeline_state_path": str(state_path),
+                    "checkpoint_receipt": _pipeline_checkpoint_receipt(state_path),
                     "pipeline_result_path": "",
                     "artifacts": current_files,
                 }
@@ -2424,6 +2541,7 @@ def _run_pcb_pipeline_unlocked(
             ),
             "steps": steps,
             "pipeline_state_path": str(state_path),
+            "checkpoint_receipt": _pipeline_checkpoint_receipt(state_path),
             "pipeline_result_path": str(result_path),
             "artifacts": current_files,
         }

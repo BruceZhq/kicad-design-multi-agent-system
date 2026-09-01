@@ -199,6 +199,25 @@ class SelectedPart(ProposalModel):
     role: str = Field(default="", max_length=120)
     mpn: str = Field(default="", max_length=160)
     lcsc: str = Field(default="", max_length=40)
+    manufacturer: str = Field(default="", max_length=160)
+    # Optional upstream component-preparation receipt.  These fields are
+    # deterministic outputs, not evidence supplied by an LLM.  Keeping them on
+    # the selected part lets every downstream artifact refer to the same locked
+    # component without re-interpreting Parts prose.
+    prepared_record_id: str = Field(
+        default="",
+        pattern=r"^(?:|[0-9a-f]{64})$",
+    )
+    asset_lock_digest: str = Field(
+        default="",
+        pattern=r"^(?:|[0-9a-f]{64})$",
+    )
+    supplier_evidence_ids: list[str] = Field(default_factory=list, max_length=32)
+    model_3d_path: str = Field(default="", max_length=2_000)
+    model_3d_sha256: str = Field(
+        default="",
+        pattern=r"^(?:|[0-9a-f]{64})$",
+    )
     # Deterministic library-closure metadata. Proposal fields are never trusted:
     # ComponentResolutionService overwrites them before downstream use.
     requested_identity: str = Field(default="", max_length=200)
@@ -253,6 +272,15 @@ class SelectionPlan(ProposalModel):
 
     parts: list[SelectedPart] = Field(default_factory=list, max_length=1_000)
     component_closure_path: str = Field(default="", max_length=1_000)
+    prepared_manifest_path: str = Field(default="", max_length=1_000)
+    prepared_manifest_sha256: str = Field(
+        default="",
+        pattern=r"^(?:|[0-9a-f]{64})$",
+    )
+    requirement_sha256: str = Field(
+        default="",
+        pattern=r"^(?:|[0-9a-f]{64})$",
+    )
     rationale: str = Field(default="", max_length=10_000)
 
     @model_validator(mode="before")
@@ -665,7 +693,18 @@ class FabAudit(ProposalModel):
 class ManufactureResult(ProposalModel):
     """Manufacturing outputs + the DRC bottom-line summary."""
 
+    # ``bom_path`` is the legacy production/build BOM field.  Keep it as a
+    # bidirectional alias while new consumers use the explicit split below.
+    # Procurement readiness is intentionally independent from
+    # ``component_release_ready``: missing supplier evidence must not be
+    # reported as an electrical/design failure.
     bom_path: str = Field(default="", max_length=1_000)
+    production_bom_path: str = Field(default="", max_length=1_000)
+    procurement_bom_path: str = Field(default="", max_length=1_000)
+    production_bom_ready: bool = False
+    procurement_bom_ready: bool = False
+    production_bom_blockers: list[str] = Field(default_factory=list, max_length=4_000)
+    procurement_bom_blockers: list[str] = Field(default_factory=list, max_length=4_000)
     cpl_path: str = Field(default="", max_length=1_000)
     unresolved_manifest_path: str = Field(default="", max_length=1_000)
     component_release_ready: bool = False
@@ -682,3 +721,24 @@ class ManufactureResult(ProposalModel):
     drc_report_path: str = Field(default="", max_length=1_000)
     drc_violations: list[str] = Field(default_factory=list)
     drc_warnings: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _normalize_bom_paths(self) -> ManufactureResult:
+        if (
+            self.bom_path
+            and self.production_bom_path
+            and self.bom_path != self.production_bom_path
+        ):
+            raise ValueError("bom_path and production_bom_path must identify the same file")
+        production_path = self.production_bom_path or self.bom_path
+        object.__setattr__(self, "bom_path", production_path)
+        object.__setattr__(self, "production_bom_path", production_path)
+        if self.production_bom_ready and not production_path:
+            raise ValueError("production_bom_ready requires production_bom_path")
+        if self.procurement_bom_ready and not self.procurement_bom_path:
+            raise ValueError("procurement_bom_ready requires procurement_bom_path")
+        if self.production_bom_ready and self.production_bom_blockers:
+            raise ValueError("production-ready BOM cannot have production blockers")
+        if self.procurement_bom_ready and self.procurement_bom_blockers:
+            raise ValueError("procurement-ready BOM cannot have procurement blockers")
+        return self
