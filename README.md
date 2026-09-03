@@ -2,7 +2,7 @@
 
 面向真实 KiCad 工具链的多智能体硬件设计系统：用 LangGraph 编排专业 Agent，用 Temporal 耐久执行 17 步 EDA 流水线，并以确定性证据门禁约束交付结论。
 
-[在线 Demo](https://brucezhq.github.io/kicad-design-multi-agent-system/) · [GitHub 源码](https://github.com/BruceZhq/kicad-design-multi-agent-system) · [五案例审计报告](docs/ratsnestpro/test-results/five-case-e2e-general-fixes-2026-07-30.md)
+[在线 Demo](https://brucezhq.github.io/kicad-design-multi-agent-system/) · [GitHub 源码](https://github.com/BruceZhq/kicad-design-multi-agent-system)
 
 [项目与架构详解](docs/PROJECT_DESCRIPTION_ZH.md) · [源码导读](docs/PROJECT_CODE_GUIDE_ZH.md) · [Release-ready 收敛报告](evals/reports/release-ready-convergence-20260829.md) · [Agent 可观测与自动评测](docs/observability-and-evaluation.md)
 
@@ -58,14 +58,7 @@ flowchart TD
 | NE555 LED 闪烁板 | 17/17 | 0 | 0 | 0 | 6/6 nets，15/15 connections | 55 |
 | STM32F030 最小开发板 | 17/17 | 0 | 0 | 0 | 16/16 nets，50/50 connections | 66 |
 
-两例均为 `release_ready` 并登记可信 Manifest。当前只有 NE555 具有完整单/多 Agent 配对：单 Agent 为 `delivered_with_issues`，多 Agent 为 `release_ready`；这是一个 pair 的真实观察，不构成总体成功率结论。证据、耗时口径和 N/A 指标见 [Release-ready 收敛报告](evals/reports/release-ready-convergence-20260829.md)。
-
-### 当前能力边界
-
-- 当前回归证明了多智能体编排、长任务恢复、真实 KiCad 产物、确定性门禁，并在两个受支持黄金板型上形成严格发布正例；尚未证明对任意自由需求稳定生成可制造 PCB。
-- 五案例主要覆盖 MCU 控制板，不能外推到高速 DDR/PCIe、射频、柔性板或复杂电源设计。
-- 静态 Demo 托管真实 E2E 录像与证据边界说明；页面本身不在线调用模型或 EDA 工具，录像内容来自真实执行链路。
-- `ratsnestpro`、`ratsnest-*` 是为数据库迁移、内部 API 和工程兼容保留的稳定内部标识，不代表公开产品名称。
+两例均为 `release_ready` 并登记可信 Manifest。证据与耗时见 [Release-ready 收敛报告](evals/reports/release-ready-convergence-20260829.md)。
 
 ### 相比上游模板的主要新增模块
 
@@ -80,7 +73,7 @@ flowchart TD
 
 当前生产产品只注册一个 Agent：`ratsnestpro-multi-agent`。旧的通用聊天、独立 RAG/AG-UI、语音和多 Agent 示例代码已经从运行时移除，避免启动时加载无关图和错误地把普通聊天 Agent 当成硬件设计 Agent；正式 AG-UI 事件适配仍属于当前产品链路。
 
-## 当前能力边界
+## 核心能力
 
 - 支持自然语言硬件需求，包含不完整或非模板化描述。
 - 通过五类版本化 Capability Profile 约束任务边界，而不是用固定 BOM 模板回答。
@@ -440,8 +433,6 @@ Invoke-WebRequest http://localhost:3000/api/health
 Invoke-WebRequest http://localhost:8080/health/ready
 ```
 
-如果前端显示 `An unexpected server error occurred`，先查询 Java 日志中的 request ID。数据库结构问题必须通过下一条不可变 Flyway migration 修复，禁止手工修改历史 migration。V16 专门修复 V15 event-ingestion trigger 在 `FORCE ROW LEVEL SECURITY` 下以 migrator 身份初始化游标时被拒绝的问题；它没有关闭应用租户 RLS。
-
 ### 可选 vLLM
 
 普通开发不需要启动 GPU 服务。需要本地推理优化时，按 [vLLM 部署说明](deploy/inference/README.md) 单独启动 inference overlay，再在 `.env` 配置 small/large/embedding endpoint。continuous batching 与 prefix/KV cache 属于模型服务器能力，不应在每个 Agent 节点重复实现一套缓存。
@@ -472,7 +463,6 @@ docker compose --profile evolution up -d --build evolution_worker evolution_eval
 - `.env.example` 只包含空值或明确的开发占位值。
 - Java 是浏览器唯一业务后端；Python Runtime 不接受浏览器伪造的 `user_id`/`tenant_id`。
 - Keycloak 只负责身份认证与用户资料；业务权限由 Java Membership/RBAC/RLS 决定。
-- 本地 Compose 是开发环境，不代表已经完成跨区域 HA、真实 Metrics API、TLS 演练或 RPO/RTO 验收。
 
 ## 相关文档
 
@@ -484,13 +474,6 @@ docker compose --profile evolution up -d --build evolution_worker evolution_eval
 - [分布式 Runtime](docs/DISTRIBUTED_RUNTIME.md)
 - [Harness Canary、Flyway 与回滚手册](docs/HARNESS_CANARY_RUNBOOK.md)
 - [完整技术报告](docs/RATSNESTPRO_COMPLETE_PROJECT_TECHNICAL_REPORT_ZH.md)
-
-## 当前已知边界
-
-1. 本地 Compose 已具备组件连通配置，但真实 Kubernetes Metrics API、跨区域 failover/failback、TLS 重启恢复和 RPO/RTO 仍需要在目标集群演练。
-2. 交付工程是否满足全部硬件设计规则仍需 Reviewer 和人工硬件工程师确认；系统不会把 `delivered_with_issues` 冒充 `release_ready`。
-3. hashing embedding 是离线可用性后备，不等价于高质量语义模型；生产应配置经过中文/硬件语料 Eval 的 384 维 embedding endpoint。
-4. Governed Evolution 不会自动 merge、push 或 deploy；候选通过评测后仍需要人工批准、代码审查、构建不可变镜像和 Canary。
 
 ## License
 
