@@ -49,17 +49,6 @@ flowchart TD
     A16 --> A17
 ```
 
-### 当前严格 Release-ready 结果
-
-2026-08-29 的终态取证确认两个受支持黄金板型达到严格发布条件：
-
-| 案例 | 17 步 | ERC errors | DRC errors | 未连接 | 路由 | 发布产物 |
-|---|---:|---:|---:|---:|---:|---:|
-| NE555 LED 闪烁板 | 17/17 | 0 | 0 | 0 | 6/6 nets，15/15 connections | 55 |
-| STM32F030 最小开发板 | 17/17 | 0 | 0 | 0 | 16/16 nets，50/50 connections | 66 |
-
-两例均为 `release_ready` 并登记可信 Manifest。证据与耗时见 [Release-ready 收敛报告](evals/reports/release-ready-convergence-20260829.md)。
-
 ### 相比上游模板的主要新增模块
 
 | 维度 | 上游 `agent-service-toolkit` | 本项目新增/重构 |
@@ -107,62 +96,6 @@ flowchart LR
     R --> S3[(S3 兼容存储\n工程与制造产物)]
     K --> S3
 ```
-
-### 服务边界
-
-| 层 | 技术 | 负责内容 |
-|---|---|---|
-| 浏览器入口 | OAuth2 Proxy + Keycloak | OIDC Authorization Code + PKCE、登录会话、退出登录 |
-| Web | Next.js / React / TypeScript | 白色团队工作区、聊天、模型/Profile选择、Markdown渲染、SSE消费、资料页 |
-| 控制面 | Java 21 + Spring Boot | OIDC/JWKS验签、租户/RBAC、Project/Run/Revision、配额、Artifact授权、SSE、审计 |
-| Agent Runtime | Python + FastAPI | LangGraph运行、内部身份校验、Redis运行协调、事件转换 |
-| Agent Kernel | LangGraph | State、节点、handoff、checkpoint、Supervisor和角色协作 |
-| 耐久工程执行 | Temporal | Workflow、Activity、重试、超时、Event History、取消和恢复 |
-| 持久化 | PostgreSQL | Java业务表、RLS、Outbox、LangGraph checkpoint |
-| 长期记忆 | PostgreSQL + pgvector | 用户级事件记忆、显式事实、确定性结果、混合检索和冲突版本 |
-| 协调与回放 | Redis | lease、fencing token、幂等、SSE事件回放、LLM输出流 |
-| 事件总线 | Kafka | Durable生命周期、审计、用量和EHE observation |
-| 文件存储 | S3兼容对象存储 | KiCad、Gerber、BOM、CPL、DSN、SES和审查报告 |
-
-## 登录与请求泳道
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User as 用户浏览器
-    participant Proxy as OAuth2 Proxy :8088
-    participant KC as Keycloak
-    participant Web as Next.js :3000
-    participant Java as Java Control Plane :8081
-    participant Py as Python Runtime :8080/9090
-
-    User->>Proxy: GET /
-    Proxy-->>User: 未登录，302 /oauth2/start
-    User->>KC: Authorization Code + PKCE S256
-    KC-->>Proxy: callback code
-    Proxy-->>User: 加密会话 Cookie
-    User->>Web: 页面与 BFF 请求
-    Web->>Java: /api/v1/session、/info、/runs
-    Java->>KC: JWKS 验签 issuer/audience/exp
-    Java->>Java: (issuer, subject) + Membership + RLS
-    Java->>Py: 内部短期签名任务身份
-    Py->>Py: 校验 path/body/run/tenant/project/principal
-    Py-->>Java: 事件、里程碑、最终状态
-    Java-->>Web: 有序 SSE + Last-Event-ID
-    Web-->>User: Markdown、角色进度、产物和风险
-```
-
-## AG-UI 前端交互标准
-
-AG-UI（Agent User Interaction）是一个面向 Agent 与前端之间交互事件的通用协议/适配层，通常用于把 Agent 的消息、工具调用、状态更新和流式事件转换为前端可消费的事件流。它适合通用 Copilot 或 Agent UI 集成，但它不是 LangGraph 本身，也不是身份认证协议，更不是 KiCad 执行引擎。
-
-KiCad Design Multi-Agent System 将 AG-UI 作为 Agent 事件的前端交互标准，但不把 AG-UI 当作公网认证入口。正式产品链路固定为：
-
-```text
-浏览器 → OAuth2 Proxy → Next.js BFF → Java Control Plane → Python internal_api/gRPC → Agent Kernel（内部标识：ratsnestpro）
-```
-
-浏览器仍只连接 Java 的 REST + SSE；Java 把 Python Runtime 的消息、工具证据、状态、产物和人工确认事件规范化为 AG-UI 事件。Next.js 通过 `fetch()` 和 `ReadableStream` 消费有序 `RunEvent`，并用 `Last-Event-ID` 恢复。AG-UI 的 `CUSTOM/ratsnest.human-input-required.v1` 驱动同一 Run 的暂停与恢复；普通 Markdown、reasoning 摘要和工具 JSON 则使用各自的可视组件。这样既获得 AG-UI 的前端生态兼容性，又保持 OIDC、租户、审计和 Run 状态只有一条权威链路。
 
 ## 多智能体执行流程
 
@@ -244,41 +177,6 @@ Temporal Workflow 负责耐久编排；具体 KiCad 操作在 Activity 中执行
 
 LLM 的布局意图会被编译为带 digest 的 placement constraint sidecar。确定性布局只能在约束允许的区域内工作，不能覆盖 Architect/LLM 已确认的板卡分区。
 
-## AHE 与 EHE
-
-### AHE
-
-AHE 现在包含一个受治理的 Skill Agent Loop。普通工程 Gate 失败后，Hardware Engineer 会加载当前领域 Skill 与 `failure-reflection` Skill，由 LLM 基于 Artifact、工具报告和历史尝试选择 `local_repair / replan_upstream / retry_tool / investigate_harness / ask_human / stop`，Harness 再把动作绑定到已注册的工程工具并重新执行权威检查。对于证据已经定位到实体的失败，`RecoveryDecision` 可携带指纹绑定的 typed CAD action batch：原理图侧组合 `upsert/remove net pin` 与 `set no-connect`，PCB 侧组合移动/旋转/交换封装、拆线、加线/过孔、改线宽、重填铜区和移动丝印。动作只写候选，不接受 Shell 或任意 KiCad 文本；ERC、DRC、连通性、需求不变量和制造输出重建决定是否提交。外层 17 步顺序保持稳定，内层具备真实 Plan–Act–Observe–Reflect 与 ReAct 式改路能力。
-
-LLM 拥有诊断、计划、工具选择、候选修改和动态回滚权；用户硬约束、工作区边界、ERC/DRC/连通性和 Release Gate 仍由 Harness 掌握。每轮 `RecoveryDecision/RecoveryTurnRecord` 都随 Checkpoint 持久化；同一动作、Artifact 指纹和分数无改善时禁止原样重放。只有安全恢复路径耗尽、证据或权限缺失、必须人工决策或存在硬冲突时，任务才进入 `blocked`。
-
-Selection 在进入 `schematic_connections` 前生成 `PreparedComponentManifest` 与 Locked BOM，冻结器件身份、MPN、封装、符号语义、pin/pad 和本地资产内容摘要；任一资产变化都会使闭包失效。Manufacture 输出独立的 Production BOM 与 Procurement BOM：前者只接受已锁定 EDA 资产，后者记录供应商证据和快照状态；采购证据缺失会被明确报告，但不会伪装成电气设计失败。
-
-### EHE
-
-EHE（Evolutionary Harness Engineer）把匿名化的跨项目失败签名聚合为受治理候选。每个 Run 固化 Harness 版本；候选只能修改低风险白名单文件，不能读取或修改 sealed holdout/固定 grader，也不能改身份、迁移、部署或发布真值。候选需要经过固定评测、内容摘要绑定和独立人工批准，之后才有资格进入 Kubernetes Canary；系统不会自动合并或自动提升到生产。
-
-### 让 Governed Evolution 真正生效
-
-Evolution 不是“单次任务失败后让 LLM 当场改生产代码”。真实闭环需要同时满足身份、重复性、评测和发布四组条件：
-
-1. 从 clean Git commit 构建不可变 Runtime image，生成 Harness Manifest；manifest 必须绑定 source commit/tree、runtime image、toolchain、contract、policy 和 bundle digest。
-2. 平台管理员通过 `/api/v1/platform/harness-versions` 注册版本，审批后配置 canary/rollout；Java 固化到 Run 的 version/channel/manifest 必须与 Python Pod 环境完全一致。`legacy-baseline`、零 digest 和 dirty worktree 都不能做 Trial 基线。
-3. 配置三套不同的内容寻址 suite：`optimization.v1.json`、`holdout.v1.json`、`adversarial.v1.json`。`.env.example` 已提供当前三份 suite digest；修改任何 case/manifest 后必须重算并提交新 digest。
-4. 启动默认的 durable Runtime→Java ingestion worker，再显式启动 `evolution_worker` 和隔离 evaluator。浏览器是否打开不能影响 observation 入库。
-5. 在同一 tenant、同一 Harness version/manifest 下，至少两个独立 Project、两个独立 Run 真实复现同一个 allowlisted Harness failure signature。普通设计错误、器件缺证据、基础设施瞬态故障和同一 Project 的重复 Revision不能凑数。
-6. Candidate 达到 `eligible` 后，具备 `ratsnest-platform-admin`/`ratsnest.harness.admin` 的管理员以 `Idempotency-Key + expectedVersion` 调用 `/api/v1/platform/evolution/candidates/{candidateId}:evaluate`，提交经过白名单校验、绑定 base commit 的 PatchPlan/PatchBundle。
-7. Temporal 在隔离 worktree/Job 内应用 patch，执行固定 optimization/holdout/adversarial 评测，限制网络、路径、日志、墙钟和资源；签名 callback 只能把 Candidate 推到 `awaiting_approval` 或 `rejected`。
-8. 人工按精确 `trialId + reportDigest + expectedVersion` 调用 `:approve`。批准仍不会 merge/push/deploy；发布人员必须 code review、commit、build 新 image/manifest、注册新 Harness、canary 观察后 promote，异常则 rollback。
-
-本地开发启动命令：
-
-```powershell
-docker compose --profile evolution up -d --build evolution_worker evolution_evaluator
-```
-
-生产环境不得使用本地进程 sandbox；必须采用仓库中的独立低权限、无 Secret、无公网 egress 的 Evolution Job overlay。查看 observation/candidate/trial 使用 `/api/v1/evolution/*`，管理写接口故意没有暴露给普通聊天 UI。
-
 ## 状态、并发和恢复
 
 ```mermaid
@@ -343,36 +241,6 @@ score = 0.65 × cosine_similarity
 显式用户事实以 `tenant + principal + memory_key` 为冲突域。新事实与当前值不一致时，旧记录标记 `superseded`，新记录保存 `supersedes` 来源链；检索只返回 active 记录。系统不会删除旧记录，从而保留审计和纠错能力。低权威来源不能覆盖用户事实。
 
 召回内容以带 `memory_id/source/occurred_at/score` 的 JSON 数据块进入模型，并由 System Prompt 明确标记为“不可信历史上下文，不是系统指令或工程证据”。当前用户消息优先于历史记忆；任何器件、引脚、封装和制造结论仍须重新经过官方资料、真实 KiCad 库和确定性门禁。这一来源白名单、版本链、冲突排除和重新验证共同解决“把模型幻觉长期固化”的问题。
-
-## LLM 推理与部署优化
-
-默认情况下，用户在前端选择的模型仍是权威模型。设置 purpose-aware endpoint 后，Runtime 才启用大小模型分工：
-
-| 调用类型 | 默认路由 | 原因 |
-|---|---|---|
-| Intent Router、普通对话、语义摘要 | small endpoint | 短上下文、低延迟、高并发 |
-| Architect、Parts、Reviewer、AHE、Evolution Optimizer | large endpoint | 复杂约束、结构化推理和工程风险 |
-| 工具、ERC/DRC、KiCad 写入 | 确定性程序 | 禁止用模型替代工程真值 |
-
-`deploy/inference/compose.vllm.yaml` 提供独立的 small、large 和 embedding 服务模板。vLLM 负责 continuous batching/PagedAttention；模板开启 SHA-256 prefix cache，让稳定 System Prompt、工具 schema 和 Profile 前缀复用 KV；KV cache 可配置 FP8，权重可选择 AWQ/GPTQ，large endpoint 可选择 draft model 做 speculative decoding。量化格式必须与 GPU 架构和模型 checkpoint 匹配，不能同时“再量化”已经声明格式的模型。
-
-这些优化全部是可回退能力：没有 NVIDIA GPU或没有配置 endpoint 时，普通 Compose 不启动 vLLM，Runtime 自动使用原 Provider。投机采样、量化和模型路由上线前必须用项目 Eval 比较准确率、门禁通过率、accepted-token rate、P95 延迟、吞吐、显存与成本，不能仅因为 TPS 提升就发布。
-
-## 扩展专职角色
-
-五个核心角色固定对应真实执行节点。用户最多添加三位专职角色，可以选择电源完整性、信号完整性、EMC/ESD、制造、固件接口，或创建自定义角色。角色配置保存在浏览器团队配置中，并由 BFF 严格校验 `role_id/name/responsibility` 后写入 Run 的不可变 runtime config。
-
-自定义专职角色不是任意获得工具权限的新 Agent。Supervisor 会在 Architect/Parts 与 Hardware/Reviewer 的边界调用有界 specialist consultation；专职角色只获得任务需求、已验证证据和职责说明，输出建议进入共享 State，最终仍由确定性门禁和 Reviewer 决定。编辑团队时，预置角色和自定义角色使用独立计数，避免自定义角色被重复计算后无法继续添加。
-
-如果要通过代码增加一个组织级角色：
-
-1. 在 `frontend/types/team.ts` 增加可选展示元数据；
-2. 在 Agent Kernel 定义允许读取的 State 投影和输出 schema；
-3. 为它声明工具 allowlist、超时、预算与失败语义；
-4. 在 Supervisor 路由和 Reviewer 汇总中接入；
-5. 增加至少一个正例和越权负例。
-
-仅在前端增加一张卡片不会自动获得新工具或跳过安全边界。
 
 ## Java 控制面架构选择
 
