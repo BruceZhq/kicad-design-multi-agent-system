@@ -39,6 +39,13 @@ public class JdbcHarnessVersionRepository implements HarnessVersionRepository {
     }
 
     @Override
+    public Optional<HarnessVersion> findByManifest(String manifestDigest) {
+        return jdbcClient.sql("select harness_version_id from control_plane.harness_versions "
+                        + "where manifest_digest = :digest")
+                .param("digest", manifestDigest).query(String.class).optional().flatMap(this::find);
+    }
+
+    @Override
     public boolean insert(HarnessVersion value) {
         return jdbcClient.sql("""
                         insert into control_plane.harness_versions (

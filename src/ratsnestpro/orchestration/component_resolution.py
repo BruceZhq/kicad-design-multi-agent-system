@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -132,6 +133,96 @@ class SymbolOnlyPlaceholderSpec(_StrictModel):
         return self
 
 
+class UserReplacementApproval(_StrictModel):
+    """Content-addressed user decision authorizing one exact replacement.
+
+    This is an orchestration receipt, not a field the component-selection model
+    may mint.  It binds the decision to the original identity, the complete
+    candidate, its evidence set, and the pipeline revision in which it was
+    approved.
+    """
+
+    schema_version: Literal["ratsnestpro.replacement-approval.v1"] = (
+        "ratsnestpro.replacement-approval.v1"
+    )
+    decision_id: str = Field(min_length=1, max_length=160)
+    approved_by: Literal["user"] = "user"
+    target_ref: str = Field(
+        min_length=1,
+        max_length=32,
+        pattern=r"^[A-Za-z#][A-Za-z0-9_]*$",
+    )
+    requested_identity: str = Field(min_length=1, max_length=200)
+    candidate_symbol: str = Field(min_length=3, max_length=200)
+    candidate_value: str = Field(min_length=1, max_length=200)
+    candidate_footprint: str = Field(min_length=3, max_length=240)
+    evidence_ids: list[str] = Field(min_length=1, max_length=32)
+    revision: int = Field(ge=0)
+    approval_token: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    def verifies(self, secret: str | bytes) -> bool:
+        payload = self.model_dump(mode="json", exclude={"approval_token"})
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        key = secret.encode("utf-8") if isinstance(secret, str) else secret
+        if len(key) < 32:
+            return False
+        expected = hmac.new(
+            key,
+            b"ratsnestpro.replacement-approval.v1\0" + encoded,
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(self.approval_token, expected)
+
+
+def build_user_replacement_approval(
+    *,
+    decision_id: str,
+    target_ref: str,
+    requested_identity: str,
+    candidate_symbol: str,
+    candidate_value: str,
+    candidate_footprint: str,
+    evidence_ids: Sequence[str],
+    revision: int,
+    secret: str | bytes,
+) -> UserReplacementApproval:
+    payload = {
+        "schema_version": "ratsnestpro.replacement-approval.v1",
+        "decision_id": decision_id,
+        "approved_by": "user",
+        "target_ref": target_ref.upper(),
+        "requested_identity": requested_identity,
+        "candidate_symbol": candidate_symbol,
+        "candidate_value": candidate_value,
+        "candidate_footprint": candidate_footprint,
+        "evidence_ids": list(evidence_ids),
+        "revision": revision,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    key = secret.encode("utf-8") if isinstance(secret, str) else secret
+    if len(key) < 32:
+        raise ValueError("replacement approval secret must be at least 32 bytes")
+    token = hmac.new(
+        key,
+        b"ratsnestpro.replacement-approval.v1\0" + encoded,
+        hashlib.sha256,
+    ).hexdigest()
+    return UserReplacementApproval.model_validate({
+        **payload,
+        "approval_token": token,
+    })
+
+
 class GroundedReplacement(_StrictModel):
     """A replacement candidate whose identity decision was made upstream."""
 
@@ -146,6 +237,50 @@ class GroundedReplacement(_StrictModel):
     ]
     evidence_ids: list[str] = Field(default_factory=list, max_length=32)
     evidence_covers: set[EvidenceCoverage] = Field(default_factory=set)
+    user_approval: UserReplacementApproval | None = None
+
+
+def verified_replacements_by_ref(
+    payload: Mapping[str, GroundedReplacement | Mapping[str, Any]] | None,
+    *,
+    secret: str | bytes | None,
+) -> dict[str, GroundedReplacement]:
+    """Validate the internal approval receipt before it enters run state.
+
+    The transport is allowed to carry JSON, but JSON is never authority: each
+    exact candidate and target reference must be covered by the server-held
+    HMAC receipt.  Component resolution validates the same receipt again
+    against the selected part identity and current pipeline revision.
+    """
+
+    if not payload:
+        return {}
+    if secret is None or len(payload) > 64:
+        raise ValueError("trusted component replacement approvals are unavailable")
+    verified: dict[str, GroundedReplacement] = {}
+    for raw_ref, raw_replacement in payload.items():
+        ref = str(raw_ref).strip().upper()
+        replacement = (
+            raw_replacement
+            if isinstance(raw_replacement, GroundedReplacement)
+            else GroundedReplacement.model_validate(raw_replacement)
+        )
+        approval = replacement.user_approval
+        if (
+            not ref
+            or approval is None
+            or approval.target_ref != ref
+            or not approval.verifies(secret)
+            or approval.candidate_symbol != replacement.symbol
+            or approval.candidate_value != replacement.value
+            or approval.candidate_footprint != replacement.footprint
+            or approval.evidence_ids != replacement.evidence_ids
+        ):
+            raise ValueError(f"component replacement approval is invalid for {ref or '<empty>'}")
+        if ref in verified:
+            raise ValueError(f"component replacement approval is duplicated for {ref}")
+        verified[ref] = replacement
+    return verified
 
 
 class ResolutionDiagnostic(_StrictModel):
@@ -1507,18 +1642,46 @@ class ComponentResolutionService:
     def _replacement_allowed(
         replacement: GroundedReplacement,
         *,
+        target_ref: str,
         requested_identity: str,
         fixed_identity: bool,
         allow_equivalent: bool,
+        revision: int,
+        approval_secret: str | bytes | None,
     ) -> bool:
+        approval = replacement.user_approval
+        if approval is None or approval_secret is None or not approval.verifies(
+            approval_secret
+        ) or (
+            approval.target_ref.casefold() != target_ref.casefold()
+            or approval.requested_identity.casefold() != requested_identity.casefold()
+            or approval.candidate_symbol != replacement.symbol
+            or approval.candidate_value != replacement.value
+            or approval.candidate_footprint != replacement.footprint
+            or approval.evidence_ids != replacement.evidence_ids
+            or approval.revision != revision
+        ):
+            return False
         if fixed_identity:
             actual_relation = grounding.symbol_identity_match_kind(
                 requested_identity,
                 replacement.value,
             )
-            return (
+            exact_match = (
                 replacement.identity_relation in {"exact", "kicad_wildcard"}
                 and actual_relation in {"exact", "kicad_wildcard"}
+            )
+            if exact_match:
+                return True
+            # A target-bound, revision-bound user receipt is the explicit
+            # amendment required to replace a previously fixed identity. It
+            # still cannot waive the complete equivalence evidence contract.
+            return (
+                replacement.identity_relation == "equivalent_validated"
+                and bool(replacement.evidence_ids)
+                and _REQUIRED_EQUIVALENCE_EVIDENCE.issubset(
+                    replacement.evidence_covers
+                )
             )
         if replacement.identity_relation in {
             "exact",
@@ -1546,6 +1709,8 @@ class ComponentResolutionService:
         replacement: GroundedReplacement | Mapping[str, Any] | None = None,
         fixed_identity: bool = False,
         allow_equivalent: bool = False,
+        approval_revision: int = 0,
+        replacement_approval_secret: str | bytes | None = None,
         allow_unverified_placeholder: bool = False,
         mutate: bool = True,
     ) -> ComponentResolution:
@@ -1753,9 +1918,12 @@ class ComponentResolutionService:
             else:
                 if self._replacement_allowed(
                     candidate,
+                    target_ref=part.ref,
                     requested_identity=part.requested_identity,
                     fixed_identity=identity_is_hard,
                     allow_equivalent=allow_equivalent,
+                    revision=approval_revision,
+                    approval_secret=replacement_approval_secret,
                 ):
                     proposed = part.model_copy(update={
                         "symbol": candidate.symbol,
@@ -1829,6 +1997,8 @@ class ComponentResolutionService:
         | None = None,
         fixed_identity_refs: set[str] | None = None,
         allow_equivalent_refs: set[str] | None = None,
+        approval_revision: int = 0,
+        replacement_approval_secret: str | bytes | None = None,
         trusted_requested_identities: Mapping[str, str] | None = None,
         trusted_identity_modes: Mapping[str, IdentityMode] | None = None,
         trusted_identity_provenance: Mapping[str, str] | None = None,
@@ -1878,6 +2048,8 @@ class ComponentResolutionService:
                 replacement=replacements.get(part.ref.upper()),
                 fixed_identity=part.ref.upper() in fixed,
                 allow_equivalent=part.ref.upper() in equivalent,
+                approval_revision=approval_revision,
+                replacement_approval_secret=replacement_approval_secret,
                 allow_unverified_placeholder=allow_unverified_placeholders,
                 mutate=mutate,
             )
@@ -1889,6 +2061,9 @@ __all__ = [
     "ComponentResolution",
     "ComponentResolutionService",
     "GroundedReplacement",
+    "UserReplacementApproval",
+    "build_user_replacement_approval",
+    "verified_replacements_by_ref",
     "IdentityMode",
     "LibraryClosureResult",
     "ResolutionDiagnostic",

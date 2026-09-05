@@ -48,6 +48,56 @@ public final class HttpEvolutionTrialRuntime implements EvolutionTrialRuntime {
     }
 
     @Override
+    public ProposalResult propose(
+            UUID tenantId,
+            String proposalId,
+            Map<String, Object> proposalInput) {
+        String candidateId = requiredText(requiredObject(proposalInput, "candidate"), "candidateId");
+        String path = "/internal/v1/evolution/candidates/" + candidateId + ":propose";
+        byte[] body = json(proposalInput);
+        RuntimeIdentity identity = new RuntimeIdentity(
+                "evolution-control-plane", tenantId.toString(), SYSTEM_PROJECT_ID);
+        HttpRequest request = HttpRequest.newBuilder(baseUri.resolve(path))
+                .timeout(TIMEOUT)
+                .header("Accept", "application/json")
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + signer.token(
+                        "POST", path, body, identity, proposalId))
+                .header("X-Request-ID", proposalId)
+                .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                .build();
+        try {
+            HttpResponse<byte[]> response = httpClient.send(
+                    request, HttpResponse.BodyHandlers.ofByteArray());
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                throw unavailable("Agent Runtime rejected the governed patch proposal");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> value = objectMapper.readValue(response.body(), Map.class);
+            Map<String, Object> proposal = requiredObject(value, "proposal");
+            ProposalResult result = new ProposalResult(
+                    requiredText(value, "proposalId"),
+                    requiredText(value, "candidateId"),
+                    requiredText(value, "baseManifestDigest"),
+                    requiredText(value, "proposalDigest"),
+                    requiredObject(proposal, "plan"),
+                    requiredObject(proposal, "bundle"));
+            if (!proposalId.equals(result.proposalId())
+                    || !candidateId.equals(result.candidateId())) {
+                throw unavailable("Agent Runtime returned a mismatched governed proposal");
+            }
+            return result;
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw unavailable("Agent Runtime proposal request was interrupted");
+        } catch (ApiException exception) {
+            throw exception;
+        } catch (Exception exception) {
+            throw unavailable("Agent Runtime proposal endpoint is unavailable");
+        }
+    }
+
+    @Override
     public StartResult start(UUID tenantId, EvolutionTrial trial, Map<String, Object> trialInput) {
         String trialId = trial.trialId().toString();
         String path = "/internal/v1/evolution/trials/" + trialId + ":start";
@@ -124,6 +174,15 @@ public final class HttpEvolutionTrialRuntime implements EvolutionTrialRuntime {
             throw unavailable("Agent Runtime returned an invalid evolution response");
         }
         return text;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> requiredObject(Map<String, Object> value, String name) {
+        Object item = value.get(name);
+        if (!(item instanceof Map<?, ?>)) {
+            throw unavailable("Agent Runtime returned an invalid evolution response");
+        }
+        return (Map<String, Object>) item;
     }
 
     private ApiException unavailable(String detail) {

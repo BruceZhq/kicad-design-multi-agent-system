@@ -42,6 +42,11 @@ spec:
             - { name: RATSNEST_EVOLUTION_GIT_MIRROR_CLAIM, value: ratsnest-evolution-git-mirror }
             - name: RATSNEST_EVOLUTION_SANDBOX_IMAGE
               value: ghcr.io/ratsnestteam/ratsnest-evolution-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+            - name: RATSNEST_EVOLUTION_TOOLCHAIN_DIGEST
+              valueFrom:
+                secretKeyRef:
+                  name: ratsnest-evolution-toolchain
+                  key: digest
             - { name: PYTHONDONTWRITEBYTECODE, value: "1" }
             - { name: PYTHONUNBUFFERED, value: "1" }
             - { name: HOME, value: /tmp/evolution-home }

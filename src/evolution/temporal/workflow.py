@@ -90,7 +90,7 @@ class HarnessEvolutionWorkflow:
                 command,
                 result_type=dict,
                 task_queue=EVOLUTION_SANDBOX_TASK_QUEUE,
-                start_to_close_timeout=timedelta(minutes=10),
+                start_to_close_timeout=timedelta(minutes=20),
                 retry_policy=self._retry_policy(),
             )
         except ActivityError:
@@ -128,6 +128,22 @@ class HarnessEvolutionWorkflow:
             return {
                 "status": "rejected",
                 "reason": "candidate did not pass fixed sandbox evaluation",
+                "candidate_report": candidate_report,
+                "authoritative_result": authoritative_result,
+                "callback_delivery": callback_delivery,
+                "automatic_merge": False,
+                "automatic_push": False,
+                "automatic_deploy": False,
+            }
+
+        # Java owns the externally authenticated approval/rollout state machine.
+        # Keep the patch marker so histories that already reached the legacy
+        # signal wait can still replay with their original command sequence.
+        if workflow.patched("external-approval-owned-by-control-plane-v1"):
+            self._update(status="awaiting_external_approval", phase="complete")
+            return {
+                "status": "awaiting_external_approval",
+                "reason": "evaluation proof delivered; control-plane approval required",
                 "candidate_report": candidate_report,
                 "authoritative_result": authoritative_result,
                 "callback_delivery": callback_delivery,

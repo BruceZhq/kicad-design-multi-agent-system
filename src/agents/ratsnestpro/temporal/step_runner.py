@@ -25,6 +25,14 @@ _GOVERNANCE_ENV_FIELDS = {
 
 
 def _install_governance_environment(command: dict[str, Any]) -> None:
+    # A signed command authenticates its owner, not the code loaded in this
+    # Worker. Refuse wrong-version task queues before installing run metadata.
+    for field, name in (("harness_version_id", "RATSNEST_HARNESS_VERSION_ID"),
+                        ("harness_manifest_digest", "RATSNEST_HARNESS_MANIFEST_DIGEST")):
+        deployed = os.environ.get(name, "").strip()
+        claimed = str(command.get(field, "")).strip()
+        if deployed and claimed and deployed != claimed:
+            raise ValueError(f"Worker deployment identity mismatch: {field}; use the version-pinned task queue")
     for name in (GOVERNANCE_SCOPE_ENV, *_GOVERNANCE_ENV_FIELDS.values()):
         os.environ.pop(name, None)
     token = str(command.get("governance_scope_token", "")).strip()
@@ -84,6 +92,11 @@ def main() -> int:
             ahe_budget=(
                 dict(command["ahe_budget"])
                 if isinstance(command.get("ahe_budget"), dict)
+                else None
+            ),
+            approved_component_replacements=(
+                dict(command["approved_component_replacements"])
+                if isinstance(command.get("approved_component_replacements"), dict)
                 else None
             ),
             resume_from_step=(

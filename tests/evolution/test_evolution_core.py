@@ -38,6 +38,7 @@ from evolution.optimizer import (
     optimizer_prompt,
     validate_patch_plan,
 )
+from evolution.proposal_service import _pinned_context
 
 ROOT = Path(__file__).resolve().parents[2]
 DIGEST = "a" * 64
@@ -385,6 +386,24 @@ def test_optimizer_prompt_cannot_receive_sealed_case_content() -> None:
     )
     with pytest.raises(ValueError, match="denied path"):
         optimizer_prompt(poisoned, policy)
+
+
+def test_proposal_service_rejects_sealed_context_before_reading_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = load_governance_policy(ROOT / "config" / "harness" / "invariants.v1.json")
+
+    def forbidden_read(*_args, **_kwargs):
+        raise AssertionError("sealed source was read before policy validation")
+
+    monkeypatch.setattr("evolution.proposal_service._git_object", forbidden_read)
+    with pytest.raises(ValueError, match="denied path"):
+        _pinned_context(
+            ROOT,
+            "a" * 40,
+            ["evals/sealed/regression/holdout.v1.json"],
+            policy,
+        )
 
 
 def test_json_schema_tracks_python_contract_aliases() -> None:

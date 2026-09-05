@@ -185,6 +185,7 @@ async def dispatch_hardware_workflow(
     model_type: str | None,
     attempt: int,
     ahe_budget: dict[str, int] | None = None,
+    approved_component_replacements: dict[str, dict[str, Any]] | None = None,
     tenant_scope: str = "",
     project_scope: str = "",
     run_scope: str = "",
@@ -208,6 +209,15 @@ async def dispatch_hardware_workflow(
                 "model_name": model_name,
                 "model_type": model_type,
                 "ahe_budget": ahe_budget or {},
+                **(
+                    {
+                        "approved_component_replacements": (
+                            approved_component_replacements
+                        )
+                    }
+                    if approved_component_replacements
+                    else {}
+                ),
                 **(
                     {
                         "resume_from_step": resume_from_step,
@@ -256,6 +266,10 @@ async def dispatch_hardware_workflow(
         "heartbeat_seconds": settings.RATSNESTPRO_TEMPORAL_HEARTBEAT_SECONDS,
         "workflow_timeout_seconds": workflow_timeout_seconds,
     }
+    if approved_component_replacements:
+        workflow_input["approved_component_replacements"] = (
+            approved_component_replacements
+        )
     if resume_from_step:
         workflow_input["resume_from_step"] = resume_from_step
     expected_identity = hardware_workflow_identity(workflow_input)

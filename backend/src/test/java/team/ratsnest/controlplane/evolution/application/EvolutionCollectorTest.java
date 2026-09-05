@@ -154,6 +154,33 @@ class EvolutionCollectorTest {
     }
 
     @Test
+    void acceptsTheMissingMutationCapabilityReasonUsedByThePythonHarness() {
+        EvolutionRepository repository = mock(EvolutionRepository.class);
+        TenantContext tenants = mock(TenantContext.class);
+        EvolutionCollector collector = collector(repository, tenants);
+        Run run = run();
+        when(repository.insertObservation(eq(run.tenantId()), any(), any())).thenReturn(true);
+        when(repository.findActiveGaps(
+                run.tenantId(), run.harnessVersionId(), run.harnessManifestDigest(), SIGNATURE))
+                .thenReturn(List.of(
+                        observation("1".repeat(64), "capability_gap", "project-a", "run-a"),
+                        observation("2".repeat(64), "capability_gap", "project-b", "run-b")));
+
+        Map<String, Object> payload = governedEvent(
+                "capability_gap", "capability_gap", "capability_gap",
+                "cross_run_reproducible_harness_defect", 2, 2);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> failure = new LinkedHashMap<>(
+                (Map<String, Object>) payload.get("failure"));
+        failure.put("reason_code", "missing_mutation_capability");
+        payload.put("failure", failure);
+
+        collector.collect(run, runtimeEvent(9, payload));
+
+        verify(repository).upsertAggregate(eq(run.tenantId()), any(EvolutionCandidate.class));
+    }
+
+    @Test
     void candidateIdentityPartitionsTheSameManifestAcrossHarnessVersions() {
         EvolutionRepository repository = mock(EvolutionRepository.class);
         TenantContext tenants = mock(TenantContext.class);

@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.0",
+  "suiteId": "ratsnest-release-adversarial-v1",
+  "suiteKind": "adversarial",
+  "sealed": true,
+  "suiteDigest": "6c5db7fb821cb26217276f8a16373595cdf08e9c9f37bc8803537889ac7dbc8f",
+  "cases": [
+    {
+      "caseId": "adversarial.forged-release",
+      "stage": "release_gate",
+      "source": "evals/sealed/regression/test_adversarial.py",
+      "sourceSha256": "fa5fce49f5f6a0f747b4bb177d61e7c1dc5682ba03a961fe22a5b268e5cf0bb3",
+      "nodeId": "evals/sealed/regression/test_adversarial.py::test_claimed_release_ready_cannot_replace_deterministic_proof",
+      "timeoutSeconds": 60
+    },
+    {
+      "caseId": "adversarial.artifact-path-escape",
+      "stage": "artifact_gate",
+      "source": "evals/sealed/regression/test_adversarial.py",
+      "sourceSha256": "fa5fce49f5f6a0f747b4bb177d61e7c1dc5682ba03a961fe22a5b268e5cf0bb3",
+      "nodeId": "evals/sealed/regression/test_adversarial.py::test_artifact_path_escape_cannot_supply_pipeline_evidence",
+      "timeoutSeconds": 60
+    }
+  ]
+}

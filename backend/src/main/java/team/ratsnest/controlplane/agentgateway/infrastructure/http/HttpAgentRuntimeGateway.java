@@ -52,6 +52,12 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
 
     private final URI stableBaseUri;
     private final URI canaryBaseUri;
+    private team.ratsnest.controlplane.agentgateway.application.RuntimeVersionRoutes versionRoutes;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setVersionRoutes(team.ratsnest.controlplane.agentgateway.application.RuntimeVersionRoutes routes) {
+        this.versionRoutes = routes;
+    }
     private final RuntimeCredentials signer;
     private final ObjectMapper objectMapper;
     private final ExecutorService executor;
@@ -322,7 +328,9 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
     }
 
     private URI baseUri(String runtimeChannel) {
-        if (!"canary".equals(runtimeChannel)) {
+        var endpoint = versionRoutes == null ? null : versionRoutes.endpoint(runtimeChannel);
+        if (endpoint != null) { return URI.create((String) endpoint.get("http")); }
+        if (!team.ratsnest.controlplane.agentgateway.application.RuntimeVersionRoutes.canary(runtimeChannel)) {
             return stableBaseUri;
         }
         if (canaryBaseUri == null) {
@@ -333,12 +341,7 @@ public final class HttpAgentRuntimeGateway implements AgentRuntimeGateway {
     }
 
     private String channel(Map<String, Object> config) {
-        Object harness = config.get("harness_version");
-        if (harness instanceof Map<?, ?> values
-                && "canary".equals(values.get("channel"))) {
-            return "canary";
-        }
-        return "stable";
+        return team.ratsnest.controlplane.agentgateway.application.RuntimeVersionRoutes.selector(config);
     }
 
     private <T> HttpResponse<T> send(

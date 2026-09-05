@@ -36,6 +36,7 @@ _DEFAULT_BATCH_TARGET_PINS = 96
 _DEFAULT_DIRECT_PIN_LIMIT = 180
 _DEFAULT_UNKNOWN_SYMBOL_PIN_ESTIMATE = 8
 _INTEGRATION_BLOCK = "integration"
+_CONNECTION_SYNTHESIS_SCHEMA_VERSION = 2
 
 _TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 _NATURAL_REF_RE = re.compile(r"(\d+)")
@@ -112,7 +113,10 @@ class ConnectionOutputEstimate(ContractModel):
 class ConnectionSynthesisReport(ContractModel):
     """Compact durable audit of one connection-synthesis result."""
 
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: int = Field(
+        default=_CONNECTION_SYNTHESIS_SCHEMA_VERSION,
+        ge=1,
+    )
     mode: Literal["direct", "batched"]
     estimate: ConnectionOutputEstimate
     planned_batches: int = Field(default=0, ge=0)
@@ -314,7 +318,10 @@ class ConnectionBatchCheckpoint(ContractModel):
 class ConnectionSynthesisCheckpoint(ContractModel):
     """Crash-safe state for one in-flight block-wise synthesis."""
 
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: int = Field(
+        default=_CONNECTION_SYNTHESIS_SCHEMA_VERSION,
+        ge=1,
+    )
     topology_fingerprint: str = Field(min_length=1, max_length=64)
     selection_fingerprint: str = Field(min_length=1, max_length=64)
     plan: ConnectionBatchPlan
@@ -409,7 +416,36 @@ def _canonical_hash(value: object, length: int = 20) -> str:
 
 
 def topology_fingerprint(topology: TopologyPlan) -> str:
-    """Fingerprint electrical topology, preserving its intentional block order."""
+    """Fingerprint connectivity-relevant topology in its intentional order.
+
+    Typed ownership and implementation references affect which physical part
+    owns a connection.  Omitting them allowed an in-flight synthesis draft to
+    survive a deterministic ownership migration and reuse stale connectivity.
+    """
+
+    return _canonical_hash({
+        "contract_version": topology.schema_version,
+        "blocks": [
+            {
+                "name": block.name,
+                "kind": block.kind,
+                "description": block.description,
+                "implementation_kind": block.implementation_kind,
+                "implementation_refs": block.implementation_refs,
+            }
+            for block in topology.blocks
+        ],
+        "rails": topology.rails,
+        "ground_net": topology.ground_net,
+        "ground_domains": topology.ground_domains,
+        "ground_ties": [
+            tie.model_dump(mode="json") for tie in topology.ground_ties
+        ],
+    })
+
+
+def _legacy_topology_fingerprint(topology: TopologyPlan) -> str:
+    """Reproduce the schema-v1 topology identity for safe checkpoint upgrades."""
 
     return _canonical_hash({
         "blocks": [
@@ -640,23 +676,62 @@ def assign_parts_to_topology_blocks(
     *,
     explicit_assignments: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Assign each part to one block only when the semantic winner is unique."""
+    """Assign each part, honoring typed topology ownership before semantics."""
 
     exact_blocks = {block.name.casefold(): block.name for block in topology.blocks}
+    selected_refs = {
+        part.ref.casefold(): part.ref for part in selection.parts
+    }
     explicit = {
         ref.casefold(): value
         for ref, value in (explicit_assignments or {}).items()
     }
+    unknown_explicit = sorted(set(explicit) - set(selected_refs))
+    if unknown_explicit:
+        raise ValueError(
+            "explicit assignments reference absent selected parts: "
+            f"{unknown_explicit}"
+        )
+
+    typed_owners: dict[str, str] = {}
+    for block in topology.blocks:
+        if block.implementation_kind != "component":
+            continue
+        for raw_ref in block.implementation_refs:
+            ref = raw_ref.strip().casefold()
+            if ref not in selected_refs:
+                raise ValueError(
+                    f"topology block {block.name!r} owns absent selected part "
+                    f"{raw_ref!r}"
+                )
+            previous = typed_owners.get(ref)
+            if previous is not None and previous != block.name:
+                raise ValueError(
+                    f"selected part {selected_refs[ref]} has conflicting typed "
+                    f"owners {previous!r} and {block.name!r}"
+                )
+            typed_owners[ref] = block.name
+
     assignments: dict[str, str] = {}
     for part in sorted(selection.parts, key=lambda item: _natural_ref_key(item.ref)):
-        requested = explicit.get(part.ref.casefold(), "")
+        ref_key = part.ref.casefold()
+        typed_owner = typed_owners.get(ref_key, "")
+        requested = explicit.get(ref_key, "")
         if requested:
             block_name = exact_blocks.get(requested.casefold())
             if block_name is None:
                 raise ValueError(
                     f"explicit topology block {requested!r} for {part.ref} does not exist"
                 )
-            assignments[part.ref] = block_name
+            if typed_owner and typed_owner != block_name:
+                raise ValueError(
+                    f"explicit assignment for {part.ref} conflicts with typed "
+                    f"owner {typed_owner!r}"
+                )
+            assignments[part.ref] = typed_owner or block_name
+            continue
+        if typed_owner:
+            assignments[part.ref] = typed_owner
             continue
         scored = [
             (_block_score(part, block), index, block.name)
@@ -1016,9 +1091,75 @@ def checkpoint_matches_inputs(
     except ValidationError:
         return False
     return (
-        validated.topology_fingerprint == topology_fingerprint(topology)
+        validated.schema_version == _CONNECTION_SYNTHESIS_SCHEMA_VERSION
+        and validated.topology_fingerprint == topology_fingerprint(topology)
         and validated.selection_fingerprint == selection_fingerprint(selection)
     )
+
+
+def prepare_resumable_connection_checkpoint(
+    checkpoint: ConnectionSynthesisCheckpoint,
+    topology: TopologyPlan,
+    selection: SelectionPlan,
+) -> ConnectionSynthesisCheckpoint | None:
+    """Return a current, input-matched checkpoint, upgrading v1 when lossless.
+
+    Version-1 fingerprints omitted typed ownership and ground contracts. Reuse
+    is therefore permitted only when the old fingerprint matches, the topology
+    still has one ground domain, and deterministic re-planning produces the
+    identical batch partition. Any semantic change fails closed and restarts
+    only connection synthesis, preserving the verified upstream prefix.
+    """
+
+    try:
+        validated = ConnectionSynthesisCheckpoint.model_validate(
+            checkpoint.model_dump(mode="json")
+        )
+    except ValidationError:
+        return None
+    if checkpoint_matches_inputs(validated, topology, selection):
+        return validated
+    if validated.schema_version != 1:
+        return None
+    current_selection_hash = selection_fingerprint(selection)
+    if (
+        validated.topology_fingerprint != _legacy_topology_fingerprint(topology)
+        or validated.selection_fingerprint != current_selection_hash
+    ):
+        return None
+    declared_domains = {item.casefold() for item in topology.ground_domains}
+    if topology.ground_ties or declared_domains != {topology.ground_net.casefold()}:
+        return None
+    try:
+        current_plan = plan_connection_batches(
+            topology,
+            selection,
+            target_pin_count=validated.plan.target_pin_count,
+            max_batches=validated.plan.max_batches,
+            shared_refs=validated.plan.shared_refs,
+        )
+    except (TypeError, ValueError):
+        return None
+
+    excluded = {
+        "topology_fingerprint",
+        "selection_fingerprint",
+        "plan_fingerprint",
+    }
+    if validated.plan.model_dump(mode="json", exclude=excluded) != (
+        current_plan.model_dump(mode="json", exclude=excluded)
+    ):
+        return None
+    try:
+        return ConnectionSynthesisCheckpoint.model_validate({
+            **validated.model_dump(mode="json"),
+            "schema_version": _CONNECTION_SYNTHESIS_SCHEMA_VERSION,
+            "topology_fingerprint": current_plan.topology_fingerprint,
+            "selection_fingerprint": current_plan.selection_fingerprint,
+            "plan": current_plan.model_dump(mode="json"),
+        })
+    except ValidationError:
+        return None
 
 
 def _resolve_physical_pin(part: SelectedPart, logical: str) -> str:
@@ -1465,6 +1606,7 @@ __all__ = [
     "merge_connection_delta",
     "new_connection_checkpoint",
     "plan_connection_batches",
+    "prepare_resumable_connection_checkpoint",
     "selection_fingerprint",
     "topology_fingerprint",
 ]

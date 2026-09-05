@@ -80,6 +80,8 @@ def materialize_pinmapped(
     no_connect_pins: list[dict[str, Any]] | None = None,
     supply_nets: list[str] | None = None,
     ground_net: str = "GND",
+    ground_nets: list[str] | None = None,
+    label_nets: list[str] | None = None,
 ) -> SchematicDoc:
     """Build a SchematicDoc from pipeline artifacts, embedding real pin geometry.
 
@@ -90,11 +92,11 @@ def materialize_pinmapped(
     component placement transformed by the symbol's real pin geometry
     (``symbols.symbol_pins`` + ``transform_pin``) — rather than an arbitrary
     grid. This makes the sheet geometrically faithful and lets the label
-    netlist round-trip to the intended connectivity. When symbol geometry is
-    unavailable, labels fall back to a per-net grid so name-based connectivity
-    still round-trips.
+    netlist round-trip to the intended connectivity. Missing pin geometry is
+    an explicit error, never an unconnected label on a fabricated grid.
     """
     supply_nets = supply_nets or []
+    ground_nets = ground_nets or [ground_net]
     no_connect_pins = no_connect_pins or []
     doc = SchematicDoc.new()
 
@@ -156,8 +158,20 @@ def materialize_pinmapped(
         )
 
     ref_symbol = {str(c["ref"]): str(c["symbol"]) for c in components}
-    fallback_x, fallback_y, step = 200.0, 10.0, 2.54
-    counter = 0
+    coordinates: dict[str, list[tuple[float, float]]] = {}
+    all_pins = []
+    bodies = []
+    for ref, symbol in ref_symbol.items():
+        points = [_pin_coord(ref, str(pin["number"]), placements, ref_symbol, pins_cache)
+                  for pin in (pins_cache.get(symbol) or [])]
+        points = [point for point in points if point is not None]
+        all_pins.extend(points)
+        if points:
+            # Pin endpoints enclose the symbol; keep wiring out of its interior.
+            x1, x2 = min(p[0] for p in points), max(p[0] for p in points)
+            y1, y2 = min(p[1] for p in points), max(p[1] for p in points)
+            if x2-x1 > 0.2 and y2-y1 > 0.2:
+                bodies.append((x1+0.1, y1+0.1, x2-0.1, y2-0.1))
     connected_pins: set[str] = set()
     first_net_coord: dict[str, tuple[float, float]] = {}
     power_output_nets: set[str] = set()
@@ -169,8 +183,8 @@ def materialize_pinmapped(
             connected_pins.add(f"{ref}:{number}")
             coord = _pin_coord(ref, number, placements, ref_symbol, pins_cache)
             if coord is None:
-                coord = (fallback_x + step * (counter % 40), fallback_y + step * (counter // 40))
-                counter += 1
+                raise ValueError(f"unresolved schematic pin geometry: {ref}:{number}")
+            coordinates.setdefault(name, []).append(coord)
             doc.add_net_label(name, coord[0], coord[1])
             first_net_coord.setdefault(name, coord)
             symbol = ref_symbol.get(ref)
@@ -180,6 +194,13 @@ def materialize_pinmapped(
                 for candidate in (pins_cache.get(symbol) or [])
             ):
                 power_output_nets.add(name)
+
+    if label_nets is not None:
+        from ratsnestpro.eda.schematic_wiring import draw_local_nets
+
+        doc.drawing_receipt = draw_local_nets(
+            doc, coordinates, label_nets=set(label_nets), all_pins=all_pins, bodies=bodies,
+        )
 
     for pin in no_connect_pins:
         ref = str(pin["ref"])
@@ -191,7 +212,11 @@ def materialize_pinmapped(
             doc.add_no_connect(coord[0], coord[1])
 
     seen_power: set[str] = set()
-    for name in [ground_net, *supply_nets]:
+    # Every isolated power domain needs an ERC driver.  This includes AGND,
+    # DGND, PGND and other ground domains joined through a net-tie/passive
+    # star component; KiCad intentionally does not propagate a PWR_FLAG
+    # through that component.
+    for name in [*ground_nets, *supply_nets]:
         if name and name not in seen_power and name not in power_output_nets:
             coord = first_net_coord.get(name)
             if coord is not None:

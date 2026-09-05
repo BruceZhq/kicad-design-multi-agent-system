@@ -7,7 +7,10 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Instant;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -20,6 +23,8 @@ import org.junit.jupiter.params.provider.EnumSource;
 import team.ratsnest.controlplane.evolution.domain.model.EvolutionCandidate;
 import team.ratsnest.controlplane.evolution.domain.model.EvolutionTrial;
 import team.ratsnest.controlplane.evolution.domain.port.EvolutionRepository;
+import team.ratsnest.controlplane.evolution.domain.port.EvolutionRepository.CanaryArtifactEvidence;
+import team.ratsnest.controlplane.evolution.domain.port.EvolutionRepository.CanaryMetricsEvidence;
 import team.ratsnest.controlplane.identity.domain.model.AuthenticatedActor;
 import team.ratsnest.controlplane.shared.web.ApiException;
 import team.ratsnest.controlplane.tenancy.application.TenantAccess;
@@ -35,7 +40,7 @@ class EvolutionCandidateServiceTest {
     @ParameterizedTest
     @EnumSource(
             value = EvolutionCandidate.Status.class,
-            names = {"EVALUATING", "AWAITING_APPROVAL", "APPROVED"})
+            names = {"EVALUATING", "AWAITING_APPROVAL", "APPROVED", "CANARY", "PROMOTED"})
     void managementApiCannotManufactureEvaluationProof(EvolutionCandidate.Status target) {
         UUID tenantId = UUID.randomUUID();
         TenantAccess tenantAccess = mock(TenantAccess.class);
@@ -129,13 +134,122 @@ class EvolutionCandidateServiceTest {
                 ACTOR);
     }
 
+    @Test
+    void canaryFailsClosedUntilARealHarnessRolloutIsBound() {
+        UUID tenantId = UUID.randomUUID();
+        UUID trialId = UUID.randomUUID();
+        TenantAccess tenantAccess = mock(TenantAccess.class);
+        EvolutionRepository repository = mock(EvolutionRepository.class);
+        EvolutionCandidate approved = candidate(EvolutionCandidate.Status.APPROVED, 8);
+        EvolutionTrial trial = passingTrial(trialId, approved.candidateId(), false);
+        var evidence = new EvolutionCandidateService.CanaryArtifactInput(
+                trialId,
+                DIGEST,
+                "b".repeat(40),
+                DIGEST,
+                "sha256:" + "c".repeat(64),
+                "d".repeat(64),
+                "evolution/artifacts/manifest.json",
+                "e".repeat(64));
+        when(repository.findCandidate(tenantId, approved.candidateId()))
+                .thenReturn(Optional.of(approved));
+        when(repository.findTrial(tenantId, trialId)).thenReturn(Optional.of(trial));
+
+        ApiException failure = assertThrows(ApiException.class, () ->
+                service(tenantAccess, repository).enterCanary(
+                        tenantId, approved.candidateId(), approved.rowVersion(),
+                        evidence, "start canary", ACTOR));
+
+        assertThat(failure.code()).isEqualTo("EVOLUTION_CANARY_ROLLOUT_NOT_BOUND");
+        verify(repository, never()).bindCanaryArtifacts(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void promotionRejectsCanaryMetricsWithoutTheBoundDigest() {
+        UUID tenantId = UUID.randomUUID();
+        UUID trialId = UUID.randomUUID();
+        TenantAccess tenantAccess = mock(TenantAccess.class);
+        EvolutionRepository repository = mock(EvolutionRepository.class);
+        EvolutionCandidate canary = candidate(EvolutionCandidate.Status.CANARY, 9);
+        EvolutionTrial trial = passingTrial(trialId, canary.candidateId(), true);
+        when(repository.findCandidate(tenantId, canary.candidateId()))
+                .thenReturn(Optional.of(canary));
+        when(repository.findTrial(tenantId, trialId)).thenReturn(Optional.of(trial));
+        Instant start = trial.completedAt().plusSeconds(60);
+        var evidence = new EvolutionCandidateService.CanaryMetricsInput(
+                trialId, DIGEST, start, start.plusSeconds(3600), 20,
+                1.0, 1.0, 0, 0, 0, 1.0, 1.0, 1.0,
+                0, 0, 0, "f".repeat(64), DIGEST);
+
+        ApiException failure = assertThrows(
+                ApiException.class,
+                () -> service(tenantAccess, repository).promoteCandidate(
+                        tenantId,
+                        canary.candidateId(),
+                        canary.rowVersion(),
+                        evidence,
+                        "promote",
+                        ACTOR));
+
+        assertThat(failure.code()).isEqualTo("EVOLUTION_PROMOTION_TRUSTED_EVIDENCE_REQUIRED");
+        verify(repository, never()).bindCanaryMetrics(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void promotionNeverTrustsClientSuppliedPassingMetrics() throws Exception {
+        UUID tenantId = UUID.randomUUID();
+        UUID trialId = UUID.randomUUID();
+        TenantAccess tenantAccess = mock(TenantAccess.class);
+        EvolutionRepository repository = mock(EvolutionRepository.class);
+        EvolutionCandidate canary = candidate(EvolutionCandidate.Status.CANARY, 9);
+        EvolutionTrial trial = passingTrial(trialId, canary.candidateId(), true);
+        Instant start = trial.completedAt().plusSeconds(60);
+        Instant end = start.plusSeconds(3600);
+        String sourceDigest = "f".repeat(64);
+        String metricsDigest = canaryMetricsDigest(
+                canary.candidateId(), trialId, start, end, 20,
+                1.0, 1.0, 0, 0, 0, 1.0, 1.0, 1.0,
+                0, 0, 0, sourceDigest);
+        var evidence = new EvolutionCandidateService.CanaryMetricsInput(
+                trialId, DIGEST, start, end, 20,
+                1.0, 1.0, 0, 0, 0, 1.0, 1.0, 1.0,
+                0, 0, 0, sourceDigest, metricsDigest);
+        when(repository.findCandidate(tenantId, canary.candidateId()))
+                .thenReturn(Optional.of(canary));
+        when(repository.findTrial(tenantId, trialId)).thenReturn(Optional.of(trial));
+
+        ApiException failure = assertThrows(ApiException.class, () ->
+                service(tenantAccess, repository).promoteCandidate(
+                        tenantId, canary.candidateId(), canary.rowVersion(),
+                        evidence, "promote", ACTOR));
+
+        assertThat(failure.code()).isEqualTo("EVOLUTION_PROMOTION_TRUSTED_EVIDENCE_REQUIRED");
+        verify(repository, never()).bindCanaryMetrics(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any());
+    }
+
     private EvolutionCandidateService service(
             TenantAccess tenantAccess,
             EvolutionRepository repository) {
         return new EvolutionCandidateService(
                 tenantAccess,
                 mock(TenantContext.class),
-                repository);
+                repository,
+                new EvolutionRolloutService(
+                        mock(team.ratsnest.controlplane.harness.application.HarnessVersionService.class),
+                        mock(team.ratsnest.controlplane.harness.domain.port.HarnessVersionRepository.class),
+                        mock(team.ratsnest.controlplane.evolution.domain.port.CanaryEvidenceStore.class),
+                        new tools.jackson.databind.ObjectMapper(),
+                        new team.ratsnest.controlplane.agentgateway.application.RuntimeVersionRoutes(
+                                new tools.jackson.databind.ObjectMapper(), "{}"), "production", 10, 5));
     }
 
     private EvolutionCandidate candidate(EvolutionCandidate.Status status, long rowVersion) {
@@ -160,5 +274,91 @@ class EvolutionCandidateServiceTest {
                 rowVersion,
                 now,
                 now);
+    }
+
+    private EvolutionTrial passingTrial(UUID trialId, String candidateId, boolean canaryBound) {
+        Instant completedAt = Instant.parse("2026-08-19T00:05:00Z");
+        Map<String, Object> guardrails = canaryBound
+                ? Map.of(
+                        "runtimeAttested", true,
+                        "guardrailPassed", true,
+                        "authoritativeGatePassed", true,
+                        "canaryArtifactsBound", true,
+                        "artifactManifestDigest", "d".repeat(64),
+                        "buildProvenanceDigest", "e".repeat(64))
+                : Map.of(
+                        "runtimeAttested", true,
+                        "guardrailPassed", true,
+                        "authoritativeGatePassed", true);
+        return new EvolutionTrial(
+                trialId,
+                candidateId,
+                1,
+                DIGEST,
+                DIGEST,
+                DIGEST,
+                DIGEST,
+                "ratsnest-evolution-" + trialId,
+                canaryBound ? "b".repeat(40) : null,
+                DIGEST,
+                canaryBound ? "sha256:" + "c".repeat(64) : null,
+                DIGEST,
+                DIGEST,
+                DIGEST,
+                Map.of(),
+                Map.of(),
+                guardrails,
+                "PASSED",
+                DIGEST,
+                Map.of("verdict", "passed"),
+                canaryBound ? "evolution/artifacts/manifest.json" : null,
+                0,
+                100,
+                2,
+                completedAt.minusSeconds(60),
+                completedAt,
+                completedAt);
+    }
+
+    private String canaryMetricsDigest(
+            String candidateId,
+            UUID trialId,
+            Instant start,
+            Instant end,
+            int sampleSize,
+            double releaseReadyRate,
+            double strictReleaseEvidenceRate,
+            int ercErrorCount,
+            int drcErrorCount,
+            int unconnectedCount,
+            double routingCompletionRate,
+            double coreArtifactClosureRate,
+            double artifactIdentityRate,
+            int falseReleaseCount,
+            int regressionCount,
+            int infrastructureFailureCount,
+            String sourceDigest) throws Exception {
+        String canonical = String.join("\0",
+                "ratsnest-canary-metrics-v1",
+                candidateId,
+                trialId.toString(),
+                DIGEST,
+                start.toString(),
+                end.toString(),
+                Integer.toString(sampleSize),
+                Double.toString(releaseReadyRate),
+                Double.toString(strictReleaseEvidenceRate),
+                Integer.toString(ercErrorCount),
+                Integer.toString(drcErrorCount),
+                Integer.toString(unconnectedCount),
+                Double.toString(routingCompletionRate),
+                Double.toString(coreArtifactClosureRate),
+                Double.toString(artifactIdentityRate),
+                Integer.toString(falseReleaseCount),
+                Integer.toString(regressionCount),
+                Integer.toString(infrastructureFailureCount),
+                sourceDigest);
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(canonical.getBytes(StandardCharsets.UTF_8)));
     }
 }

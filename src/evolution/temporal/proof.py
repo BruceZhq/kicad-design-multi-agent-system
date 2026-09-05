@@ -61,6 +61,11 @@ def build_authoritative_result(
         and not report.automatic_push
         and not report.automatic_deploy
     )
+    from evolution.generator_validation import GENERATOR_PATHS
+
+    if any(item.path in GENERATOR_PATHS for item in trial_input.patch_bundle.files):
+        guardrail_passed = (guardrail_passed and report.generator_cad_validated
+                            and report.executor_mode == "kubernetes_job")
     verdict = {
         "passed": "PASSED" if guardrail_passed else "FAILED",
         "failed": "FAILED",

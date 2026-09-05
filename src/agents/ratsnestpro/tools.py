@@ -40,11 +40,16 @@ from ratsnestpro.eda.local_library import (
     generate_local_symbol_library,
 )
 from ratsnestpro.knowledge import build_default_kb
+from ratsnestpro.knowledge.circuit_modules import (
+    build_circuit_module_candidates,
+    circuit_module_search_text,
+)
 from ratsnestpro.orchestration import review_project
 from ratsnestpro.orchestration.ahe import (
     GOVERNED_HARNESS_REASON_CODES,
     CapabilityGap,
 )
+from ratsnestpro.orchestration.component_resolution import verified_replacements_by_ref
 from ratsnestpro.orchestration.pipeline import (
     ARTIFACT_MODELS,
     Pipeline,
@@ -59,15 +64,18 @@ from ratsnestpro.orchestration.pipeline_contracts import (
     ErcSummary,
     ManufactureResult,
     MaterializeResult,
+    NetlistIntent,
     PcbWriteResult,
     RouteResult,
     SelectionPlan,
+    TopologyPlan,
 )
 from ratsnestpro.orchestration.placement_constraints import (
     review_pcb_placement_constraints,
 )
 from ratsnestpro.orchestration.release_invariants import (
     ReleaseIdentity,
+    sha256_file,
     validate_release_invariant_manifest,
 )
 from ratsnestpro.orchestration.review_project import ReviewProjectError
@@ -923,9 +931,12 @@ def _load_pipeline_state(
             )
             expected_resume = PipelineStep(expected_value) if expected_value else None
             if expected_resume != resume_from_step:
-                raise ValueError(
-                    "resume_from_step must match the earliest failed or incomplete step"
-                )
+                from ratsnestpro.orchestration.review_repair import valid_review_resume
+
+                if not valid_review_resume(path.parent, resume_from_step.value):
+                    raise ValueError(
+                        "resume_from_step must match the earliest failed or incomplete step"
+                    )
             explicit_invalidation = resume_from_step
             persisted_resume_step = resume_from_step.value
             persisted_resume_token_digest = resume_token_digest
@@ -988,6 +999,12 @@ def _load_pipeline_state(
                 candidate,
                 bool(saved_step.get("used_llm")) if isinstance(saved_step, dict) else False,
             )
+            from ratsnestpro.orchestration.review_repair import valid_review_resume
+
+            if valid_review_resume(path.parent, explicit_invalidation.value):
+                # Existing local checks already passed; rechecking the same
+                # cached proposal cannot fix a new independent-review finding.
+                restored.resume_candidates.pop(explicit_invalidation, None)
     if (
         explicit_invalidation is None
         and len(restored.results) < persisted_completed_steps
@@ -1257,10 +1274,34 @@ class _ToolkitLlmClient:
         )
 
     def complete(self, system: str, user: str, temperature: float = 0.2) -> str:
+        return self._complete(system, user)
+
+    def complete_with_images(self, system: str, user: str, *, images: list[str]) -> str:
+        """Same model/accounting as text calls, with actual multimodal message blocks."""
+        if len(images) > 2 or any(not uri.startswith("data:image/png;base64,") for uri in images):
+            raise ValueError("engineering vision accepts at most two local PNG images")
+        if getattr(self, "_vision_unavailable", False):
+            return self._complete(system, user + "\nVision unavailable: images were NOT inspected. Use geometric tools.")
+        try:
+            return self._complete(system, user, images=images)
+        except Exception as exc:
+            detail = str(exc).casefold()
+            if any(term in detail for term in ("image_url", "image input", "multimodal", "vision")) and any(
+                term in detail for term in ("unsupported", "not support", "invalid", "unavailable")
+            ):
+                self._vision_unavailable = True
+                return self._complete(system, user + "\nProvider rejected vision input; images were NOT inspected. Use geometric tools.")
+            raise
+
+    def _complete(self, system: str, user: str, *, images: list[str] | None = None) -> str:
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        messages = [SystemMessage(content=system), HumanMessage(content=user)]
-        estimated_input = max(1, (len(system) + len(user)) // 4)
+        content = ([{"type": "text", "text": user}, *[
+            {"type": "image_url", "image_url": {"url": uri, "detail": "high"}}
+            for uri in images
+        ]] if images else user)
+        messages = [SystemMessage(content=system), HumanMessage(content=content)]
+        estimated_input = max(1, (len(system) + len(user)) // 4) + 4096 * len(images or [])
         if self._used_llm_tokens + estimated_input > self._max_llm_tokens:
             raise LlmError("LLM token budget exhausted before the next pipeline call")
         try:
@@ -1367,6 +1408,58 @@ def _workspace_path(value: str) -> Path:
     except ValueError as exc:
         raise ValueError(f"path must stay inside the RatsNestPro workspace: {root}") from exc
     return candidate
+
+
+def load_reviewed_circuit_module_source(
+    project_path: str,
+    release_identity: dict[str, Any],
+) -> dict[str, Any]:
+    """Reload the exact checkpoint artifacts and PCB reviewed for promotion."""
+
+    project = _workspace_path(project_path)
+    directory = project if project.is_dir() else project.parent
+    state_path = directory / "pipeline_state.json"
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("reviewed pipeline checkpoint root must be an object")
+    receipt = payload.get("checkpoint_receipt")
+    artifacts = payload.get("intermediate_artifacts")
+    if not isinstance(receipt, dict) or not isinstance(artifacts, dict):
+        raise ValueError("reviewed pipeline checkpoint lacks bound artifacts")
+    if receipt.get("schema_version") != 1:
+        raise ValueError("reviewed pipeline checkpoint receipt is unsupported")
+    if str(receipt.get("state_sha256", "")) != _checkpoint_content_digest(payload):
+        raise ValueError("reviewed pipeline checkpoint content digest is stale")
+    if str(receipt.get("artifact_manifest_digest", "")) != _checkpoint_artifact_digest(
+        payload
+    ):
+        raise ValueError("reviewed pipeline artifact digest is stale")
+
+    identity = ReleaseIdentity.model_validate(release_identity, strict=True)
+    if str(payload.get("project_name", "")) != identity.project_name:
+        raise ValueError("reviewed pipeline project identity is stale")
+    topology = TopologyPlan.model_validate(artifacts.get(PipelineStep.TOPOLOGY.value))
+    selection = SelectionPlan.model_validate(
+        artifacts.get(PipelineStep.SELECTION.value)
+    )
+    netlist = NetlistIntent.model_validate(
+        artifacts.get(PipelineStep.SCH_CONNECTIONS.value)
+    )
+    manufacture = ManufactureResult.model_validate(
+        artifacts.get(PipelineStep.MANUFACTURE.value)
+    )
+    if manufacture.release_identity != identity:
+        raise ValueError("reviewed pipeline manufacture identity is stale")
+    pcb_path = (directory / identity.pcb_relpath).resolve()
+    if pcb_path.parent != directory.resolve() or not pcb_path.is_file():
+        raise ValueError("reviewed pipeline PCB is unavailable")
+    if sha256_file(pcb_path) != identity.pcb_sha256:
+        raise ValueError("reviewed pipeline PCB digest is stale")
+    return {
+        "topology": topology,
+        "selection": selection,
+        "netlist": netlist,
+    }
 
 
 def _files(path: Path) -> list[str]:
@@ -1835,6 +1928,53 @@ def _release_invariant_manifest(
         }
 
 
+def _verified_experience_text(item: dict[str, Any]) -> str:
+    modules = item.get("circuit_modules", [])
+    try:
+        module_text = (
+            circuit_module_search_text(modules)
+            if isinstance(modules, list) and modules
+            else "[]"
+        )
+        verified_modules = json.loads(module_text)
+    except (TypeError, ValueError, ValidationError, json.JSONDecodeError):
+        verified_modules = []
+    payload = {
+        "selected_roles": (
+            list(item.get("selected_roles", []))
+            if isinstance(item.get("selected_roles"), list)
+            else []
+        ),
+        "resolved_issues": (
+            list(item.get("resolved_issues", []))
+            if isinstance(item.get("resolved_issues"), list)
+            else []
+        ),
+        "circuit_modules": verified_modules if isinstance(verified_modules, list) else [],
+        "verified_module_ids": (
+            list(item.get("verified_module_ids", []))
+            if isinstance(item.get("verified_module_ids"), list)
+            else []
+        ),
+        "evidence": item.get("evidence", {}),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    for key in (
+        "circuit_modules",
+        "resolved_issues",
+        "selected_roles",
+        "verified_module_ids",
+    ):
+        values = payload[key]
+        while isinstance(values, list) and values and len(encoded) > 8_000:
+            values.pop()
+            encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded) > 8_000:
+        payload["evidence"] = {"omitted": "experience evidence exceeded search budget"}
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return encoded
+
+
 def ratsnest_search_internal_knowledge(
     query: str,
     role: str = "general",
@@ -1897,10 +2037,18 @@ def ratsnest_search_internal_knowledge(
             for key, value in expected_scope.items()
         ):
             verified_scope = candidate_scope
-    experiences = EheMemory(
+    memory = EheMemory(
         _workspace_root() / "ehe",
         governance_scope=verified_scope,
-    ).search_verified(query, limit=bounded_limit)
+        integrity_secret=(
+            settings.RATSNEST_INTERNAL_SIGNING_SECRET.get_secret_value()
+            if verified_scope is not None
+            and settings.RATSNEST_INTERNAL_SIGNING_SECRET is not None
+            else None
+        ),
+    )
+    experiences = memory.search_verified(query, limit=bounded_limit)
+    modules = memory.search_verified_modules(query, limit=bounded_limit)
     local_results = [
         {
             "id": hit.doc.id,
@@ -1917,19 +2065,23 @@ def ratsnest_search_internal_knowledge(
             "role": "verified_experience",
             "source": "local_ehe_memory",
             "score": item.get("score", 0),
-            "text": json.dumps(
-                {
-                    "selected_roles": item.get("selected_roles", []),
-                    "resolved_issues": item.get("resolved_issues", []),
-                    "evidence": item.get("evidence", {}),
-                },
-                ensure_ascii=False,
-            ),
+            "text": _verified_experience_text(item),
         }
         for item in experiences
     )
+    module_results = [
+        {
+            "id": f"verified-module:{item.get('verified_module_id', '')}",
+            "role": "verified_circuit_module",
+            "source": "local_ehe_module_library",
+            "score": item.get("score", 0),
+            "text": circuit_module_search_text([item["module"]]),
+        }
+        for item in modules
+        if isinstance(item.get("module"), dict)
+    ]
     external_results = external.get("results", [])
-    results = [*external_results, *local_results]
+    results = [*external_results, *module_results, *local_results]
     return _json(
         {
             "status": "ok" if results else "no_results",
@@ -1958,6 +2110,9 @@ def _ehe_result_payload(
     selected_roles: list[str],
     human_amendment: bool,
     promotion_eligible: bool,
+    circuit_modules: list[dict[str, Any]] | None = None,
+    release_identity: dict[str, Any] | None = None,
+    module_learning_warning: str = "",
 ) -> dict[str, Any]:
     run_local_gaps = [gap.model_dump(mode="json") for gap in state.capability_gaps]
     global_snapshot = memory.candidate_snapshot()
@@ -1993,9 +2148,35 @@ def _ehe_result_payload(
                 "resolved_issues": resolved_issues,
                 "selected_roles": selected_roles,
                 "human_amendment": human_amendment,
+                "circuit_modules": circuit_modules or [],
+                "release_identity": release_identity,
+                "module_learning_warning": module_learning_warning,
             },
         },
     }
+
+
+def _safe_build_circuit_module_candidates(
+    *,
+    topology: TopologyPlan,
+    selection: SelectionPlan,
+    netlist: NetlistIntent,
+    release_identity: ReleaseIdentity,
+) -> tuple[list[dict[str, Any]], str]:
+    """Keep optional cross-run learning from changing a release verdict."""
+
+    try:
+        return (
+            build_circuit_module_candidates(
+                topology=topology,
+                selection=selection,
+                netlist=netlist,
+                release_identity=release_identity,
+            ),
+            "",
+        )
+    except (TypeError, ValueError) as exc:
+        return [], f"circuit module candidate extraction failed: {type(exc).__name__}: {exc}"
 
 
 def _run_pcb_pipeline_unlocked(
@@ -2009,6 +2190,7 @@ def _run_pcb_pipeline_unlocked(
     until_step: str | None = None,
     external_retry_managed: bool = False,
     ahe_budget: dict[str, int] | None = None,
+    approved_component_replacements: dict[str, Any] | None = None,
     resume_from_step: str | None = None,
     resume_token: str | None = None,
 ) -> str:
@@ -2078,6 +2260,10 @@ def _run_pcb_pipeline_unlocked(
             if settings.RATSNEST_INTERNAL_SIGNING_SECRET is not None
             else None
         )
+        trusted_replacements = verified_replacements_by_ref(
+            approved_component_replacements,
+            secret=governance_secret,
+        )
         governance_scope = governance_scope_from_environ(
             os.environ,
             secret=governance_secret,
@@ -2136,6 +2322,8 @@ def _run_pcb_pipeline_unlocked(
                 mode=mode,
                 client=client,
                 out_dir=str(out),
+                approved_component_replacements=trusted_replacements,
+                internal_signing_secret=governance_secret,
                 # Release failures participate in the same bounded AHE ledger.
                 # Artifact-first still guarantees an editable draft, while
                 # deterministic ERC/DRC failures may now roll back to the
@@ -2467,6 +2655,28 @@ def _run_pcb_pipeline_unlocked(
             "USER CHANGE REQUEST:" in requirement
             or "INDEPENDENT REVIEW FEEDBACK TO REPAIR:" in requirement
         )
+        release_identity = (
+            manufacture_artifact.release_identity
+            if isinstance(manufacture_artifact, ManufactureResult)
+            else None
+        )
+        topology_artifact = state.artifacts.get(PipelineStep.TOPOLOGY)
+        connection_artifact = state.artifacts.get(PipelineStep.SCH_CONNECTIONS)
+        circuit_modules: list[dict[str, Any]] = []
+        module_learning_warning = ""
+        if (
+            outcome == "release_ready"
+            and release_identity is not None
+            and isinstance(topology_artifact, TopologyPlan)
+            and isinstance(selection_artifact, SelectionPlan)
+            and isinstance(connection_artifact, NetlistIntent)
+        ):
+            circuit_modules, module_learning_warning = _safe_build_circuit_module_candidates(
+                topology=topology_artifact,
+                selection=selection_artifact,
+                netlist=connection_artifact,
+                release_identity=release_identity,
+            )
         result_path = out / "pipeline_result.json"
         payload = {
             "status": ("ok" if outcome == "release_ready" else outcome),
@@ -2538,6 +2748,13 @@ def _run_pcb_pipeline_unlocked(
                 promotion_eligible=(
                     outcome == "release_ready" and ehe_memory.governance_eligible
                 ),
+                circuit_modules=circuit_modules,
+                release_identity=(
+                    release_identity.model_dump(mode="json")
+                    if release_identity is not None
+                    else None
+                ),
+                module_learning_warning=module_learning_warning,
             ),
             "steps": steps,
             "pipeline_state_path": str(state_path),
@@ -2611,6 +2828,7 @@ def ratsnest_run_pcb_pipeline(
     model_name: str | None = None,
     model_type: str | None = None,
     ahe_budget: dict[str, int] | None = None,
+    approved_component_replacements: dict[str, Any] | None = None,
     resume_from_step: str | None = None,
     resume_token: str | None = None,
 ) -> str:
@@ -2626,6 +2844,7 @@ def ratsnest_run_pcb_pipeline(
                 model_name=model_name,
                 model_type=model_type,
                 ahe_budget=ahe_budget,
+                approved_component_replacements=approved_component_replacements,
                 resume_from_step=resume_from_step,
                 resume_token=resume_token,
             )
@@ -2648,6 +2867,7 @@ def ratsnest_run_pcb_pipeline_until(
     model_name: str | None = None,
     model_type: str | None = None,
     ahe_budget: dict[str, int] | None = None,
+    approved_component_replacements: dict[str, Any] | None = None,
     resume_from_step: str | None = None,
     resume_token: str | None = None,
 ) -> str:
@@ -2672,6 +2892,7 @@ def ratsnest_run_pcb_pipeline_until(
                 until_step=until_step,
                 external_retry_managed=True,
                 ahe_budget=ahe_budget,
+                approved_component_replacements=approved_component_replacements,
                 resume_from_step=resume_from_step,
                 resume_token=resume_token,
             )

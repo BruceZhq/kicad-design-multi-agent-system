@@ -1,10 +1,12 @@
 package team.ratsnest.controlplane.evolution.application;
 
+import java.util.List;
 import java.util.UUID;
 
 import org.springframework.stereotype.Service;
 
 import team.ratsnest.controlplane.evolution.application.EvolutionTrialService.EvaluateCommand;
+import team.ratsnest.controlplane.evolution.application.EvolutionTrialService.PreparedProposal;
 import team.ratsnest.controlplane.evolution.application.EvolutionTrialService.PreparedTrial;
 import team.ratsnest.controlplane.evolution.domain.model.EvolutionTrial;
 import team.ratsnest.controlplane.evolution.domain.port.EvolutionTrialRuntime;
@@ -47,5 +49,34 @@ public class EvolutionTrialLauncher {
         EvolutionTrialRuntime.StartResult started = runtime.start(
                 tenantId, bound, prepared.trialInput());
         return evolution.bindWorkflow(tenantId, bound.trialId(), started.workflowId());
+    }
+
+    public EvolutionTrial proposeAndEvaluate(
+            UUID tenantId,
+            String candidateId,
+            long expectedVersion,
+            String idempotencyKey,
+            List<String> repositoryContextPaths,
+            AuthenticatedActor actor) {
+        PreparedProposal prepared = evolution.prepareProposal(
+                tenantId,
+                candidateId,
+                expectedVersion,
+                idempotencyKey,
+                repositoryContextPaths);
+        EvolutionTrialRuntime.ProposalResult proposal = prepared.needsGeneration()
+                ? evolution.persistProposalResult(
+                        tenantId,
+                        prepared,
+                        runtime.propose(tenantId, prepared.proposalId(), prepared.request()))
+                : prepared.cachedResult();
+        EvaluateCommand command = evolution.commandFromProposal(prepared, proposal);
+        return evaluate(
+                tenantId,
+                candidateId,
+                expectedVersion,
+                idempotencyKey,
+                command,
+                actor);
     }
 }

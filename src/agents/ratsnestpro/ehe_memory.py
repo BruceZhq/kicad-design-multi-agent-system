@@ -7,6 +7,7 @@ run/project names remain presentation metadata and never enter this ledger.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from ratsnestpro.knowledge.circuit_modules import validate_circuit_module_candidates
 from ratsnestpro.orchestration.ahe import (
     GOVERNED_HARNESS_REASON_CODES,
     CapabilityGap,
@@ -24,6 +26,8 @@ from service.governance_scope import TrustedGovernanceScope
 
 _MAX_RECORDS = 10_000
 _FINGERPRINT_DOMAIN = "ratsnest-ehe-v3"
+_VERIFIED_MODULE_RECEIPT_DOMAIN = b"ratsnest-ehe-verified-circuit-module-v1\0"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PRIVATE_IDENTITY_FIELDS = {
     "run_name",
     "project_name",
@@ -48,6 +52,49 @@ def _feature_fingerprints(value: str) -> set[str]:
         _fingerprint("feature", token)
         for token in re.findall(r"[A-Za-z][A-Za-z0-9_.+-]{2,}", value)
     }
+
+
+def _canonical(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _verified_module_storage_identity(
+    scope: TrustedGovernanceScope,
+    module: dict[str, Any],
+) -> dict[str, str]:
+    return {
+        "tenant_scope": scope.tenant_scope,
+        "harness_version_id": scope.harness_version_id,
+        "harness_manifest_digest": scope.harness_manifest_digest,
+        "module_digest": str(module["module_digest"]),
+    }
+
+
+def _verified_module_id(
+    scope: TrustedGovernanceScope,
+    module: dict[str, Any],
+) -> str:
+    return hashlib.sha256(
+        _canonical(_verified_module_storage_identity(scope, module))
+    ).hexdigest()
+
+
+def _verified_module_receipt(
+    secret: str,
+    *,
+    record: dict[str, Any],
+) -> str:
+    body = {key: value for key, value in record.items() if key != "review_receipt"}
+    return hmac.new(
+        secret.encode("utf-8"),
+        _VERIFIED_MODULE_RECEIPT_DOMAIN + _canonical(body),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _read_object(path: Path) -> dict[str, Any] | None:
@@ -101,8 +148,12 @@ class EheMemory:
         self,
         root: Path,
         governance_scope: TrustedGovernanceScope | None = None,
+        integrity_secret: str | None = None,
     ) -> None:
         self.governance_scope = governance_scope
+        if integrity_secret is not None and len(integrity_secret.encode("utf-8")) < 32:
+            raise ValueError("module integrity secret must contain at least 32 bytes")
+        self.integrity_secret = integrity_secret
         if governance_scope is None:
             partition = root / "u"
         else:
@@ -116,9 +167,11 @@ class EheMemory:
         self.root = partition
         self.events_dir = partition / "e"
         self.verified_dir = partition / "v"
+        self.modules_dir = partition / "m"
         self.gaps_dir = partition / "g"
         self.events_dir.mkdir(parents=True, exist_ok=True)
         self.verified_dir.mkdir(parents=True, exist_ok=True)
+        self.modules_dir.mkdir(parents=True, exist_ok=True)
         self.gaps_dir.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -527,6 +580,11 @@ class EheMemory:
         human_amendment: bool,
         independent_review_passed: bool = False,
         release_ready_evidence: bool = False,
+        circuit_modules: list[dict[str, Any]] | None = None,
+        release_identity: dict[str, Any] | None = None,
+        topology: Any | None = None,
+        selection: Any | None = None,
+        netlist: Any | None = None,
         **_: Any,
     ) -> Path:
         scope = self.governance_scope
@@ -536,6 +594,99 @@ class EheMemory:
             raise ValueError("independent review evidence is required for promotion")
         if not release_ready_evidence:
             raise ValueError("release-ready evidence is required for promotion")
+        requested_modules = circuit_modules or []
+        if requested_modules and self.integrity_secret is None:
+            raise ValueError("module integrity secret is required for promotion")
+        if requested_modules and (
+            release_identity is None
+            or topology is None
+            or selection is None
+            or netlist is None
+        ):
+            raise ValueError(
+                "reviewed pipeline source is required for module promotion"
+            )
+        verified_modules = validate_circuit_module_candidates(
+            requested_modules,
+            release_identity=release_identity,
+            topology=topology,
+            selection=selection,
+            netlist=netlist,
+        )
+        module_features = " ".join(
+            str(value)
+            for module in verified_modules
+            for value in (
+                module.get("name", ""),
+                module.get("kind", ""),
+                *(
+                    component.get("role", "")
+                    for component in module.get("components", [])
+                    if isinstance(component, dict)
+                ),
+                *(
+                    component.get("value", "")
+                    for component in module.get("components", [])
+                    if isinstance(component, dict)
+                ),
+                *(
+                    component.get("mpn", "")
+                    for component in module.get("components", [])
+                    if isinstance(component, dict)
+                ),
+            )
+        )
+        verified_module_ids: list[str] = []
+        for module in verified_modules:
+            component_features = " ".join(
+                str(component.get(field, ""))
+                for component in module.get("components", [])
+                if isinstance(component, dict)
+                for field in (
+                    "role",
+                    "value",
+                    "mpn",
+                    "symbol_lib_id",
+                    "footprint_lib_id",
+                )
+            )
+            module_feature_fingerprints = sorted(
+                _feature_fingerprints(
+                    f"{module.get('name', '')} {module.get('kind', '')} "
+                    f"{component_features}"
+                )
+            )[:300]
+            verified_module_id = _verified_module_id(scope, module)
+            evidence = {
+                "independent_review": {"passed": True, "source": "reviewer"},
+                "release_ready": {
+                    "passed": True,
+                    "source": "hardware_pipeline",
+                },
+            }
+            record = {
+                "schema_version": 2,
+                "kind": "verified_circuit_module",
+                "verified_module_id": verified_module_id,
+                "recorded_at": datetime.now(UTC).isoformat(),
+                **self._scope_payload(),
+                "feature_fingerprints": module_feature_fingerprints,
+                "module": module,
+                "evidence": evidence,
+            }
+            record["review_receipt"] = {
+                "version": 1,
+                "algorithm": "hmac-sha256",
+                "mac": _verified_module_receipt(
+                    self.integrity_secret or "",
+                    record=record,
+                ),
+            }
+            _atomic_replace(
+                self.modules_dir / f"{verified_module_id[:40]}.json",
+                record,
+            )
+            verified_module_ids.append(verified_module_id)
         identity = hashlib.sha256(
             json.dumps(
                 {
@@ -553,11 +704,18 @@ class EheMemory:
             "recorded_at": datetime.now(UTC).isoformat(),
             **self._scope_payload(),
             "feature_fingerprints": sorted(
-                _feature_fingerprints(requirement + "\n" + " ".join(selected_roles))
+                _feature_fingerprints(
+                    requirement
+                    + "\n"
+                    + " ".join(selected_roles)
+                    + "\n"
+                    + module_features
+                )
             )[:300],
             "selected_roles": sorted(set(selected_roles)),
             "resolved_issues": resolved_issues,
             "human_amendment": human_amendment,
+            "verified_module_ids": verified_module_ids,
             "evidence": {
                 "pipeline_steps": 17,
                 "independent_review": {"passed": True, "source": "reviewer"},
@@ -567,6 +725,86 @@ class EheMemory:
         target = self.verified_dir / f"{identity[:40]}.json"
         _atomic_replace(target, payload)
         return target
+
+    def search_verified_modules(
+        self,
+        query: str,
+        *,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Return only Reviewer-promoted, release-bound circuit modules."""
+
+        if not self.governance_eligible or self.integrity_secret is None:
+            return []
+        query_fingerprints = _feature_fingerprints(query)
+        ranked: list[tuple[int, dict[str, Any]]] = []
+        for path in sorted(self.modules_dir.glob("*.json"))[-_MAX_RECORDS:]:
+            item = _read_object(path)
+            if not item or not self._event_is_current_partition(item):
+                continue
+            evidence = item.get("evidence")
+            if not isinstance(evidence, dict):
+                continue
+            independent = evidence.get("independent_review")
+            release = evidence.get("release_ready")
+            module = item.get("module")
+            receipt = item.get("review_receipt")
+            if (
+                item.get("schema_version") != 2
+                or item.get("kind") != "verified_circuit_module"
+                or not isinstance(independent, dict)
+                or independent.get("passed") is not True
+                or not isinstance(release, dict)
+                or release.get("passed") is not True
+                or not isinstance(module, dict)
+                or not isinstance(receipt, dict)
+                or set(receipt) != {"version", "algorithm", "mac"}
+                or receipt.get("version") != 1
+                or receipt.get("algorithm") != "hmac-sha256"
+            ):
+                continue
+            try:
+                validate_circuit_module_candidates([module])
+            except (TypeError, ValueError):
+                continue
+            scope = self.governance_scope
+            if scope is None:
+                continue
+            expected_module_id = _verified_module_id(scope, module)
+            recorded_module_id = item.get("verified_module_id")
+            receipt_mac = receipt.get("mac")
+            if (
+                not isinstance(recorded_module_id, str)
+                or not _SHA256_RE.fullmatch(recorded_module_id)
+                or not isinstance(receipt_mac, str)
+                or not _SHA256_RE.fullmatch(receipt_mac)
+                or not hmac.compare_digest(
+                    recorded_module_id,
+                    expected_module_id,
+                )
+                or path.stem != expected_module_id[:40]
+            ):
+                continue
+            expected_receipt = _verified_module_receipt(
+                self.integrity_secret,
+                record=item,
+            )
+            if not hmac.compare_digest(
+                receipt_mac,
+                expected_receipt,
+            ):
+                continue
+            features = {str(value) for value in item.get("feature_fingerprints", [])}
+            score = len(query_fingerprints.intersection(features))
+            if score:
+                ranked.append((score, item))
+        ranked.sort(
+            key=lambda pair: (-pair[0], str(pair[1].get("recorded_at", "")))
+        )
+        return [
+            {**item, "score": score}
+            for score, item in ranked[: max(1, min(limit, 8))]
+        ]
 
     def search_verified(self, query: str, *, limit: int = 3) -> list[dict[str, Any]]:
         query_tokens = {

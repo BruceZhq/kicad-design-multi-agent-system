@@ -22,6 +22,8 @@ import org.springframework.transaction.annotation.Transactional;
 import team.ratsnest.controlplane.evolution.domain.model.EvolutionCandidate;
 import team.ratsnest.controlplane.evolution.domain.model.EvolutionTrial;
 import team.ratsnest.controlplane.evolution.domain.port.EvolutionRepository;
+import team.ratsnest.controlplane.evolution.domain.port.EvolutionRepository.ProposalRecord;
+import team.ratsnest.controlplane.evolution.domain.port.EvolutionTrialRuntime.ProposalResult;
 import team.ratsnest.controlplane.harness.application.HarnessVersionService;
 import team.ratsnest.controlplane.harness.domain.model.HarnessVersion;
 import team.ratsnest.controlplane.identity.domain.model.AuthenticatedActor;
@@ -34,11 +36,14 @@ public class EvolutionTrialService {
 
     private static final Pattern DIGEST = Pattern.compile("[0-9a-f]{64}");
     private static final Pattern COMMIT = Pattern.compile("[0-9a-f]{40,64}");
+    private static final Pattern IMAGE_DIGEST = Pattern.compile("sha256:[0-9a-f]{64}");
+    private static final Pattern TOOLCHAIN_DIGEST = Pattern.compile("(?:sha256:)?[0-9a-f]{64}");
     private static final Set<String> FINAL_VERDICTS = Set.of(
             "PASSED", "FAILED", "REGRESSION", "POLICY_REJECTED",
             "ENVIRONMENT_ISSUE", "CANCELLED");
     private static final List<String> FIXED_EVAL_IDS = List.of(
-            "python-compile", "evolution-core");
+            "python-compile", "evolution-core",
+            "optimization-suite", "holdout-suite", "adversarial-suite");
 
     private final TenantContext tenantContext;
     private final EvolutionRepository evolution;
@@ -157,6 +162,184 @@ public class EvolutionTrialService {
     }
 
     @Transactional
+    public PreparedProposal prepareProposal(
+            UUID tenantId,
+            String candidateId,
+            long expectedVersion,
+            String idempotencyKey,
+            List<String> repositoryContextPaths) {
+        tenantContext.activate(tenantId);
+        if (repositoryContextPaths == null
+                || repositoryContextPaths.isEmpty()
+                || repositoryContextPaths.size() > 32
+                || repositoryContextPaths.size() != Set.copyOf(repositoryContextPaths).size()) {
+            throw invalidPatch();
+        }
+        for (String path : repositoryContextPaths) {
+            if (!safePath(path)
+                    || path.equals("evals/sealed")
+                    || path.startsWith("evals/sealed/")
+                    || Set.of(
+                            "tests/evolution/conftest.py",
+                            "tests/evolution/test_evolution_core.py",
+                            "tests/evolution/test_sandbox.py")
+                            .contains(path)) {
+                throw invalidPatch();
+            }
+        }
+        String proposalId = sha256(String.join("\0",
+                "evolution-proposal-v1",
+                tenantId.toString(),
+                candidateId,
+                idempotencyKey).getBytes(StandardCharsets.UTF_8));
+        String requestFingerprint = canonicalDigest(Map.of(
+                "candidateId", candidateId,
+                "expectedVersion", expectedVersion,
+                "repositoryContextPaths", List.copyOf(repositoryContextPaths)));
+        ProposalRecord existing = evolution.findProposal(tenantId, proposalId).orElse(null);
+        if (existing != null) {
+            return preparedProposal(existing, candidateId, requestFingerprint);
+        }
+        EvolutionCandidate candidate = requireCandidate(tenantId, candidateId);
+        if (candidate.rowVersion() != expectedVersion
+                || candidate.status() != EvolutionCandidate.Status.ELIGIBLE) {
+            throw stale();
+        }
+        HarnessVersion harness = harnessVersions.require(candidate.baseHarnessVersionId());
+        requirePinnedBase(candidate, harness);
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("schemaVersion", "1.0");
+        request.put("proposalId", proposalId);
+        request.put("candidate", candidateValue(candidate));
+        request.put("harnessManifest", manifestValue(harness));
+        request.put("publicEvalSummary", Map.of(
+                "caseResults", List.of(),
+                "improvementCount", 0,
+                "regressionCount", 0));
+        request.put("repositoryContextPaths", List.copyOf(repositoryContextPaths));
+        ProposalRecord proposal = new ProposalRecord(
+                proposalId,
+                candidateId,
+                candidate.baseManifestDigest(),
+                requestFingerprint,
+                Map.copyOf(request),
+                null,
+                Map.of(),
+                Instant.now(),
+                null);
+        if (!evolution.insertProposal(tenantId, proposal)) {
+            return preparedProposal(
+                    evolution.findProposal(tenantId, proposalId).orElseThrow(),
+                    candidateId,
+                    requestFingerprint);
+        }
+        return new PreparedProposal(
+                proposalId,
+                candidateId,
+                candidate.baseManifestDigest(),
+                requestFingerprint,
+                Map.copyOf(request),
+                null,
+                true);
+    }
+
+    @Transactional
+    public ProposalResult persistProposalResult(
+            UUID tenantId,
+            PreparedProposal prepared,
+            ProposalResult result) {
+        tenantContext.activate(tenantId);
+        commandFromProposal(prepared, result);
+        Map<String, Object> response = proposalResponse(result);
+        if (!evolution.completeProposal(
+                tenantId,
+                prepared.proposalId(),
+                prepared.requestFingerprint(),
+                result.proposalDigest(),
+                response)) {
+            ProposalRecord existing = evolution.findProposal(tenantId, prepared.proposalId())
+                    .orElseThrow(this::idempotencyConflict);
+            if (!Objects.equals(existing.proposalDigest(), result.proposalDigest())
+                    || !canonicalDigest(existing.response()).equals(canonicalDigest(response))) {
+                throw idempotencyConflict();
+            }
+        }
+        return result;
+    }
+
+    public EvaluateCommand commandFromProposal(
+            PreparedProposal prepared,
+            ProposalResult result) {
+        if (!prepared.proposalId().equals(result.proposalId())
+                || !prepared.candidateId().equals(result.candidateId())
+                || !prepared.baseManifestDigest().equals(result.baseManifestDigest())
+                || !DIGEST.matcher(result.proposalDigest()).matches()) {
+            throw invalidPatch();
+        }
+        Map<String, Object> proposal = Map.of(
+                "plan", result.patchPlan(),
+                "bundle", result.patchBundle());
+        if (!canonicalDigest(proposal).equals(result.proposalDigest())) {
+            throw invalidPatch();
+        }
+        return new EvaluateCommand(
+                patchPlan(result.patchPlan()),
+                patchBundle(result.patchBundle()),
+                result.proposalId(),
+                result.proposalDigest());
+    }
+
+    private PreparedProposal preparedProposal(
+            ProposalRecord proposal,
+            String candidateId,
+            String requestFingerprint) {
+        if (!candidateId.equals(proposal.candidateId())
+                || !requestFingerprint.equals(proposal.requestFingerprint())) {
+            throw idempotencyConflict();
+        }
+        if (proposal.proposalDigest() == null || proposal.completedAt() == null
+                || proposal.response().isEmpty()) {
+            throw new ApiException(
+                    "EVOLUTION_PROPOSAL_IN_PROGRESS",
+                    HttpStatus.CONFLICT,
+                    "This idempotency key has an unresolved optimizer call; it will not invoke the LLM again.");
+        }
+        ProposalResult cached = proposalResult(proposal.response());
+        if (!proposal.proposalDigest().equals(cached.proposalDigest())) {
+            throw idempotencyConflict();
+        }
+        return new PreparedProposal(
+                proposal.proposalId(),
+                proposal.candidateId(),
+                proposal.baseManifestDigest(),
+                proposal.requestFingerprint(),
+                proposal.request(),
+                cached,
+                false);
+    }
+
+    private Map<String, Object> proposalResponse(ProposalResult result) {
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("proposalId", result.proposalId());
+        response.put("candidateId", result.candidateId());
+        response.put("baseManifestDigest", result.baseManifestDigest());
+        response.put("proposalDigest", result.proposalDigest());
+        response.put("patchPlan", result.patchPlan());
+        response.put("patchBundle", result.patchBundle());
+        return Map.copyOf(response);
+    }
+
+    private ProposalResult proposalResult(Map<String, Object> response) {
+        return new ProposalResult(
+                requiredText(response, "proposalId"),
+                requiredText(response, "candidateId"),
+                requiredText(response, "baseManifestDigest"),
+                requiredText(response, "proposalDigest"),
+                requiredObject(response, "patchPlan"),
+                requiredObject(response, "patchBundle"));
+    }
+
+    @Transactional
     public EvolutionTrial bindWorkflow(
             UUID tenantId,
             UUID trialId,
@@ -203,8 +386,10 @@ public class EvolutionTrialService {
         if (!calculatedReportDigest.equals(result.reportDigest())) {
             throw invalidProof();
         }
-        boolean passed = authoritativeGatePassed(result);
         EvolutionCandidate candidate = requireCandidate(tenantId, trial.candidateId());
+        HarnessVersion harness = harnessVersions.require(candidate.baseHarnessVersionId());
+        requirePinnedBase(candidate, harness);
+        boolean passed = authoritativeGatePassed(result, harness);
         if (candidate.status() != EvolutionCandidate.Status.EVALUATING) {
             throw stale();
         }
@@ -252,43 +437,15 @@ public class EvolutionTrialService {
             HarnessVersion harness,
             EvaluateCommand command) {
         validatePatch(command, candidate, harness);
-        Map<String, Object> candidateValue = new LinkedHashMap<>();
-        candidateValue.put("schemaVersion", "1.0");
-        candidateValue.put("candidateId", candidate.candidateId());
-        candidateValue.put("baseHarnessVersionId", candidate.baseHarnessVersionId());
-        candidateValue.put("baseManifestDigest", candidate.baseManifestDigest());
-        candidateValue.put("failureSignature", candidate.failureSignature());
-        candidateValue.put("step", candidate.step());
-        candidateValue.put("checkName", candidate.checkName());
-        candidateValue.put("category", candidate.category());
-        candidateValue.put("requiredCapability", candidate.requiredCapability());
-        candidateValue.put("profileReferences", candidate.profileReferences());
-        candidateValue.put("observationIds", candidate.observationIds());
-        candidateValue.put("occurrenceCount", candidate.occurrenceCount());
-        candidateValue.put("projectCount", candidate.projectCount());
-        candidateValue.put("status", candidate.status().wireValue());
-        candidateValue.put("riskTier", candidate.riskTier());
-        candidateValue.put("changeKind", candidate.changeKind());
-        candidateValue.put("createdAt", candidate.createdAt().toString());
-
-        Map<String, Object> manifest = new LinkedHashMap<>();
-        manifest.put("schemaVersion", "1.0");
-        manifest.put("sourceCommit", harness.sourceCommit());
-        manifest.put("sourceTreeDigest", harness.sourceTreeDigest());
-        manifest.put("dirty", harness.dirty());
-        manifest.put("bundleDigest", harness.bundleDigest());
-        manifest.put("contractDigest", harness.contractDigest());
-        manifest.put("policyDigest", harness.policyDigest());
-        manifest.put("runtimeImageDigest", harness.runtimeImageDigest());
-        manifest.put("toolchainDigest", harness.toolchainDigest());
-        manifest.put("manifestDigest", harness.manifestDigest());
-
         Map<String, Object> value = new LinkedHashMap<>();
-        value.put("candidate", candidateValue);
-        value.put("harnessManifest", manifest);
+        value.put("candidate", candidateValue(candidate));
+        value.put("harnessManifest", manifestValue(harness));
         value.put("patchPlan", command.patchPlan().asMap());
         value.put("patchBundle", command.patchBundle().asMap());
+        value.put("proposalId", command.proposalId());
+        value.put("proposalDigest", proposalDigest(command));
         value.put("evalIds", FIXED_EVAL_IDS);
+        value.put("evaluationSuites", evaluationSuites());
         return value;
     }
 
@@ -314,7 +471,11 @@ public class EvolutionTrialService {
                 || plan.preservedInvariants() == null || plan.preservedInvariants().isEmpty()
                 || plan.preservedInvariants().size() > 128
                 || bundle.files() == null || bundle.files().isEmpty()
-                || bundle.files().size() > 8) {
+                || bundle.files().size() > 8
+                || (command.proposalId() != null
+                        && !DIGEST.matcher(command.proposalId()).matches())
+                || (command.proposalDigest() != null
+                        && !proposalDigest(command).equals(command.proposalDigest()))) {
             throw invalidPatch();
         }
         Map<String, String> planned = new LinkedHashMap<>();
@@ -354,6 +515,144 @@ public class EvolutionTrialService {
         if (totalBytes > 256 * 1024 || !planned.equals(materialized)) {
             throw invalidPatch();
         }
+    }
+
+    private Map<String, Object> candidateValue(EvolutionCandidate candidate) {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("schemaVersion", "1.0");
+        value.put("candidateId", candidate.candidateId());
+        value.put("baseHarnessVersionId", candidate.baseHarnessVersionId());
+        value.put("baseManifestDigest", candidate.baseManifestDigest());
+        value.put("failureSignature", candidate.failureSignature());
+        value.put("step", candidate.step());
+        value.put("checkName", candidate.checkName());
+        value.put("category", candidate.category());
+        value.put("requiredCapability", candidate.requiredCapability());
+        value.put("profileReferences", candidate.profileReferences());
+        value.put("observationIds", candidate.observationIds());
+        value.put("occurrenceCount", candidate.occurrenceCount());
+        value.put("projectCount", candidate.projectCount());
+        value.put("status", candidate.status().wireValue());
+        value.put("riskTier", candidate.riskTier());
+        value.put("changeKind", candidate.changeKind());
+        value.put("createdAt", candidate.createdAt().toString());
+        return value;
+    }
+
+    private Map<String, Object> manifestValue(HarnessVersion harness) {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("schemaVersion", "1.0");
+        value.put("sourceCommit", harness.sourceCommit());
+        value.put("sourceTreeDigest", harness.sourceTreeDigest());
+        value.put("dirty", harness.dirty());
+        value.put("bundleDigest", harness.bundleDigest());
+        value.put("contractDigest", harness.contractDigest());
+        value.put("policyDigest", harness.policyDigest());
+        value.put("runtimeImageDigest", harness.runtimeImageDigest());
+        value.put("toolchainDigest", harness.toolchainDigest());
+        value.put("manifestDigest", harness.manifestDigest());
+        return value;
+    }
+
+    private String proposalDigest(EvaluateCommand command) {
+        return canonicalDigest(Map.of(
+                "plan", command.patchPlan().asMap(),
+                "bundle", command.patchBundle().asMap()));
+    }
+
+    private PatchPlanInput patchPlan(Map<String, Object> value) {
+        try {
+            List<PatchChangeInput> changes = objects(value, "changes").stream()
+                    .map(change -> new PatchChangeInput(
+                            requiredText(change, "operation"),
+                            requiredText(change, "path"),
+                            requiredText(change, "rationale"),
+                            requiredInt(change, "estimatedAddedLines")))
+                    .toList();
+            return new PatchPlanInput(
+                    requiredText(value, "schemaVersion"),
+                    requiredText(value, "candidateId"),
+                    requiredText(value, "baseCommit"),
+                    requiredText(value, "summary"),
+                    changes,
+                    strings(value, "preservedInvariants"),
+                    strings(value, "publicEvalCaseIds"));
+        } catch (RuntimeException exception) {
+            throw invalidPatch();
+        }
+    }
+
+    private PatchBundleInput patchBundle(Map<String, Object> value) {
+        try {
+            List<CandidateFilePatchInput> files = objects(value, "files").stream()
+                    .map(file -> new CandidateFilePatchInput(
+                            requiredText(file, "operation"),
+                            requiredText(file, "path"),
+                            optionalText(file, "expectedOldSha256"),
+                            requiredText(file, "contentSha256"),
+                            requiredText(file, "content"),
+                            requiredText(file, "encoding")))
+                    .toList();
+            return new PatchBundleInput(
+                    requiredText(value, "schemaVersion"),
+                    requiredText(value, "candidateId"),
+                    requiredText(value, "baseCommit"),
+                    files);
+        } catch (RuntimeException exception) {
+            throw invalidPatch();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> objects(Map<String, Object> value, String name) {
+        Object item = value.get(name);
+        if (!(item instanceof List<?> list)
+                || list.stream().anyMatch(element -> !(element instanceof Map<?, ?>))) {
+            throw invalidPatch();
+        }
+        return (List<Map<String, Object>>) (List<?>) list;
+    }
+
+    private List<String> strings(Map<String, Object> value, String name) {
+        Object item = value.get(name);
+        if (!(item instanceof List<?> list)
+                || list.stream().anyMatch(element -> !(element instanceof String))) {
+            throw invalidPatch();
+        }
+        return list.stream().map(String.class::cast).toList();
+    }
+
+    private String requiredText(Map<String, Object> value, String name) {
+        Object item = value.get(name);
+        if (!(item instanceof String text)) {
+            throw invalidPatch();
+        }
+        return text;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> requiredObject(Map<String, Object> value, String name) {
+        Object item = value.get(name);
+        if (!(item instanceof Map<?, ?>)) {
+            throw invalidPatch();
+        }
+        return (Map<String, Object>) item;
+    }
+
+    private String optionalText(Map<String, Object> value, String name) {
+        Object item = value.get(name);
+        if (item == null || item instanceof String) {
+            return (String) item;
+        }
+        throw invalidPatch();
+    }
+
+    private int requiredInt(Map<String, Object> value, String name) {
+        Object item = value.get(name);
+        if (!(item instanceof Number number)) {
+            throw invalidPatch();
+        }
+        return number.intValue();
     }
 
     private boolean safePath(String value) {
@@ -410,9 +709,25 @@ public class EvolutionTrialService {
         }
     }
 
-    private boolean authoritativeGatePassed(ResultProof result) {
+    private boolean authoritativeGatePassed(ResultProof result, HarnessVersion harness) {
         Map<String, Object> report = result.authoritativeReport();
+        Object materialized = report.get("materializedFiles");
+        if (materialized instanceof List<?> files
+                && files.stream().anyMatch(path -> path instanceof String name
+                        && name.startsWith("src/ratsnestpro/eda/"))
+                && (!Boolean.TRUE.equals(report.get("generatorCadValidated"))
+                    || !"kubernetes_job".equals(report.get("executorMode")))) {
+            return false;
+        }
         if (!"PASSED".equals(result.verdict()) || !result.guardrailPassed()
+                || harness.runtimeImageDigest() == null
+                || !IMAGE_DIGEST.matcher(harness.runtimeImageDigest()).matches()
+                || harness.toolchainDigest() == null
+                || !TOOLCHAIN_DIGEST.matcher(harness.toolchainDigest()).matches()
+                || !Objects.equals(
+                        report.get("executorImageDigest"), harness.runtimeImageDigest())
+                || !Objects.equals(
+                        report.get("toolchainDigest"), harness.toolchainDigest())
                 || !Objects.equals(report.get("candidateId"), result.candidateId())
                 || !Objects.equals(report.get("patchDigest"), result.patchDigest())
                 || !Objects.equals(report.get("executorMode"), requiredExecutorMode)
@@ -461,7 +776,45 @@ public class EvolutionTrialService {
         value.put("holdoutSuiteDigest", holdoutSuiteDigest);
         value.put("adversarialSuiteDigest", adversarialSuiteDigest);
         value.put("evalIds", FIXED_EVAL_IDS);
+        value.put("evaluationSuites", evaluationSuites());
         return canonicalDigest(value);
+    }
+
+    private List<Map<String, Object>> evaluationSuites() {
+        return List.of(
+                evaluationSuite(
+                        "optimization-suite",
+                        "optimization",
+                        "evals/regression/optimization.v1.json",
+                        optimizationSuiteDigest,
+                        false),
+                evaluationSuite(
+                        "holdout-suite",
+                        "holdout",
+                        "evals/sealed/regression/holdout.v1.json",
+                        holdoutSuiteDigest,
+                        true),
+                evaluationSuite(
+                        "adversarial-suite",
+                        "adversarial",
+                        "evals/sealed/regression/adversarial.v1.json",
+                        adversarialSuiteDigest,
+                        true));
+    }
+
+    private Map<String, Object> evaluationSuite(
+            String evalId,
+            String suiteKind,
+            String manifestRef,
+            String suiteDigest,
+            boolean sealed) {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("evalId", evalId);
+        value.put("suiteKind", suiteKind);
+        value.put("manifestRef", manifestRef);
+        value.put("suiteDigest", suiteDigest);
+        value.put("sealed", sealed);
+        return Map.copyOf(value);
     }
 
     private void requireSuiteConfiguration() {
@@ -579,7 +932,25 @@ public class EvolutionTrialService {
             boolean needsStart) {
     }
 
-    public record EvaluateCommand(PatchPlanInput patchPlan, PatchBundleInput patchBundle) {
+    public record PreparedProposal(
+            String proposalId,
+            String candidateId,
+            String baseManifestDigest,
+            String requestFingerprint,
+            Map<String, Object> request,
+            ProposalResult cachedResult,
+            boolean needsGeneration) {
+    }
+
+    public record EvaluateCommand(
+            PatchPlanInput patchPlan,
+            PatchBundleInput patchBundle,
+            String proposalId,
+            String proposalDigest) {
+
+        public EvaluateCommand(PatchPlanInput patchPlan, PatchBundleInput patchBundle) {
+            this(patchPlan, patchBundle, null, null);
+        }
     }
 
     public record PatchPlanInput(

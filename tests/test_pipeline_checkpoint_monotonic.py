@@ -19,7 +19,12 @@ from ratsnestpro.orchestration.pipeline import (
     StepResult,
     restore_pipeline_state,
 )
-from ratsnestpro.orchestration.pipeline_contracts import ErcSummary, MaterializeResult
+from ratsnestpro.orchestration.pipeline_contracts import (
+    ErcSummary,
+    MaterializeResult,
+    TopologyBlock,
+    TopologyPlan,
+)
 
 
 def test_artifact_first_restore_keeps_release_only_checkpoint_when_checks_change(
@@ -145,6 +150,68 @@ def test_restore_rebuilds_artifact_when_persisted_evidence_is_stale(
 
     assert state.completed == []
     assert PipelineStep.REQUIREMENTS not in state.resume_candidates
+
+
+def test_restore_upgrades_explicit_v1_topology_before_validation() -> None:
+    requirement = RequirementSpec(raw_text="Build a board", project_name="board")
+    topology = TopologyPlan(
+        schema_version=1,
+        blocks=[TopologyBlock(
+            name="R5_ground_star_tie",
+            kind="ground_star",
+            description="R5 joins GND and PGND copper pours",
+            implementation_kind="copper_zone",
+            implementation_refs=["R5"],
+        )],
+        rails=["3V3"],
+        ground_net="GND",
+    )
+
+    state = restore_pipeline_state(
+        requirement_text=requirement.raw_text,
+        project_name=requirement.project_name,
+        intermediate_artifacts={
+            "requirements": requirement.model_dump(mode="json"),
+            "topology": topology.model_dump(mode="json", exclude_unset=True),
+        },
+        steps=[
+            {"name": "requirements", "used_llm": False, "blocked": False},
+            {"name": "topology", "used_llm": True, "blocked": False},
+        ],
+    )
+
+    restored = state.artifact(PipelineStep.TOPOLOGY)
+    assert state.completed == [PipelineStep.REQUIREMENTS, PipelineStep.TOPOLOGY]
+    assert isinstance(restored, TopologyPlan)
+    assert restored.schema_version == 2
+    assert restored.ground_domains == ["GND", "PGND"]
+
+
+def test_restore_rejects_partially_typed_topology_checkpoint() -> None:
+    requirement = RequirementSpec(raw_text="Build a board", project_name="board")
+    partial = {
+        "schema_version": 2,
+        "blocks": [{"name": "controller", "kind": "mcu"}],
+        "rails": ["3V3"],
+        "ground_net": "GND",
+        "ground_domains": ["GND"],
+    }
+
+    state = restore_pipeline_state(
+        requirement_text=requirement.raw_text,
+        project_name=requirement.project_name,
+        intermediate_artifacts={
+            "requirements": requirement.model_dump(mode="json"),
+            "topology": partial,
+        },
+        steps=[
+            {"name": "requirements", "used_llm": False, "blocked": False},
+            {"name": "topology", "used_llm": True, "blocked": False},
+        ],
+    )
+
+    assert state.completed == [PipelineStep.REQUIREMENTS]
+    assert PipelineStep.TOPOLOGY in state.resume_candidates
 
 
 def test_legacy_erc_summary_is_not_current_resume_evidence(tmp_path: Path) -> None:

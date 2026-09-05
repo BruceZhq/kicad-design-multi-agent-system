@@ -57,8 +57,52 @@ def _normalise_result(value: object) -> dict[str, Any] | None:
         "text": text[:_MAX_TEXT_CHARS],
         "content_hash": str(value.get("content_hash", ""))[:128],
         "updated_at": str(value.get("updated_at", ""))[:80],
+        "manufacturer": str(value.get("manufacturer", ""))[:160],
+        "mpn": str(value.get("mpn", ""))[:160],
+        "package": str(value.get("package", ""))[:160],
+        "symbol_lib_id": str(value.get("symbol_lib_id", ""))[:200],
+        "footprint_lib_id": str(value.get("footprint_lib_id", ""))[:240],
+        "pin_pad_digest": str(value.get("pin_pad_digest", ""))[:128],
         "provider": "external_agentic_rag",
         "untrusted_content": True,
+    }
+
+
+def _parts_claim_coverage(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Require exact package evidence and a matching KiCad binding claim."""
+
+    datasheets = [
+        item
+        for item in results
+        if item.get("evidence_type") == "datasheet"
+        and item.get("authority") == "official_manufacturer"
+        and item.get("mpn")
+        and item.get("package")
+        and item.get("content_hash")
+    ]
+    bindings = [
+        item
+        for item in results
+        if item.get("evidence_type") == "kicad_binding"
+        and item.get("mpn")
+        and item.get("package")
+        and item.get("symbol_lib_id")
+        and item.get("footprint_lib_id")
+        and item.get("pin_pad_digest")
+        and item.get("content_hash")
+    ]
+    matched = any(
+        str(datasheet["mpn"]).casefold() == str(binding["mpn"]).casefold()
+        and str(datasheet["package"]).casefold()
+        == str(binding["package"]).casefold()
+        for datasheet in datasheets
+        for binding in bindings
+    )
+    return {
+        "official_exact_package": bool(datasheets),
+        "verified_kicad_binding": bool(bindings),
+        "same_mpn_and_package": matched,
+        "sufficient": bool(datasheets and bindings and matched),
     }
 
 
@@ -124,10 +168,15 @@ def search_external_knowledge(
         status = str(raw.get("status", "ok"))
         if status not in _ALLOWED_STATUS:
             status = "unavailable"
+        claim_coverage: dict[str, Any] | None = None
         sufficient = bool(raw.get("evidence_sufficient")) and bool(results)
+        if role == "parts-specialist":
+            claim_coverage = _parts_claim_coverage(results)
+            sufficient = sufficient and claim_coverage["sufficient"] is True
         return {
             "status": "ok" if status == "sufficient" else status,
             "evidence_sufficient": sufficient,
+            **({"claim_coverage": claim_coverage} if claim_coverage is not None else {}),
             "results": results,
         }
     except (httpx.HTTPError, ValueError, TypeError) as exc:

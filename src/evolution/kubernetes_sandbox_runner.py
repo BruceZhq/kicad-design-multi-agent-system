@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +19,7 @@ _MAX_INPUT_BYTES = 768 * 1024
 _POLICY_PATH = Path("config/harness/invariants.v1.json")
 _POLICY_REJECTED_EXIT = 10
 _ENVIRONMENT_ERROR_EXIT = 20
+_PRIVATE_CANDIDATE_PATHS = (Path("evals/sealed"), Path(".git"))
 
 
 def _read_command(path: Path) -> dict[str, Any]:
@@ -90,6 +92,20 @@ def _independent_checkout(repository: Path, worktree: Path, base_commit: str) ->
     )
 
 
+def _remove_private_candidate_inputs(worktree: Path) -> None:
+    """Remove sealed sources and Git objects before candidate code can execute."""
+
+    root = worktree.resolve(strict=True)
+    for relative in _PRIVATE_CANDIDATE_PATHS:
+        target = root / relative
+        if target.is_symlink():
+            target.unlink()
+        elif target.is_dir():
+            shutil.rmtree(target)
+        elif target.exists():
+            target.unlink()
+
+
 def materialize(input_path: Path, repository: Path, worktree: Path) -> None:
     command = _read_command(input_path)
     request = trial_request_from_command(command)
@@ -110,6 +126,7 @@ def materialize(input_path: Path, repository: Path, worktree: Path) -> None:
         policy=policy,
         worktree=worktree,
     )
+    _remove_private_candidate_inputs(worktree)
 
 
 def main() -> int:

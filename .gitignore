@@ -73,6 +73,7 @@ coverage.xml
 .pytest-*/
 .pytest_*/
 .local-pytest-*/
+/.local-interview-audit-pytest/
 .mypy_cache/
 .ruff_cache/
 cover/

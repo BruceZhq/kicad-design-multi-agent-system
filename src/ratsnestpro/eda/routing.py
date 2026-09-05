@@ -478,6 +478,9 @@ def autoroute(
     via_diameter_mm: float = 0.6,
     via_drill_mm: float = 0.3,
     random_seed: int | None = None,
+    net_classes: list[dict] | None = None,
+    power_nets: list[str] | None = None,
+    critical_nets: list[str] | None = None,
 ) -> RouteOutcome:
     """Assign nets from ``netmap`` onto the board and autoroute it in place."""
     nets = len(netmap)
@@ -492,6 +495,14 @@ def autoroute(
     with tempfile.TemporaryDirectory(prefix="rnp_route_") as temp_dir:
         nm_path = Path(temp_dir) / "netmap.json"
         nm_path.write_text(json.dumps(netmap), encoding="utf-8")
+        from ratsnestpro.eda.routing_rules import bind_net_classes
+
+        # Validate before invoking any mutating CAD action.
+        bound_classes = bind_net_classes(net_classes, list(netmap), power_nets or []) if net_classes else []
+        rule_path = Path(temp_dir) / "routing-rules.json"
+        rule_path.write_text(json.dumps({"classes": bound_classes,
+                                        "critical_nets": [n for n in (critical_nets or []) if n in netmap]}),
+                             encoding="utf-8")
         try:
             proc = subprocess.run(
                 [
@@ -508,6 +519,7 @@ def autoroute(
                     str(via_diameter_mm),
                     str(via_drill_mm),
                     "" if random_seed is None else str(random_seed),
+                    str(rule_path),
                 ],
                 capture_output=True,
                 text=True,

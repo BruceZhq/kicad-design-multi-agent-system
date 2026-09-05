@@ -45,6 +45,7 @@ class SchematicDoc:
 
     def __init__(self, sch: Schematic) -> None:
         self._sch = sch
+        self.drawing_receipt: dict[str, Any] = {}
 
     # -- construction --------------------------------------------------- #
 

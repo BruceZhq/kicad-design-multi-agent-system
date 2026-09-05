@@ -61,6 +61,17 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
 
     private final ManagedChannel stableChannel;
     private final ManagedChannel canaryChannel;
+    private team.ratsnest.controlplane.agentgateway.application.RuntimeVersionRoutes versionRoutes;
+    private final java.util.concurrent.ConcurrentMap<String, ManagedChannel> versionChannels =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setVersionRoutes(team.ratsnest.controlplane.agentgateway.application.RuntimeVersionRoutes routes) {
+        this.versionRoutes = routes;
+    }
+
+    @jakarta.annotation.PreDestroy
+    public void closeVersionChannels() { versionChannels.values().forEach(ManagedChannel::shutdownNow); }
     private final RuntimeCredentials signer;
     private final ObjectMapper objectMapper;
     private final HttpAgentRuntimeGateway compatibilityGateway;
@@ -563,7 +574,15 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
     }
 
     private ManagedChannel channel(String runtimeChannel) {
-        if (!"canary".equals(runtimeChannel)) {
+        var endpoint = versionRoutes == null ? null : versionRoutes.endpoint(runtimeChannel);
+        if (endpoint != null) {
+            if (!(endpoint.get("grpc") instanceof String target) || target.isBlank()) {
+                throw new AgentRuntimeException(503, "Version-pinned gRPC deployment is not configured");
+            }
+            return versionChannels.computeIfAbsent(target, key -> buildChannel(key,
+                    Boolean.TRUE.equals(endpoint.get("plaintext"))));
+        }
+        if (!team.ratsnest.controlplane.agentgateway.application.RuntimeVersionRoutes.canary(runtimeChannel)) {
             return stableChannel;
         }
         if (canaryChannel == null) {
@@ -574,12 +593,7 @@ public final class GrpcAgentRuntimeGateway implements AgentRuntimeGateway {
     }
 
     private String runtimeChannel(Map<String, Object> config) {
-        Object harness = config.get("harness_version");
-        if (harness instanceof Map<?, ?> values
-                && "canary".equals(values.get("channel"))) {
-            return "canary";
-        }
-        return "stable";
+        return team.ratsnest.controlplane.agentgateway.application.RuntimeVersionRoutes.selector(config);
     }
 
     private final class GrpcEventSubscription

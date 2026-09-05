@@ -348,6 +348,78 @@ public class JdbcEvolutionRepository implements EvolutionRepository {
     }
 
     @Override
+    public Optional<ProposalRecord> findProposal(UUID tenantId, String proposalId) {
+        return jdbcClient.sql("""
+                        select proposal_id, candidate_id, base_manifest_digest,
+                               request_fingerprint, request, proposal_digest, response,
+                               created_at, completed_at
+                        from control_plane.evolution_proposals
+                        where tenant_id = :tenantId and proposal_id = :proposalId
+                        """)
+                .param("tenantId", tenantId)
+                .param("proposalId", proposalId)
+                .query((resultSet, rowNumber) -> new ProposalRecord(
+                        resultSet.getString("proposal_id"),
+                        resultSet.getString("candidate_id"),
+                        resultSet.getString("base_manifest_digest"),
+                        resultSet.getString("request_fingerprint"),
+                        jsonObject(resultSet.getString("request")),
+                        resultSet.getString("proposal_digest"),
+                        nullableJsonObject(resultSet.getString("response")),
+                        instant(resultSet, "created_at"),
+                        nullableInstant(resultSet, "completed_at")))
+                .optional();
+    }
+
+    @Override
+    public boolean insertProposal(UUID tenantId, ProposalRecord proposal) {
+        return jdbcClient.sql("""
+                        insert into control_plane.evolution_proposals (
+                            tenant_id, proposal_id, candidate_id, base_manifest_digest,
+                            request_fingerprint, request
+                        ) values (
+                            :tenantId, :proposalId, :candidateId, :baseManifestDigest,
+                            :requestFingerprint, cast(:request as jsonb)
+                        )
+                        on conflict do nothing
+                        """)
+                .param("tenantId", tenantId)
+                .param("proposalId", proposal.proposalId())
+                .param("candidateId", proposal.candidateId())
+                .param("baseManifestDigest", proposal.baseManifestDigest())
+                .param("requestFingerprint", proposal.requestFingerprint())
+                .param("request", json(proposal.request()))
+                .update() == 1;
+    }
+
+    @Override
+    public boolean completeProposal(
+            UUID tenantId,
+            String proposalId,
+            String requestFingerprint,
+            String proposalDigest,
+            Map<String, Object> response) {
+        return jdbcClient.sql("""
+                        update control_plane.evolution_proposals
+                        set proposal_digest = :proposalDigest,
+                            response = cast(:response as jsonb),
+                            completed_at = now()
+                        where tenant_id = :tenantId
+                          and proposal_id = :proposalId
+                          and request_fingerprint = :requestFingerprint
+                          and proposal_digest is null
+                          and response is null
+                          and completed_at is null
+                        """)
+                .param("proposalDigest", proposalDigest)
+                .param("response", json(response))
+                .param("tenantId", tenantId)
+                .param("proposalId", proposalId)
+                .param("requestFingerprint", requestFingerprint)
+                .update() == 1;
+    }
+
+    @Override
     public int nextAttempt(UUID tenantId, String candidateId) {
         return jdbcClient.sql("""
                         select coalesce(max(attempt), 0) + 1
@@ -460,6 +532,79 @@ public class JdbcEvolutionRepository implements EvolutionRepository {
                 .param("baseManifestDigest", trial.baseManifestDigest())
                 .param("evalSuiteDigest", trial.evalSuiteDigest())
                 .param("workflowId", result.temporalWorkflowId())
+                .update() == 1;
+    }
+
+    @Override
+    public boolean bindCanaryArtifacts(
+            UUID tenantId,
+            EvolutionTrial trial,
+            CanaryArtifactEvidence evidence) {
+        Map<String, Object> guardrails = new java.util.LinkedHashMap<>(trial.guardrailResults());
+        guardrails.put("artifactManifestDigest", evidence.artifactManifestDigest());
+        guardrails.put("buildProvenanceDigest", evidence.buildProvenanceDigest());
+        guardrails.put("canaryArtifactsBound", true);
+        guardrails.put("canaryHarnessVersionId", evidence.harnessVersionId());
+        guardrails.put("canaryRolloutId", evidence.rolloutId());
+        guardrails.put("canaryStartedAt", evidence.startedAt().toString());
+        guardrails.put("candidateArtifactObjectKey", evidence.artifactObjectKey());
+        return jdbcClient.sql("""
+                        update control_plane.evolution_trials
+                        set patch_commit = :patchCommit,
+                            patch_sha256 = :patchSha256,
+                            candidate_image_digest = :candidateImageDigest,
+                            guardrail_results = cast(:guardrailResults as jsonb),
+                            row_version = row_version + 1,
+                            updated_at = now()
+                        where tenant_id = :tenantId
+                          and trial_id = :trialId
+                          and candidate_id = :candidateId
+                          and verdict = 'PASSED'
+                          and report_digest = :reportDigest
+                          and row_version = :expectedVersion
+                        """)
+                .param("patchCommit", evidence.patchCommit())
+                .param("patchSha256", evidence.patchSha256())
+                .param("candidateImageDigest", evidence.candidateImageDigest())
+                .param("guardrailResults", json(guardrails))
+                .param("tenantId", tenantId)
+                .param("trialId", trial.trialId())
+                .param("candidateId", trial.candidateId())
+                .param("reportDigest", trial.reportDigest())
+                .param("expectedVersion", trial.rowVersion())
+                .update() == 1;
+    }
+
+    @Override
+    public boolean bindCanaryMetrics(
+            UUID tenantId,
+            EvolutionTrial trial,
+            CanaryMetricsEvidence evidence) {
+        Map<String, Object> guardrails = new java.util.LinkedHashMap<>(trial.guardrailResults());
+        guardrails.put("canaryEvidenceDigest", evidence.evidenceDigest());
+        guardrails.put("canaryMetricsBound", true);
+        guardrails.put("canaryReport", evidence.metrics());
+        return jdbcClient.sql("""
+                        update control_plane.evolution_trials
+                        set guardrail_results = cast(:guardrailResults as jsonb),
+                            row_version = row_version + 1,
+                            updated_at = now()
+                        where tenant_id = :tenantId
+                          and trial_id = :trialId
+                          and candidate_id = :candidateId
+                          and verdict = 'PASSED'
+                          and report_digest = :reportDigest
+                          and patch_commit is not null
+                          and candidate_image_digest is not null
+                          and guardrail_results->>'canaryArtifactsBound' = 'true'
+                          and row_version = :expectedVersion
+                        """)
+                .param("guardrailResults", json(guardrails))
+                .param("tenantId", tenantId)
+                .param("trialId", trial.trialId())
+                .param("candidateId", trial.candidateId())
+                .param("reportDigest", trial.reportDigest())
+                .param("expectedVersion", trial.rowVersion())
                 .update() == 1;
     }
 
@@ -584,6 +729,10 @@ public class JdbcEvolutionRepository implements EvolutionRepository {
         } catch (Exception exception) {
             throw new IllegalStateException("Unable to read evolution metadata", exception);
         }
+    }
+
+    private Map<String, Object> nullableJsonObject(String value) {
+        return value == null ? Map.of() : jsonObject(value);
     }
 
     private String json(List<String> value) {

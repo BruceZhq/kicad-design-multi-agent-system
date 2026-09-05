@@ -28,6 +28,18 @@ _COMPONENT_REFERENCE_RANGE_RE = re.compile(
 )
 _COMPONENT_REFERENCE_SEPARATORS_RE = re.compile(r"[\s,，、;/&+]+")
 _MAX_REFERENCE_RANGE_EXPANSION = 64
+_OPTIONAL_LIBRARY_ID_PLACEHOLDERS = {
+    "-",
+    "~",
+    "?",
+    "n/a",
+    "na",
+    "none",
+    "null",
+    "tbd",
+    "unknown",
+    "unspecified",
+}
 
 
 def _expanded_component_references(ref: str) -> list[str] | None:
@@ -124,6 +136,62 @@ class TopologyBlock(ProposalModel):
     ] = "auto"
     implementation_refs: list[str] = Field(default_factory=list, max_length=100)
 
+    @field_validator("implementation_refs", mode="before")
+    @classmethod
+    def _canonical_implementation_refs(cls, value: object) -> object:
+        if not isinstance(value, list):
+            return value
+        refs: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("implementation refs must be strings")
+            ref = item.strip().upper()
+            if ref and ref not in refs:
+                refs.append(ref)
+        return refs
+
+
+class GroundTieContract(ProposalModel):
+    """One physical conductive junction between named ground domains.
+
+    A net tie's terminals are electrically symmetric, so ``domains`` is a set
+    of endpoints rather than a functional pin mapping.  Non-symmetric devices
+    need a different topology contract and cannot masquerade as a ground tie.
+    """
+
+    component_ref: str = Field(
+        min_length=1,
+        max_length=32,
+        pattern=_COMPONENT_REFERENCE_PATTERN,
+    )
+    domains: list[str] = Field(min_length=2, max_length=16)
+    terminals_are_symmetric: Literal[True] = True
+
+    @field_validator("component_ref", mode="before")
+    @classmethod
+    def _canonical_ref(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("domains", mode="before")
+    @classmethod
+    def _canonical_domains(cls, value: object) -> object:
+        if not isinstance(value, list):
+            return value
+        domains: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("ground tie domains must be strings")
+            domain = item.strip()
+            if not 1 <= len(domain) <= 100:
+                raise ValueError("ground tie domain names must be 1..100 chars")
+            key = domain.casefold()
+            if not domain or key in seen:
+                continue
+            seen.add(key)
+            domains.append(domain)
+        return domains
+
 
 class TopologyPlan(ProposalModel):
     """The block-level architecture: functional blocks + supply rails.
@@ -132,9 +200,15 @@ class TopologyPlan(ProposalModel):
     structure and checked (bottom-line) for a power rail + ground presence.
     """
 
+    # Version 1 remains readable so a persisted checkpoint can reach the
+    # deterministic upgrader. Fresh proposals are normalized to version 2
+    # before they are accepted by the topology step.
+    schema_version: Literal[1, 2] = 2
     blocks: list[TopologyBlock] = Field(default_factory=list, max_length=200)
     rails: list[str] = Field(default_factory=list, max_length=50)
     ground_net: str = Field(default="GND", min_length=1, max_length=100)
+    ground_domains: list[str] = Field(default_factory=list, max_length=50)
+    ground_ties: list[GroundTieContract] = Field(default_factory=list, max_length=32)
     rationale: str = Field(default="", max_length=10_000)
 
     @field_validator("rails", mode="before")
@@ -160,6 +234,31 @@ class TopologyPlan(ProposalModel):
                 out.append(str(item))
         return out
 
+    @field_validator("ground_net", mode="before")
+    @classmethod
+    def _strip_ground_net(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("ground_domains", mode="before")
+    @classmethod
+    def _canonical_ground_domains(cls, value: object) -> object:
+        if not isinstance(value, list):
+            return value
+        domains: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("ground domains must be strings")
+            domain = item.strip()
+            if not 1 <= len(domain) <= 100:
+                raise ValueError("ground domain names must be 1..100 chars")
+            key = domain.casefold()
+            if not domain or key in seen:
+                continue
+            seen.add(key)
+            domains.append(domain)
+        return domains
+
     @model_validator(mode="after")
     def _unique(self) -> TopologyPlan:
         names = [b.name for b in self.blocks]
@@ -167,6 +266,13 @@ class TopologyPlan(ProposalModel):
             raise ValueError("topology block names must be unique")
         if len(self.rails) != len(set(self.rails)):
             raise ValueError("supply rails must be unique")
+        if len(self.ground_domains) != len({
+            item.casefold() for item in self.ground_domains
+        }):
+            raise ValueError("ground domains must be unique")
+        tie_refs = [tie.component_ref for tie in self.ground_ties]
+        if len(tie_refs) != len(set(tie_refs)):
+            raise ValueError("ground tie component refs must be unique")
         return self
 
     def block_kinds(self) -> set[str]:
@@ -188,6 +294,25 @@ class SelectedPart(ProposalModel):
     symbol: str = Field(min_length=1, max_length=200)  # lib_id, e.g. Device:R
     value: str = Field(min_length=1, max_length=200)
     footprint: str = Field(default="", max_length=240)
+
+    @field_validator("footprint", mode="before")
+    @classmethod
+    def _normalize_optional_footprint(cls, value: object) -> object:
+        """Turn common model placeholders into an unresolved package hint.
+
+        An unresolved optional footprint is valid proposal state and must flow
+        through deterministic binding/repair.  A punctuation placeholder must
+        never escape into a content-addressed closure contract and crash it.
+        """
+
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            normalized = value.strip()
+            if normalized.casefold() in _OPTIONAL_LIBRARY_ID_PLACEHOLDERS:
+                return ""
+            return normalized
+        return value
     # The model may suggest ``footprint`` while selecting the device. Only the
     # deterministic post-selection binder may mark that candidate verified.
     footprint_binding_status: Literal[
@@ -273,6 +398,9 @@ class SelectionPlan(ProposalModel):
     parts: list[SelectedPart] = Field(default_factory=list, max_length=1_000)
     component_closure_path: str = Field(default="", max_length=1_000)
     prepared_manifest_path: str = Field(default="", max_length=1_000)
+    # Self-contained checkpoint copy; the path remains a convenience artifact.
+    # This prevents a worker/PVC move from destroying the release receipt.
+    prepared_manifest_json: str = Field(default="", max_length=8_000_000)
     prepared_manifest_sha256: str = Field(
         default="",
         pattern=r"^(?:|[0-9a-f]{64})$",
@@ -570,6 +698,20 @@ class PcbPlacement(ProposalModel):
     side: str = Field(default="front", max_length=8)
 
 
+class PlacementPatch(ProposalModel):
+    """Only changed placements; board constraints and selection remain immutable."""
+
+    placements: list[PcbPlacement] = Field(min_length=1, max_length=32)
+    rationale: str = Field(default="", max_length=2_000)
+
+    @model_validator(mode="after")
+    def _unique(self) -> PlacementPatch:
+        refs = [item.ref for item in self.placements]
+        if len(refs) != len(set(refs)):
+            raise ValueError("placement patch references must be unique")
+        return self
+
+
 class PcbPlacementPlan(ProposalModel):
     """Accumulated PCB placements + board outline (grows critical -> general)."""
 
@@ -617,6 +759,7 @@ class NetClass(ProposalModel):
     """A routing net class: geometry rules for a group of nets (mm)."""
 
     name: str = Field(min_length=1, max_length=60)
+    nets: list[str] = Field(default_factory=list, max_length=500)
     width: float = Field(gt=0)
     clearance: float = Field(gt=0)
     via_diameter: float = Field(default=0.6, gt=0)

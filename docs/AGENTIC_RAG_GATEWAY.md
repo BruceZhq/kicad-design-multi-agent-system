@@ -1,6 +1,6 @@
 # 外部 Agentic RAG 接入契约
 
-RatsNestPro 不把知识库实现复制进 Agent Runtime。现有 Agentic RAG 作为独立、受信的 HTTP 服务接入，Architect、Parts Specialist 与 Reviewer 使用同一个检索契约；未配置或调用失败时，运行时自动退回内置知识与受控 Web 检索。
+RatsNestPro 不把知识库实现复制进 Agent Runtime。外部 Agentic RAG 可作为独立、受信的 HTTP 服务接入，Architect、Parts Specialist 与 Reviewer 使用同一个检索契约；本仓库只实现契约且默认未配置，未配置或调用失败时，运行时自动退回内置知识与受控 Web 检索。
 
 ## 查询契约
 
@@ -41,13 +41,19 @@ Runtime 向 `RATSNEST_KNOWLEDGE_GATEWAY_URL` 发送 `POST application/json`：
       "score": 0.92,
       "text": "Grounded excerpt...",
       "content_hash": "sha256-of-source-or-chunk",
-      "updated_at": "2026-08-19T00:00:00Z"
+      "updated_at": "2026-08-19T00:00:00Z",
+      "manufacturer": "STMicroelectronics",
+      "mpn": "STM32G070RBT6",
+      "package": "LQFP-64",
+      "symbol_lib_id": "MCU_ST_STM32G0:STM32G070RBTx",
+      "footprint_lib_id": "Package_QFP:LQFP-64_10x10mm_P0.5mm",
+      "pin_pad_digest": "sha256-of-canonical-pin-pad-map"
     }
   ]
 }
 ```
 
-只有 RAG 明确返回 `evidence_sufficient=true` 且至少有一条有效证据时，Agent 才会跳过该阶段的 Web fallback。`datasheet` 若要成为器件引脚/封装依据，还必须标记 `authority=official_manufacturer`。检索内容始终按不可信输入处理，不能覆盖工具门禁、KiCad 实库检查、ERC/DRC 或 Reviewer 结论。
+只有 RAG 明确返回 `evidence_sufficient=true` 且满足对应角色的 claim-level evidence gate 时，Agent 才会跳过该阶段的 Web fallback。Parts Specialist 必须同时取得带内容哈希的官方 Datasheet 精确 MPN/Package 证据，以及同一 MPN/Package 的 symbol、footprint、pin-pad digest 绑定；任意普通文档片段都不足以关闭证据缺口。检索内容始终按不可信输入处理，不能覆盖工具门禁、KiCad 实库检查、ERC/DRC 或 Reviewer 结论。
 
 Parts Specialist 会使用技术文档、历史 BOM、生命周期与已批准替代料证据，但不会把文档检索结果推断成实时库存、价格或交期；实时采购结论仍需要独立目录/供应链接口。
 

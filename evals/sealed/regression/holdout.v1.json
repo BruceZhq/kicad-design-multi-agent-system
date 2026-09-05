@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.0",
+  "suiteId": "ratsnest-release-holdout-v1",
+  "suiteKind": "holdout",
+  "sealed": true,
+  "suiteDigest": "ebf8cfb4883618adea4a39c1f87d07d6348cb416864f5d10b9e53a7ad7f34b23",
+  "cases": [
+    {
+      "caseId": "holdout.bilingual-constraint-authority",
+      "stage": "decision_engine",
+      "source": "evals/sealed/regression/test_holdout.py",
+      "sourceSha256": "25faabe32fbe799040a848045a33a039b02baee58e744a4b1c7e8f193d0e94fd",
+      "nodeId": "evals/sealed/regression/test_holdout.py::test_bilingual_physical_constraints_remain_authoritative",
+      "timeoutSeconds": 60
+    },
+    {
+      "caseId": "holdout.resume-negated-change",
+      "stage": "intent_router",
+      "source": "evals/sealed/regression/test_holdout.py",
+      "sourceSha256": "25faabe32fbe799040a848045a33a039b02baee58e744a4b1c7e8f193d0e94fd",
+      "nodeId": "evals/sealed/regression/test_holdout.py::test_resume_with_negated_change_preserves_checkpoint_semantics",
+      "timeoutSeconds": 60
+    }
+  ]
+}

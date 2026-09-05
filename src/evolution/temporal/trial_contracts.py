@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from evolution.contracts import EvolutionCandidate, HarnessManifest
 from evolution.optimizer import PatchBundle, PatchPlan
-from evolution.temporal.contracts import FIXED_EVAL_IDS
+from evolution.temporal.contracts import FIXED_EVAL_IDS, FIXED_SUITE_MANIFESTS
 
 _DIGEST_PATTERN = r"^[0-9a-f]{64}$"
 _TRIAL_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,200}$")
@@ -49,17 +49,39 @@ class TrialModel(BaseModel):
     )
 
 
+class EvaluationSuiteSpec(TrialModel):
+    eval_id: str = Field(min_length=1, max_length=80)
+    suite_kind: str = Field(pattern=r"^(optimization|holdout|adversarial)$")
+    manifest_ref: str = Field(min_length=1, max_length=300)
+    suite_digest: str = Field(pattern=_DIGEST_PATTERN)
+    sealed: bool
+
+
 class EvolutionTrialInput(TrialModel):
     candidate: EvolutionCandidate
     harness_manifest: HarnessManifest
     patch_plan: PatchPlan
     patch_bundle: PatchBundle
-    eval_ids: list[str] = Field(min_length=2, max_length=2)
+    proposal_id: str | None = Field(default=None, pattern=_DIGEST_PATTERN)
+    proposal_digest: str = Field(pattern=_DIGEST_PATTERN)
+    eval_ids: list[str] = Field(min_length=5, max_length=5)
+    evaluation_suites: list[EvaluationSuiteSpec] = Field(min_length=3, max_length=3)
 
     @model_validator(mode="after")
     def validate_fixed_input(self) -> EvolutionTrialInput:
         if tuple(self.eval_ids) != FIXED_EVAL_IDS:
             raise ValueError("eval_ids must use the fixed governed evaluation set")
+        observed_suites = tuple(
+            (
+                item.eval_id,
+                item.suite_kind,
+                item.manifest_ref,
+                item.sealed,
+            )
+            for item in self.evaluation_suites
+        )
+        if observed_suites != FIXED_SUITE_MANIFESTS:
+            raise ValueError("evaluation_suites must use the fixed governed manifests")
         if self.candidate.candidate_id != self.patch_plan.candidate_id:
             raise ValueError("candidate and patch plan do not match")
         if self.patch_plan.candidate_id != self.patch_bundle.candidate_id:
@@ -70,6 +92,14 @@ class EvolutionTrialInput(TrialModel):
             raise ValueError("candidate and base harness manifest do not match")
         if self.patch_plan.base_commit != self.harness_manifest.source_commit:
             raise ValueError("patch plan is not pinned to the base manifest commit")
+        expected_proposal_digest = canonical_digest(
+            {
+                "bundle": self.patch_bundle.model_dump(mode="json", by_alias=True),
+                "plan": self.patch_plan.model_dump(mode="json", by_alias=True),
+            }
+        )
+        if self.proposal_digest != expected_proposal_digest:
+            raise ValueError("proposal_digest does not bind the patch plan and bundle")
         return self
 
     def digest(self) -> str:
@@ -101,12 +131,26 @@ class EvolutionTrialStartRequest(TrialModel):
             raise ValueError("base_manifest_digest does not match trial_input")
         if self.input_digest != self.trial_input.digest():
             raise ValueError("input_digest does not match canonical trial_input")
+        suite_digests = {
+            item.suite_kind: item.suite_digest
+            for item in self.trial_input.evaluation_suites
+        }
+        if suite_digests != {
+            "optimization": self.optimization_suite_digest,
+            "holdout": self.holdout_suite_digest,
+            "adversarial": self.adversarial_suite_digest,
+        }:
+            raise ValueError("suite envelope digests do not match executable manifests")
         return self
 
     def suite_digest(self) -> str:
         return canonical_digest(
             {
                 "adversarialSuiteDigest": self.adversarial_suite_digest,
+                "evaluationSuites": [
+                    item.model_dump(mode="json", by_alias=True)
+                    for item in self.trial_input.evaluation_suites
+                ],
                 "evalIds": list(FIXED_EVAL_IDS),
                 "holdoutSuiteDigest": self.holdout_suite_digest,
                 "optimizationSuiteDigest": self.optimization_suite_digest,

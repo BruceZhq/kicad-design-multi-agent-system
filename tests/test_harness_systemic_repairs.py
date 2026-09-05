@@ -5,6 +5,8 @@ from pathlib import Path
 
 from agents.ratsnestpro import ratsnestpro_agent, tools
 from agents.ratsnestpro.ehe_memory import EheMemory
+from ratsnestpro.eda.materialize import materialize_pinmapped
+from ratsnestpro.orchestration import connection_synthesis as connection_module
 from ratsnestpro.orchestration import pipeline as pipeline_module
 from ratsnestpro.orchestration.ahe import (
     FailureOrigin,
@@ -17,6 +19,14 @@ from ratsnestpro.orchestration.component_resolution import (
     ComponentResolutionService,
     LibraryClosureResult,
     ResolutionStatus,
+)
+from ratsnestpro.orchestration.connection_synthesis import (
+    ConnectionSynthesisCheckpoint,
+    assign_parts_to_topology_blocks,
+    new_connection_checkpoint,
+    plan_connection_batches,
+    prepare_resumable_connection_checkpoint,
+    topology_fingerprint,
 )
 from ratsnestpro.orchestration.pipeline import (
     CheckResult,
@@ -34,11 +44,14 @@ from ratsnestpro.orchestration.pipeline import (
     _specific_component_identity_error,
 )
 from ratsnestpro.orchestration.pipeline_contracts import (
+    GroundTieContract,
     LogicalPin,
     NetIntent,
     NetlistIntent,
     SelectedPart,
     SelectionPlan,
+    TopologyBlock,
+    TopologyPlan,
 )
 from service.governance_scope import TrustedGovernanceScope
 
@@ -394,6 +407,159 @@ def _architect_requirement() -> str:
     )
 
 
+def test_topology_ownership_respects_typed_kind_and_migrates_legacy_star() -> None:
+    component = TopologyBlock(
+        name="R5_ground_star_tie",
+        kind="ground_star",
+        description="R5 sits between the GND and PGND copper pours",
+        implementation_kind="component",
+        implementation_refs=["R5"],
+    )
+    inferred_zone = TopologyBlock(
+        name="logic_ground_pour",
+        kind="ground_plane",
+        description="GND copper pour and zone",
+        implementation_kind="auto",
+    )
+    legacy_star = component.model_copy(
+        update={"implementation_kind": "copper_zone"}
+    )
+
+    assert pipeline_module._topology_implementation_kind(component) == "component"
+    assert pipeline_module._topology_implementation_kind(inferred_zone) == "copper_zone"
+    migrated = pipeline_module._normalize_topology_plan(
+        TopologyPlan(
+            blocks=[legacy_star],
+            rails=["3V3"],
+            ground_net="GND",
+        ),
+        recover_legacy_ground_star=True,
+    )
+    assert migrated.blocks[0].implementation_kind == "component"
+    assert migrated.ground_domains == ["GND", "PGND"]
+    assert migrated.ground_ties == [
+        GroundTieContract(component_ref="R5", domains=["GND", "PGND"])
+    ]
+    assert topology_fingerprint(migrated) != topology_fingerprint(
+        TopologyPlan(
+            blocks=[legacy_star],
+            rails=["3V3"],
+            ground_net="GND",
+        )
+    )
+    assert pipeline_module.TopologyStep().resumed_artifact_migration_is_safe(
+        TopologyPlan(
+            blocks=[legacy_star],
+            rails=["3V3"],
+            ground_net="GND",
+        ),
+        migrated,
+    )
+    assert not pipeline_module._looks_like_ground_net_name("GND_SENSE")
+
+
+def test_v1_connection_checkpoint_upgrades_only_when_partition_is_unchanged(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        connection_module.symbols,
+        "symbol_pins",
+        lambda _lib_id: [
+            {"number": "1", "name": "~"},
+            {"number": "2", "name": "~"},
+        ],
+    )
+    topology = pipeline_module._normalize_topology_plan(TopologyPlan(
+        blocks=[TopologyBlock(name="passives", kind="passive")],
+        rails=["3V3"],
+        ground_net="GND",
+    ))
+    selection = SelectionPlan(parts=[
+        SelectedPart(ref="R1", symbol="Device:R", value="1k", role="resistor"),
+        SelectedPart(ref="R2", symbol="Device:R", value="2k", role="resistor"),
+    ])
+    current_plan = plan_connection_batches(
+        topology,
+        selection,
+        target_pin_count=2,
+        max_batches=4,
+    )
+    current = new_connection_checkpoint(topology, selection, current_plan)
+    legacy_hash = connection_module._legacy_topology_fingerprint(topology)
+    legacy_plan = current.plan.model_dump(mode="json")
+    legacy_plan["topology_fingerprint"] = legacy_hash
+    legacy_plan["plan_fingerprint"] = connection_module._canonical_hash(
+        connection_module._plan_fingerprint_payload(
+            topology_hash=legacy_hash,
+            selection_hash=legacy_plan["selection_fingerprint"],
+            target_pin_count=legacy_plan["target_pin_count"],
+            effective_target_pin_count=legacy_plan["effective_target_pin_count"],
+            max_batches=legacy_plan["max_batches"],
+            shared_refs=legacy_plan["shared_refs"],
+            oversized_atomic_refs=legacy_plan["oversized_atomic_refs"],
+            batching_supported=legacy_plan["batching_supported"],
+            batches=current.plan.batches,
+        )
+    )
+    legacy_payload = current.model_dump(mode="json")
+    legacy_payload.update({
+        "schema_version": 1,
+        "topology_fingerprint": legacy_hash,
+        "plan": legacy_plan,
+    })
+    legacy = ConnectionSynthesisCheckpoint.model_validate(legacy_payload)
+
+    upgraded = prepare_resumable_connection_checkpoint(
+        legacy,
+        topology,
+        selection,
+    )
+
+    assert upgraded is not None
+    assert upgraded.schema_version == 2
+    assert upgraded.batches == legacy.batches
+    assert upgraded.aggregate == legacy.aggregate
+
+    changed_topology = topology.model_copy(update={
+        "ground_domains": ["GND", "AGND"],
+        "ground_ties": [GroundTieContract(
+            component_ref="R1",
+            domains=["GND", "AGND"],
+        )],
+    })
+    assert prepare_resumable_connection_checkpoint(
+        legacy,
+        changed_topology,
+        selection,
+    ) is None
+
+
+def test_materializer_drives_each_isolated_ground_domain() -> None:
+    document = materialize_pinmapped(
+        components=[{
+            "ref": "J1",
+            "symbol": "Connector_Generic:Conn_01x02",
+            "value": "ground-domain fixture",
+            "footprint": "",
+            "x": 20,
+            "y": 20,
+            "rotation": 0,
+            "release_ready": True,
+            "resolution_status": "installed_exact",
+        }],
+        nets=[
+            {"name": "GND", "pins": [{"ref": "J1", "number": "1"}]},
+            {"name": "PGND", "pins": [{"ref": "J1", "number": "2"}]},
+        ],
+        ground_nets=["GND", "PGND"],
+    )
+
+    assert sum(
+        component.get("value") == "PWR_FLAG"
+        for component in document.components()
+    ) == 2
+
+
 def test_flattened_pinout_aliases_collapse_to_unique_composite_pin() -> None:
     aliases = [
         {
@@ -462,6 +628,349 @@ def test_control_normalizer_rewires_boot_pulldown_to_verified_pin(
     view = _ConnectivityView.build(_control_selection(), repaired)
 
     assert view.part_nets(_control_selection().parts[1]) == {"GND", "SWCLK"}
+
+
+def test_control_normalizer_binds_unconnected_verified_boot_pin(
+    monkeypatch,
+) -> None:
+    pin_map = {
+        "MCU_Test:Controller": [
+            {"number": "1", "name": "VSS"},
+            {"number": "2", "name": "VDD"},
+            {"number": "5", "name": "PA14"},
+            {"number": "6", "name": "PB2"},
+        ],
+        "Device:R": [
+            {"number": "1", "name": "~"},
+            {"number": "2", "name": "~"},
+        ],
+        "Device:D": [
+            {"number": "1", "name": "K"},
+            {"number": "2", "name": "A"},
+        ],
+    }
+    monkeypatch.setattr(
+        pipeline_module.symbols,
+        "symbol_pins",
+        lambda lib_id: pin_map[lib_id],
+    )
+    intent = _control_intent(boot_pin="PB2")
+    intent.net("SWCLK_BOOT0").name = "BOOT0"  # type: ignore[union-attr]
+
+    repaired = pipeline_module._normalize_control_support(
+        _architect_requirement(),
+        _control_selection(),
+        intent,
+    )
+    view = _ConnectivityView.build(_control_selection(), repaired)
+
+    assert view.pin_nets[("U1", "5")] == "BOOT0"
+    assert view.pin_nets.get(("U1", "6")) != "BOOT0"
+    assert view.part_nets(_control_selection().parts[1]) == {"BOOT0", "GND"}
+
+
+def test_split_ground_star_is_normalized_and_gated(monkeypatch) -> None:
+    pin_map = {
+        "Test:Logic": [{"number": "1", "name": "VSS"}],
+        "Test:Motor": [{"number": "1", "name": "PGND"}],
+        "Device:R": [
+            {"number": "1", "name": "~"},
+            {"number": "2", "name": "~"},
+        ],
+    }
+    monkeypatch.setattr(
+        pipeline_module.symbols,
+        "symbol_pins",
+        lambda lib_id: pin_map[lib_id],
+    )
+    selection = SelectionPlan(parts=[
+        SelectedPart(
+            ref="U1",
+            symbol="Test:Logic",
+            value="logic",
+            footprint="Test:Logic",
+            role="mcu",
+        ),
+        SelectedPart(
+            ref="U2",
+            symbol="Test:Motor",
+            value="motor",
+            footprint="Test:Motor",
+            role="motor_driver",
+        ),
+        SelectedPart(
+            ref="R5",
+            symbol="Device:R",
+            value="0R",
+            footprint="Resistor_SMD:R_0805_2012Metric",
+            role="ground_star_net_tie",
+        ),
+    ])
+    topology = TopologyPlan(
+        blocks=[TopologyBlock(
+            name="R5_ground_star_tie",
+            kind="ground_star",
+            description="R5 pin 1 is GND and pin 2 is PGND",
+            implementation_kind="component",
+            implementation_refs=["R5"],
+        )],
+        rails=["3V3", "VMOT"],
+        ground_net="GND",
+        ground_domains=["GND", "PGND"],
+        ground_ties=[GroundTieContract(
+            component_ref="R5",
+            domains=["GND", "PGND"],
+        )],
+    )
+    intent = NetlistIntent(
+        ground_net="GND",
+        nets=[
+            NetIntent(
+                name="GND",
+                kind="ground",
+                pins=[LogicalPin(ref="U1", pin="VSS")],
+            ),
+            NetIntent(
+                name="PGND",
+                kind="signal",
+                pins=[LogicalPin(ref="U2", pin="PGND")],
+            ),
+        ],
+    )
+
+    repaired = pipeline_module._normalize_ground_star_ties(
+        selection,
+        intent,
+        topology,
+    )
+    view = _ConnectivityView.build(selection, repaired)
+    checks = pipeline_module._ground_star_topology_checks(
+        selection,
+        repaired,
+        topology,
+    )
+
+    assert view.part_nets(selection.parts[2]) == {"GND", "PGND"}
+    assert repaired.net("PGND").kind == "ground"  # type: ignore[union-attr]
+    assert checks[0].ok
+    assert "ground-tie contracts" in pipeline_module._ground_connection_guidance(
+        topology
+    )
+
+
+def test_multiple_typed_ground_ties_and_mixed_signal_ic_are_supported(
+    monkeypatch,
+) -> None:
+    pin_map = {
+        "Test:Load": [{"number": "1", "name": "GND"}],
+        "Test:Mixed": [
+            {"number": "1", "name": "AGND"},
+            {"number": "2", "name": "DGND"},
+            {"number": "3", "name": "OUT"},
+        ],
+        "Device:R": [
+            {"number": "1", "name": "~"},
+            {"number": "2", "name": "~"},
+        ],
+        "Device:C": [
+            {"number": "1", "name": "~"},
+            {"number": "2", "name": "~"},
+        ],
+    }
+    monkeypatch.setattr(
+        pipeline_module.symbols,
+        "symbol_pins",
+        lambda lib_id: pin_map[lib_id],
+    )
+    selection = SelectionPlan(parts=[
+        *(
+            SelectedPart(
+                ref=ref,
+                symbol="Test:Load",
+                value="load",
+                role="domain_load",
+            )
+            for ref in ("U1", "U2", "U3")
+        ),
+        SelectedPart(
+            ref="U4",
+            symbol="Test:Mixed",
+            value="mixed-signal IC",
+            role="mixed_signal_converter",
+        ),
+        *(
+            SelectedPart(
+                ref=ref,
+                symbol="Device:R",
+                value="0R",
+                role="ground_star_net_tie",
+            )
+            for ref in ("R1", "R2")
+        ),
+        SelectedPart(
+            ref="C1",
+            symbol="Device:C",
+            value="1nF",
+            role="chassis_ground_coupling_capacitor",
+        ),
+    ])
+    topology = TopologyPlan(
+        blocks=[
+            TopologyBlock(
+                name="logic_analog_boundary",
+                kind="net_tie",
+                implementation_kind="component",
+                implementation_refs=["R1"],
+            ),
+            TopologyBlock(
+                name="analog_power_ground_tie",
+                kind="ground_star",
+                implementation_kind="component",
+                implementation_refs=["R2"],
+            ),
+        ],
+        rails=["3V3"],
+        ground_net="GND",
+        ground_domains=["GND", "AGND", "PGND"],
+        ground_ties=[
+            GroundTieContract(component_ref="R1", domains=["GND", "AGND"]),
+            GroundTieContract(component_ref="R2", domains=["AGND", "PGND"]),
+        ],
+    )
+    intent = NetlistIntent(
+        ground_net="GND",
+        nets=[
+            NetIntent(
+                name="GND",
+                kind="ground",
+                pins=[
+                    LogicalPin(ref="U1", pin="GND"),
+                    LogicalPin(ref="U4", pin="DGND"),
+                    LogicalPin(ref="C1", pin="1"),
+                ],
+            ),
+            NetIntent(
+                name="AGND",
+                kind="ground",
+                pins=[
+                    LogicalPin(ref="U2", pin="GND"),
+                    LogicalPin(ref="U4", pin="AGND"),
+                    LogicalPin(ref="C1", pin="2"),
+                ],
+            ),
+            NetIntent(
+                name="PGND",
+                kind="ground",
+                pins=[LogicalPin(ref="U3", pin="GND")],
+            ),
+        ],
+    )
+
+    repaired = pipeline_module._normalize_ground_star_ties(
+        selection,
+        intent,
+        topology,
+    )
+    checks = pipeline_module._ground_star_topology_checks(
+        selection,
+        repaired,
+        topology,
+    )
+    topology_checks = pipeline_module.TopologyStep().check(
+        PipelineState(requirement_text="board"),
+        topology,
+    )
+
+    assert _ConnectivityView.build(selection, repaired).part_nets(
+        selection.parts[4]
+    ) == {"GND", "AGND"}
+    assert _ConnectivityView.build(selection, repaired).part_nets(
+        selection.parts[5]
+    ) == {"AGND", "PGND"}
+    assert all(check.ok for check in checks)
+    assert next(
+        check for check in topology_checks
+        if check.name == "typed_ground_tie_contracts"
+    ).ok
+
+
+def test_typed_ownership_precedes_semantics_and_signal_name_is_not_ground() -> None:
+    selection = SelectionPlan(parts=[SelectedPart(
+        ref="FB1",
+        symbol="Device:Ferrite_Bead",
+        value="ferrite",
+        role="generic_filter",
+    )])
+    topology = TopologyPlan(
+        blocks=[
+            TopologyBlock(
+                name="digital_filter",
+                kind="filter",
+                implementation_kind="component",
+                implementation_refs=["FB1"],
+            ),
+            TopologyBlock(name="integration", kind="integration"),
+            TopologyBlock(
+                name="optional_mounting_hole",
+                kind="mechanical",
+                implementation_kind="mechanical_feature",
+                implementation_refs=["H1"],
+            ),
+        ],
+        rails=["3V3"],
+        ground_net="GND",
+    )
+    intent = NetlistIntent(
+        ground_net="GND",
+        nets=[
+            NetIntent(name="GND", kind="ground"),
+            NetIntent(name="GND_SENSE", kind="signal"),
+        ],
+    )
+
+    assert assign_parts_to_topology_blocks(topology, selection) == {
+        "FB1": "digital_filter"
+    }
+    assert pipeline_module.SchMaterializeStep._ground_domains(intent) == ["GND"]
+    assert pipeline_module._ground_domain_contract_checks(
+        intent,
+        pipeline_module._normalize_topology_plan(topology),
+    )[0].ok
+    misclassified = intent.model_copy(deep=True)
+    misclassified.net("GND_SENSE").kind = "ground"  # type: ignore[union-attr]
+    assert not pipeline_module._ground_domain_contract_checks(
+        misclassified,
+        pipeline_module._normalize_topology_plan(topology),
+    )[0].ok
+
+
+def test_fresh_ground_star_cannot_claim_copper_zone_ownership() -> None:
+    topology = pipeline_module._normalize_topology_plan(TopologyPlan(
+        blocks=[TopologyBlock(
+            name="isolation_boundary",
+            kind="net_tie",
+            implementation_kind="copper_zone",
+            implementation_refs=["NT1"],
+        )],
+        rails=["3V3"],
+        ground_net="GND",
+        ground_domains=["GND", "AGND"],
+        ground_ties=[GroundTieContract(
+            component_ref="NT1",
+            domains=["GND", "AGND"],
+        )],
+    ))
+
+    checks = pipeline_module.TopologyStep().check(
+        PipelineState(requirement_text="board"),
+        topology,
+    )
+
+    contract = next(
+        check for check in checks if check.name == "typed_ground_tie_contracts"
+    )
+    assert not contract.ok
+    assert "must be a component-backed block" in contract.message
 
 
 def test_verified_alias_and_pull_role_drive_boot_gate(monkeypatch) -> None:
@@ -1017,6 +1526,98 @@ def test_boot_gate_rejects_missing_or_wrong_pin_alias_and_wrong_pull_direction(
     ]
     assert all(not check.ok for check in failed)
     assert all(check.origin is None for check in failed)
+
+
+def test_signal_output_power_rail_gate_requires_a_real_pull_resistor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pin_map = {
+        "Sensor_Test:Addressable": [
+            {"number": "5", "name": "GND", "type": "power_in"},
+            {"number": "7", "name": "SDO", "type": "output"},
+        ],
+        "Device:R": [
+            {"number": "1", "name": "~", "type": "passive"},
+            {"number": "2", "name": "~", "type": "passive"},
+        ],
+    }
+    monkeypatch.setattr(pipeline_module.config, "symbol_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        pipeline_module.symbols,
+        "symbol_pins",
+        lambda lib_id: pin_map[lib_id],
+    )
+    selection = SelectionPlan(parts=[
+        SelectedPart(
+            ref="U3",
+            symbol="Sensor_Test:Addressable",
+            value="sensor",
+            role="i2c_sensor",
+        ),
+        SelectedPart(
+            ref="R7",
+            symbol="Device:R",
+            value="10k",
+            role="address_select_pulldown",
+        ),
+    ])
+    state = PipelineState(requirement_text="build an I2C sensor board")
+    state.artifacts[pipeline_module.PipelineStep.SELECTION] = selection
+    bad = NetlistIntent(
+        nets=[NetIntent(
+            name="GND",
+            kind="ground",
+            pins=[
+                LogicalPin(ref="U3", pin="GND"),
+                LogicalPin(ref="U3", pin="SDO"),
+            ],
+        )],
+        ground_net="GND",
+    )
+    good = NetlistIntent(
+        nets=[
+            NetIntent(
+                name="GND",
+                kind="ground",
+                pins=[
+                    LogicalPin(ref="U3", pin="GND"),
+                    LogicalPin(ref="R7", pin="2"),
+                ],
+            ),
+            NetIntent(
+                name="ADDR_STRAP",
+                kind="signal",
+                pins=[
+                    LogicalPin(ref="U3", pin="SDO"),
+                    LogicalPin(ref="R7", pin="1"),
+                ],
+            ),
+        ],
+        ground_net="GND",
+    )
+    step = SchConnectionsStep()
+    bad_gate = next(
+        check
+        for check in step.check(state, bad)
+        if check.name == "signal_output_not_directly_on_power_rail"
+    )
+    good_gate = next(
+        check
+        for check in step.check(state, good)
+        if check.name == "signal_output_not_directly_on_power_rail"
+    )
+
+    assert not bad_gate.ok
+    assert bad_gate.affected_refs == ["U3"]
+    assert bad_gate.evidence["pin_net_conflicts"] == [{
+        "ref": "U3",
+        "pin": "7",
+        "pin_name": "SDO",
+        "pin_type": "output",
+        "net": "GND",
+    }]
+    assert good_gate.ok
 
 
 def test_resettable_input_fuse_is_not_classified_as_mcu_reset_support(

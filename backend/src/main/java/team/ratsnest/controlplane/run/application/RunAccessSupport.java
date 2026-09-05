@@ -146,7 +146,7 @@ class RunAccessSupport {
         return new RunReference(
                 run.runId().toString(),
                 run.runtimeIdentity(signer),
-                run.harnessChannel());
+                run.harnessChannel() + "@" + run.harnessVersionId());
     }
 
     RuntimeIdentity identity(UUID tenantId, UUID projectId, AuthenticatedActor actor) {

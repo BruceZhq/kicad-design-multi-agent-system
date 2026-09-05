@@ -31,6 +31,7 @@ from agents.ratsnestpro.temporal.contracts import (
 )
 from core import settings
 from observability import operation_span, record_pipeline_step
+from ratsnestpro.orchestration.component_resolution import verified_replacements_by_ref
 from service.governance_scope import (
     TrustedGovernanceScope,
     verify_governance_scope_token,
@@ -161,6 +162,19 @@ def _manifest(command: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
             or actual_requirement_hash != command.get("requirement_hash")
         ):
             raise ValueError("Temporal run manifest requirement digest mismatch")
+        replacement_secret = (
+            settings.RATSNEST_INTERNAL_SIGNING_SECRET.get_secret_value()
+            if settings.RATSNEST_INTERNAL_SIGNING_SECRET is not None
+            else None
+        )
+        if value.get("approved_component_replacements"):
+            value["approved_component_replacements"] = {
+                ref: replacement.model_dump(mode="json")
+                for ref, replacement in verified_replacements_by_ref(
+                    value.get("approved_component_replacements"),
+                    secret=replacement_secret,
+                ).items()
+            }
         manifest_resume = _canonical_resume_step(value.get("resume_from_step"))
         command_resume = _canonical_resume_step(command.get("resume_from_step"))
         if manifest_resume != command_resume:
@@ -227,6 +241,19 @@ def _manifest(command: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
             else {}
         ),
     }
+    replacement_secret = (
+        settings.RATSNEST_INTERNAL_SIGNING_SECRET.get_secret_value()
+        if settings.RATSNEST_INTERNAL_SIGNING_SECRET is not None
+        else None
+    )
+    if command.get("approved_component_replacements"):
+        value["approved_component_replacements"] = {
+            ref: replacement.model_dump(mode="json")
+            for ref, replacement in verified_replacements_by_ref(
+                command.get("approved_component_replacements"),
+                secret=replacement_secret,
+            ).items()
+        }
     if resume_from_step:
         value["resume_from_step"] = resume_from_step
     if governance_scope is not None:

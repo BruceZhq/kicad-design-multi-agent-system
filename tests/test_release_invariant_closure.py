@@ -45,12 +45,19 @@ from ratsnestpro.orchestration.release_invariants import (
             "corner."
         ),
         (
+            "Create a two-layer PCB no larger than 40 mm by 30 mm. Maintain "
+            "a continuous GND copper pour on B.Cu. The 5V and GND trunk trace "
+            "width must be at least 0.30 mm. Keep each decoupling capacitor "
+            "within 3 mm of its IC power pin. Use four non-plated M2 mounting "
+            "holes, one at each corner."
+        ),
+        (
             "设计为 2 层板，尺寸不超过 40mm × 30mm，底层尽量铺设完整 GND。"
             "5V 和 GND 主干线宽不得小于 0.30mm，去耦距离不超过 3mm。"
             "DECISION: mounting=A — Four non-plated M2 mounting holes."
         ),
     ],
-    ids=("chinese", "english", "runtime-envelope"),
+    ids=("chinese", "english", "english-by-limit", "runtime-envelope"),
 )
 def test_extracts_explicit_release_invariants_in_both_languages(
     requirement: str,

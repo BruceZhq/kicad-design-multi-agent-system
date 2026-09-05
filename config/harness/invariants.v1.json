@@ -48,6 +48,12 @@
       "src/agents/ratsnestpro/profiles/*.json",
       "docs/**/*.md"
     ],
+    "allowedGeneratorGlobs": [
+      "src/ratsnestpro/eda/materialize.py",
+      "src/ratsnestpro/eda/schematic_wiring.py",
+      "src/ratsnestpro/eda/routing_rules.py",
+      "src/ratsnestpro/eda/_route_worker.py"
+    ],
     "deniedGlobs": [
       ".github/workflows/**",
       "backend/src/main/resources/db/migration/**",
@@ -56,6 +62,9 @@
       "contracts/evolution/**/sealed/**",
       "evals/sealed/**",
       "tests/evolution/**",
+      "src/evolution/**",
+      "src/ratsnestpro/orchestration/release_invariants.py",
+      "src/ratsnestpro/orchestration/review_repair.py",
       "deploy/**",
       "privatecredentials/**",
       "**/.env",

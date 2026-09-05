@@ -97,9 +97,22 @@ case、arm、模型和能力范围；Java 只接受两个固定 Agent ID，且�
 - `protocolCompletionRate`：SSE 终止契约完成；
 - `pipeline17StepCompletionRate`：17 步全部完成；
 - `strictTaskSuccessRate`：所有预声明检查均未失败，简历里的“端到端任务完成率”默认使用此口径；
-- `releaseReadyRate`：确定性发布门禁真正通过；
+- `releaseReadyRate`：内容寻址工程证据支持的确定性发布门禁真正通过；
+- `reportedReleaseReadyRate`：运行时仅声明 `deliveryStatus=release_ready` 的比例，用于
+  识别虚假发布；它不能作为发布成功率；
+- `strictReleaseEvidenceRate`：发布的 `pipeline_result.json` 经对象摘要复核后，同时满足
+  17/17、`release_ready=true`、零 blocker、ERC=0、DRC=0、未连接=0、真实
+  Freerouting DSN/SES 和核心产物闭包；单独出现 `deliveryStatus=release_ready` 不再计为严格通过；
+- `ercCleanRate`、`drcCleanRate`、`zeroUnconnectedRate`、
+  `routingCompletionRate`、`coreArtifactClosureRate`：定位发布失败所在工程门；核心产物闭包分别要求 Production BOM、Procurement BOM 与 CPL，不能用单个通用 BOM 文件冒充双轨输出；
+- `ercErrorCount`、`drcErrorCount`、`unconnectedCount` 及
+  `artifactIdentityRate`：给 Canary/Promote 门提供可直接强校验的聚合计数和产物身份覆盖率；
 - `humanAcceptanceRate`：有盲审标签样本中的人工接受率；
 - 阶段/工具契约错误率、平均/中位/P95 时长、HITL 介入率与请求数、工具参数 schema/后置条件正确率；
 - handoff 只对多 Agent 报告，单 Agent 固定为 `not_applicable`，不是 0 次成功。
 
 P95 仅在 arm 样本数不少于 5 时报告。`metricDeltas` 为 `multi_agent - single_agent`，只使用两臂都已完成的 pair，并明确输出 `deltaDenominatorCompletePairs`；中途报告或缺臂样本不会混入配对差值。任何缺少的事件证据都是 `null`/N/A，绝不补成成功。
+
+报告的 `failureSummary` 只保留 `stage + check + severity` 生成的稳定 SHA-256
+签名和计数，不保存可能含用户设计内容的完整诊断。它用于比较跨案例、跨版本重复故障，
+不能替代原始 KiCad 报告取证。

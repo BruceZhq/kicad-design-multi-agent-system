@@ -138,6 +138,63 @@ def test_erc_pin_not_connected_rebuilds_materialization_from_design_ir(
     assert step.rollback_target(state, artifact, checks) == PipelineStep.SCH_MATERIALIZE
 
 
+def test_erc_pin_type_conflict_carries_pin_net_evidence_to_source_owner(
+    tmp_path: Path,
+) -> None:
+    report = tmp_path / "board.erc.json"
+    report.write_text(json.dumps({
+        "sheets": [{
+            "violations": [{
+                "type": "pin_to_pin",
+                "severity": "error",
+                "description": "Pins of type Output and Power output are connected",
+                "items": [
+                    {"description": "Symbol U3 Pin 7 [SDO, Output, Line]"},
+                    {
+                        "description": (
+                            "Symbol #PWR01 Pin 1 [Power output, Line]"
+                        )
+                    },
+                ],
+            }],
+        }],
+    }), encoding="utf-8")
+    netlist = tmp_path / "board.netlist.xml"
+    netlist.write_text(
+        '<export><nets><net code="1" name="/GND">'
+        '<node ref="U3" pin="7" pinfunction="SDO" pintype="output"/>'
+        '<node ref="#PWR01" pin="1" pintype="power_out"/>'
+        "</net></nets></export>",
+        encoding="utf-8",
+    )
+    artifact = ErcSummary(
+        sch_path=str(tmp_path / "board.kicad_sch"),
+        cli_available=True,
+        cli_ran=True,
+        cli_error_count=1,
+        cli_report_path=str(report),
+        connectivity_checked=True,
+        connectivity_matches=True,
+        connectivity_netlist_path=str(netlist),
+    )
+    state = PipelineState(requirement_text="test")
+    step = ErcStep()
+    checks = step.check(state, artifact)
+    cli_check = next(check for check in checks if check.name == "kicad_cli_erc")
+    plan = cli_check.evidence["entity_repair_plans"][0]
+
+    assert cli_check.affected_refs == ["#PWR01", "U3"]
+    assert plan["affected_nets"] == ["GND"]
+    assert plan["pin_net_facts"] == [{
+        "ref": "U3",
+        "pin": "7",
+        "net": "GND",
+        "source": "kicad_xml_netlist",
+    }]
+    assert plan["observed_items"][0]["description"].startswith("Symbol U3")
+    assert step.rollback_target(state, artifact, checks) == PipelineStep.SCH_CONNECTIONS
+
+
 class _BlockedRequirements(PipelineStepBase):
     step = PipelineStep.REQUIREMENTS
 

@@ -83,6 +83,59 @@ def test_gateway_never_marks_empty_results_sufficient(monkeypatch) -> None:
     assert result["evidence_sufficient"] is False
 
 
+def test_parts_requires_matching_datasheet_package_and_kicad_binding(monkeypatch) -> None:
+    def fake_post(url, **_kwargs):
+        common = {
+            "mpn": "EXACT-1",
+            "package": "QFN-16",
+            "content_hash": "a" * 64,
+            "text": "grounded evidence",
+        }
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", url),
+            json={
+                "status": "sufficient",
+                "evidence_sufficient": True,
+                "results": [
+                    {
+                        **common,
+                        "id": "datasheet",
+                        "authority": "official_manufacturer",
+                        "evidence_type": "datasheet",
+                    },
+                    {
+                        **common,
+                        "id": "binding",
+                        "authority": "approved_internal",
+                        "evidence_type": "kicad_binding",
+                        "symbol_lib_id": "Vendor:EXACT-1",
+                        "footprint_lib_id": "Package_DFN_QFN:QFN-16",
+                        "pin_pad_digest": "b" * 64,
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setenv("RATSNEST_KNOWLEDGE_GATEWAY_URL", "https://rag.example/v1/search")
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = search_external_knowledge(
+        query="EXACT-1",
+        role="parts-specialist",
+        limit=3,
+        evidence_types=["datasheet", "kicad_binding"],
+    )
+
+    assert result["evidence_sufficient"] is True
+    assert result["claim_coverage"] == {
+        "official_exact_package": True,
+        "verified_kicad_binding": True,
+        "same_mpn_and_package": True,
+        "sufficient": True,
+    }
+
+
 def test_gateway_failure_is_a_soft_fallback(monkeypatch) -> None:
     def fake_post(_url, **_kwargs):
         raise httpx.ConnectError("offline")

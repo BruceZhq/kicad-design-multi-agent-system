@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "1.0",
+  "suiteId": "ratsnest-release-optimization-v1",
+  "suiteKind": "optimization",
+  "sealed": false,
+  "suiteDigest": "9c5031a9883c3d78b0cdf83d3b178c41584c261f9bdcc4eeae83cd3e3e7de16d",
+  "cases": [
+    {
+      "caseId": "optimization.constraint-authority",
+      "stage": "decision_engine",
+      "source": "evals/regression/test_optimization.py",
+      "sourceSha256": "5df43a52d7f49ea21455242141b1f031eac32706b30f7034b936a886af15f0b7",
+      "nodeId": "evals/regression/test_optimization.py::test_frozen_board_constraints_are_not_reopened_or_overridden",
+      "timeoutSeconds": 60
+    },
+    {
+      "caseId": "optimization.checkpoint-resume",
+      "stage": "intent_router",
+      "source": "evals/regression/test_optimization.py",
+      "sourceSha256": "5df43a52d7f49ea21455242141b1f031eac32706b30f7034b936a886af15f0b7",
+      "nodeId": "evals/regression/test_optimization.py::test_checkpoint_instruction_is_a_resume_not_an_amendment",
+      "timeoutSeconds": 60
+    },
+    {
+      "caseId": "optimization.release-truth",
+      "stage": "release_gate",
+      "source": "evals/regression/test_optimization.py",
+      "sourceSha256": "5df43a52d7f49ea21455242141b1f031eac32706b30f7034b936a886af15f0b7",
+      "nodeId": "evals/regression/test_optimization.py::test_release_label_without_engineering_evidence_fails_closed",
+      "timeoutSeconds": 60
+    }
+  ]
+}

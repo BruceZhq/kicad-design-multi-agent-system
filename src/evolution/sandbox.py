@@ -71,6 +71,37 @@ DEFAULT_EVAL_COMMANDS: Mapping[str, EvalCommand] = {
 }
 
 
+def governed_eval_commands(evaluation_suites: Sequence[object]) -> Mapping[str, EvalCommand]:
+    """Build trusted suite commands from already-validated trial specifications."""
+
+    commands = dict(DEFAULT_EVAL_COMMANDS)
+    for suite in evaluation_suites:
+        if isinstance(suite, Mapping):
+            eval_id = str(suite["eval_id"])
+            manifest_ref = str(suite["manifest_ref"])
+            suite_digest = str(suite["suite_digest"])
+        else:
+            eval_id = str(getattr(suite, "eval_id"))
+            manifest_ref = str(getattr(suite, "manifest_ref"))
+            suite_digest = str(getattr(suite, "suite_digest"))
+        commands[eval_id] = EvalCommand(
+            eval_id,
+            (
+                sys.executable,
+                "-m",
+                "evolution.regression_runner",
+                "--root",
+                ".",
+                "--suite",
+                manifest_ref,
+                "--expected-suite-digest",
+                suite_digest,
+            ),
+            240,
+        )
+    return commands
+
+
 class EvalCommandResult(EvolutionModel):
     eval_id: str = Field(min_length=1, max_length=80)
     argv: list[str] = Field(min_length=1, max_length=16)
@@ -93,7 +124,14 @@ class CandidateEvalReport(EvolutionModel):
     command_results: list[EvalCommandResult] = Field(default_factory=list, max_length=8)
     error: str | None = Field(default=None, max_length=_MAX_ERROR_CHARS)
     cleanup_succeeded: bool
+    generator_cad_validated: bool = False
     executor_mode: Literal["local_process", "kubernetes_job"] = "local_process"
+    executor_image_digest: str | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    toolchain_digest: str | None = Field(
+        default=None, pattern=r"^(?:sha256:)?[0-9a-f]{64}$"
+    )
     automatic_merge: Literal[False] = False
     automatic_push: Literal[False] = False
     automatic_deploy: Literal[False] = False
@@ -130,6 +168,16 @@ def materialize_and_evaluate_candidate(
 
     try:
         selected = _select_eval_commands(eval_ids, eval_registry)
+        from evolution.generator_validation import GENERATOR_PATHS
+
+        generator_patch = any(change.path in GENERATOR_PATHS for change in plan.changes)
+        if generator_patch:
+            if "python-compile" not in eval_ids:
+                raise ValueError("generator patches require the fixed CAD validation command")
+            selected = [EvalCommand("python-compile", (sys.executable,
+                        str(Path(__file__).with_name("generator_validation.py")),
+                        "--candidate-root", "."), 420)
+                        if c.eval_id == "python-compile" else c for c in selected]
         if harness_manifest.calculated_manifest_digest() != harness_manifest.manifest_digest:
             raise ValueError("base harness manifest digest is invalid")
         validate_patch_plan(
@@ -212,6 +260,9 @@ def materialize_and_evaluate_candidate(
         command_results=results,
         error=error,
         cleanup_succeeded=cleanup_succeeded,
+        generator_cad_validated=any("generator_validation.py" in " ".join(r.argv) and r.passed for r in results),
+        executor_image_digest=harness_manifest.runtime_image_digest,
+        toolchain_digest=harness_manifest.toolchain_digest,
     )
 
 

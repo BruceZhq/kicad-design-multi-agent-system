@@ -35,7 +35,7 @@ import tempfile
 import time
 from abc import ABC, abstractmethod
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
@@ -78,6 +78,9 @@ from ratsnestpro.orchestration.component_preparation import (
     ComponentPreparationInput,
     ComponentPreparationService,
     PreparedComponentManifest,
+    TechnicalPackageEvidence,
+    TrustedTechnicalEvidenceEnvelope,
+    build_technical_package_evidence,
     validate_prepared_selection,
 )
 from ratsnestpro.orchestration.component_preparation import (
@@ -85,6 +88,7 @@ from ratsnestpro.orchestration.component_preparation import (
 )
 from ratsnestpro.orchestration.component_resolution import (
     ComponentResolutionService,
+    GroundedReplacement,
     IdentityMode,
     LibraryClosureResult,
     ResolutionStatus,
@@ -95,12 +99,12 @@ from ratsnestpro.orchestration.connection_synthesis import (
     ConnectionMergeError,
     ConnectionSynthesisCheckpoint,
     ConnectionSynthesisReport,
-    checkpoint_matches_inputs,
     connection_synthesis_report,
     estimate_connection_output,
     merge_connection_delta,
     new_connection_checkpoint,
     plan_connection_batches,
+    prepare_resumable_connection_checkpoint,
 )
 from ratsnestpro.orchestration.design_closure import (
     ComponentClosureManifest,
@@ -108,9 +112,15 @@ from ratsnestpro.orchestration.design_closure import (
     design_ir_pin_net_set,
     diff_pin_net_sets,
     export_kicad_pin_net_set,
+    read_kicad_xml_pin_net_set,
     validate_component_closure_freshness,
 )
+from ratsnestpro.orchestration.engineering_workspace import (
+    EngineeringWorkspace,
+    complete_with_observations,
+)
 from ratsnestpro.orchestration.entity_repairs import (
+    AffectedPinNet,
     CadActionBatch,
     CadActionKind,
     CadActionObservation,
@@ -126,6 +136,7 @@ from ratsnestpro.orchestration.pipeline_contracts import (
     BoardZone,
     ErcSummary,
     FabAudit,
+    GroundTieContract,
     LogicalPin,
     ManufactureResult,
     MappedNet,
@@ -139,6 +150,7 @@ from ratsnestpro.orchestration.pipeline_contracts import (
     PcbPlacementPlan,
     PcbWriteResult,
     PinMapPlan,
+    PlacementPatch,
     PlanePlan,
     RoutePlan,
     RouteResult,
@@ -415,6 +427,13 @@ class PipelineContext:
     connection_max_llm_invocations: int = 16
     connection_max_total_llm_invocations: int = 32
     max_route_invocations: int = 3
+    # Only internally signed, target-bound HITL approvals may populate this
+    # map. ComponentPreparationService re-verifies each receipt against the
+    # selected identity and current pipeline revision before applying it.
+    approved_component_replacements: dict[str, GroundedReplacement] = field(
+        default_factory=dict
+    )
+    internal_signing_secret: str | bytes | None = None
     component_pin_evidence: dict[
         str,
         SymbolOnlyPlaceholderSpec | dict[str, Any],
@@ -426,13 +445,16 @@ class PipelineContext:
     agentic_recovery_enabled: bool = False
     max_agentic_recovery_turns_per_step: int = 6
     max_total_agentic_recovery_turns: int = 24
+    max_candidate_intermediate_repairs: int = 3
     active_recovery_tool: str = ""
     active_cad_action_batch: CadActionBatch | None = None
     active_cad_action_observation: CadActionObservation | None = None
+    engineering_workspace: EngineeringWorkspace | None = None
+    engineering_step_instructions: str = ""
 
 
 _MAX_REPAIR_ARTIFACT_CHARS = 80_000
-_ERC_EVIDENCE_CONTRACT_VERSION = 1
+_ERC_EVIDENCE_CONTRACT_VERSION = 2
 _DIRECT_LOCAL_REPAIR_TOOLS = frozenset({
     "apply_cad_action_batch",
     "repair_route_connectivity",
@@ -651,6 +673,7 @@ def propose_structured[T: BaseModel](
     user: str,
     fallback: Callable[[], T],
     before_attempt: Callable[[], None] | None = None,
+    validate: Callable[[T], T] | None = None,
 ) -> tuple[T, bool]:
     """Get a validated ``model`` instance: LLM proposal or deterministic fallback.
 
@@ -691,10 +714,25 @@ def propose_structured[T: BaseModel](
                 "the reported field types and constraints. Required JSON schema: "
                 f"{schema[:12_000]}"
             )
-        if before_attempt is not None:
-            before_attempt()
         try:
-            raw = client.complete(system, prompt)  # type: ignore[attr-defined]
+            def before_call() -> None:
+                if (
+                    ctx.ahe_deadline_monotonic is not None
+                    and time.monotonic() >= ctx.ahe_deadline_monotonic
+                ):
+                    raise NonRetryableLlmError("engineering execution deadline exceeded")
+                if before_attempt is not None:
+                    before_attempt()
+
+            raw = complete_with_observations(
+                client,
+                system + ("\n\n" + ctx.engineering_step_instructions
+                          if ctx.engineering_step_instructions else ""),
+                prompt,
+                workspace=ctx.engineering_workspace,
+                extract_json=_extract_json,
+                before_call=before_call,
+            )
         except NonRetryableLlmError:
             raise
         except Exception as exc:
@@ -704,13 +742,15 @@ def propose_structured[T: BaseModel](
 
         candidate = _extract_json(raw)
         try:
-            return model.model_validate_json(candidate), True
+            value = model.model_validate_json(candidate)
+            return (validate(value) if validate is not None else value), True
         except Exception as exc:
             last_exc = exc
             last_failure_was_output = True
         for repaired in _truncated_json_candidates(candidate):
             try:
-                return model.model_validate_json(repaired), True
+                value = model.model_validate_json(repaired)
+                return (validate(value) if validate is not None else value), True
             except Exception as exc:
                 last_exc = exc
                 last_failure_was_output = True
@@ -820,6 +860,48 @@ def _fallback_recovery_decision(
     )
 
 
+def _evidence_owned_rollback(result: StepResult) -> PipelineStep | None:
+    """Suggest one owner when all findings agree; entity location is not causation."""
+
+    plans: list[EntityRepairPlan] = []
+    for check in result.error_checks:
+        raw_plans = check.evidence.get("entity_repair_plans", [])
+        if not isinstance(raw_plans, list) or not raw_plans:
+            return None
+        for raw_plan in raw_plans:
+            try:
+                plans.append(EntityRepairPlan.model_validate(raw_plan))
+            except (TypeError, ValueError):
+                return None
+    if not plans or any(
+        plan.execution_policy != RepairExecutionPolicy.BOUNDED_CANDIDATE
+        or plan.rollback_step not in PipelineStep._value2member_map_
+        for plan in plans
+    ):
+        return None
+    owners = {PipelineStep(str(plan.rollback_step)) for plan in plans}
+    return next(iter(owners)) if len(owners) == 1 else None
+
+
+def _compact_failed_check_evidence(result: StepResult) -> str:
+    """Serialize the evidence needed by the owning upstream repair step."""
+
+    payload = [
+        {
+            "check": check.name,
+            "reason_code": check.reason_code,
+            "affected_refs": check.affected_refs,
+            "evidence": check.evidence,
+        }
+        for check in result.error_checks
+        if check.evidence
+    ]
+    if not payload:
+        return ""
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return encoded[:8_000]
+
+
 def _recovery_entity_context(
     state: PipelineState,
     result: StepResult,
@@ -896,6 +978,16 @@ _SCHEMATIC_CAD_ACTIONS = frozenset({
 _PCB_CAD_ACTIONS = frozenset(set(CadActionKind) - _SCHEMATIC_CAD_ACTIONS)
 _CAD_ACTIONS_BY_STEP: dict[PipelineStep, frozenset[CadActionKind]] = {
     PipelineStep.SCH_CONNECTIONS: _SCHEMATIC_CAD_ACTIONS,
+    PipelineStep.LAYOUT_CRITICAL: frozenset({
+        CadActionKind.MOVE_FOOTPRINT,
+        CadActionKind.ROTATE_FOOTPRINT,
+        CadActionKind.SWAP_FOOTPRINT_POSITIONS,
+    }),
+    PipelineStep.LAYOUT_GENERAL: frozenset({
+        CadActionKind.MOVE_FOOTPRINT,
+        CadActionKind.ROTATE_FOOTPRINT,
+        CadActionKind.SWAP_FOOTPRINT_POSITIONS,
+    }),
     PipelineStep.LAYOUT_WRITE: frozenset({
         CadActionKind.MOVE_FOOTPRINT,
         CadActionKind.ROTATE_FOOTPRINT,
@@ -956,6 +1048,16 @@ def _cad_action_context(
     )
     if not operations:
         return None
+    if isinstance(artifact, PcbPlacementPlan):
+        return {
+            "executor": "placement_ir_candidate",
+            "owner_step": result.step.value,
+            "base_artifact_fingerprint": _artifact_sha256(artifact),
+            "allowed_operations": [operation.value for operation in operations],
+            "board_width": artifact.board_width,
+            "board_height": artifact.board_height,
+            "inspection": "query this step artifact /placements and footprint lib_id for geometry",
+        }
     if result.step == PipelineStep.SCH_CONNECTIONS:
         if not isinstance(artifact, NetlistIntent):
             return None
@@ -1038,6 +1140,69 @@ def _validated_cad_action_batch(
     if batch.base_artifact_fingerprint != context["base_artifact_fingerprint"]:
         return None, None
     return batch, None
+
+
+def _apply_placement_cad_action_batch(
+    artifact: PcbPlacementPlan,
+    batch: CadActionBatch,
+) -> tuple[PcbPlacementPlan, CadActionObservation]:
+    """Apply a complete move/rotate/swap plan atomically to the layout IR.
+
+    No board dimensions, sides, selected identities or gates can be changed.
+    Layout step checks verify the candidate before LayoutWrite materializes it.
+    """
+    before = _artifact_sha256(artifact)
+    observation = CadActionObservation(
+        batch_id=batch.batch_id, idempotency_key=batch.idempotency_key,
+        status="rejected", artifact_path=f"pipeline://{batch.owner_step}",
+        before_fingerprint=before, pending_success_checks=batch.success_checks,
+    )
+    if batch.base_artifact_fingerprint != before:
+        observation.detail = "placement IR changed since inspection; inspect the new baseline"
+        return artifact, observation
+    candidate = artifact.model_copy(deep=True)
+    by_ref = candidate.by_ref()
+    try:
+        for action in batch.actions:
+            placement = by_ref[str(action.target.reference)]
+            expected = action.preconditions.expected_position
+            if expected is not None and not (
+                math.isclose(placement.x, expected.x_mm, abs_tol=1e-6)
+                and math.isclose(placement.y, expected.y_mm, abs_tol=1e-6)
+            ):
+                raise ValueError(f"{placement.ref}: position precondition failed")
+            rotation = action.preconditions.expected_rotation_degrees
+            if rotation is not None and not math.isclose(
+                placement.rotation % 360, rotation % 360, abs_tol=1e-6
+            ):
+                raise ValueError(f"{placement.ref}: rotation precondition failed")
+            if any(value is not None for value in (
+                action.preconditions.expected_net, action.preconditions.expected_layer,
+                action.preconditions.expected_item_count,
+            )):
+                raise ValueError("PCB-only precondition cannot be verified on placement IR")
+            if action.operation == CadActionKind.MOVE_FOOTPRINT and action.position is not None:
+                placement.x, placement.y = action.position.x_mm, action.position.y_mm
+            elif action.operation == CadActionKind.ROTATE_FOOTPRINT:
+                placement.rotation = float(action.rotation_degrees) % 360
+            elif action.operation == CadActionKind.SWAP_FOOTPRINT_POSITIONS:
+                other = by_ref[str(action.other_reference)]
+                placement.x, other.x = other.x, placement.x
+                placement.y, other.y = other.y, placement.y
+            else:
+                raise ValueError(f"{action.operation} is not a placement IR action")
+        candidate = PcbPlacementPlan.model_validate(candidate.model_dump())
+    except (KeyError, TypeError, ValueError) as exc:
+        observation.detail = f"atomic placement batch rejected, no changes committed: {exc}"
+        return artifact, observation
+    observation.after_fingerprint = _artifact_sha256(candidate)
+    observation.status = "applied" if observation.after_fingerprint != before else "rejected"
+    observation.action_results = [CadActionResult(
+        action_id=action.action_id, operation=action.operation, status="applied",
+        detail=f"{action.target.reference}: {action.operation.value} applied to candidate IR",
+    ) for action in batch.actions]
+    observation.detail = "candidate only; all layout gates must still pass"
+    return candidate, observation
 
 
 def _pin_assignment(plan: NetlistIntent, pin: LogicalPin) -> str | None:
@@ -1171,6 +1336,58 @@ def _apply_pcb_cad_action_batch(
     return observation
 
 
+def _bind_engineering_workspace(
+    state: PipelineState,
+    ctx: PipelineContext,
+    step: PipelineStep,
+    artifact: BaseModel | None = None,
+    checks: list[CheckResult] | None = None,
+) -> None:
+    def artifacts() -> dict[str, Any]:
+        values = {key.value: value.model_dump(mode="json")
+                  for key, value in state.artifacts.items()}
+        if artifact is not None:
+            values[step.value] = artifact.model_dump(mode="json")
+        if checks is not None:
+            values["failed_checks"] = [check.model_dump(mode="json")
+                                       for check in checks if not check.ok]
+        if ctx.out_dir:
+            from ratsnestpro.orchestration.review_repair import load_review_repair
+
+            review = load_review_repair(Path(ctx.out_dir))
+            if (review.get("status") == "requested"
+                    and review.get("requirement_sha256") == hashlib.sha256(state.requirement_text.encode()).hexdigest()
+                    and state.release_resume_step is not None
+                    and state.release_resume_step.value == review.get("resume_from_step")):
+                values["review_feedback"] = {**review.get("evidence", {}), "cad_files": review.get("cad_files", {})}
+        return values
+
+    ctx.engineering_workspace = EngineeringWorkspace(
+        out_dir=ctx.out_dir, artifacts=artifacts, step=step.value, on_event=ctx.on_ahe_event,
+    )
+    try:
+        ctx.engineering_step_instructions = select_skill(
+            step, mode=SkillMode.EXECUTE
+        ).instructions[:8_000]
+    except (FileNotFoundError, KeyError, ValueError):
+        ctx.engineering_step_instructions = ""
+    if ctx.out_dir:
+        from ratsnestpro.orchestration.review_repair import load_review_repair
+
+        review = load_review_repair(Path(ctx.out_dir))
+        if (review.get("status") == "requested" and review.get("resume_from_step") == step.value
+                and review.get("requirement_sha256") == hashlib.sha256(state.requirement_text.encode()).hexdigest()
+                and state.release_resume_step is not None
+                and state.release_resume_step.value == review.get("resume_from_step")):
+            ctx.engineering_step_instructions += (
+                "\nIndependent Reviewer returned this stage for a real correction. Inspect "
+                "artifact review_feedback (full pin/UUID evidence), the actual CAD files and "
+                "rendered views. Repair only the owned defect; preserve original requirements "
+                "and the verified prefix. Do not return the previous unchanged proposal.\n"
+                + json.dumps(review.get("evidence", {}), ensure_ascii=False)[:16_000]
+            )
+
+
 def _plan_agentic_recovery(
     *,
     state: PipelineState,
@@ -1220,6 +1437,7 @@ def _plan_agentic_recovery(
     ):
         return fallback(), False, skill_name, skill_digest
 
+    _bind_engineering_workspace(state, ctx, result.step, artifact, result.checks)
     artifact_json = (
         artifact.model_dump_json(exclude={"rationale"})
         if artifact is not None
@@ -1298,8 +1516,10 @@ def _plan_agentic_recovery(
         "entity edit is justified, prefer a typed cad_action_batch: copy its exact "
         "owner_step and base_artifact_fingerprint, use only listed operations, add "
         "preconditions, and name the deterministic checks that must pass. Never "
-        "invent coordinates absent from observations; choose inspection/replan "
-        "instead. Return only the RecoveryDecision JSON contract; "
+        "invent coordinates absent from observations; use engineering_queries to "
+        "inspect the actual source, pins, pads or net before deciding. A suggested "
+        "owner is a diagnosis hypothesis, not proof of causation. Return the "
+        "RecoveryDecision JSON contract after gathering sufficient evidence; "
         "do not expose hidden chain-of-thought.\n\n"
         + skill_instructions[:16_000]
     )
@@ -1319,6 +1539,28 @@ def _plan_agentic_recovery(
 # --------------------------------------------------------------------------- #
 # Step base class
 # --------------------------------------------------------------------------- #
+
+
+def _engineering_failure_score(checks: list[CheckResult]) -> tuple[int, int, int]:
+    """Measure structured violations, never diagnostic wording length."""
+    def weight(check: CheckResult) -> int:
+        counts = [1]
+        for key in ("entity_repair_plans", "violations", "unconnected_items"):
+            value = check.evidence.get(key)
+            if isinstance(value, list):
+                counts.append(len(value))
+        for key in ("error_count", "violation_count", "unconnected_count"):
+            value = check.evidence.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                counts.append(value)
+        return max(counts)
+
+    failed = [check for check in checks if not check.ok]
+    return (
+        sum(weight(check) for check in failed if check.severity == Severity.ERROR),
+        sum(weight(check) for check in failed),
+        0,
+    )
 
 
 class PipelineStepBase(ABC):
@@ -1373,6 +1615,15 @@ class PipelineStepBase(ABC):
         """Refresh deterministic grounding before revalidating a checkpoint."""
         return artifact
 
+    def resumed_artifact_migration_is_safe(
+        self,
+        before: BaseModel,
+        after: BaseModel,
+    ) -> bool:
+        """Authorize one narrow, deterministic checkpoint schema migration."""
+
+        return False
+
     def resume_artifact_is_current(
         self,
         state: PipelineState,
@@ -1397,6 +1648,43 @@ class PipelineStepBase(ABC):
         downstream failure cannot cause unbounded upstream regeneration.
         """
 
+        if (
+            isinstance(artifact, PcbPlacementPlan)
+            and self.step in {PipelineStep.LAYOUT_CRITICAL, PipelineStep.LAYOUT_GENERAL}
+            and ctx.agentic_recovery_enabled
+            and ctx.mode != LlmMode.OFFLINE
+        ):
+            _bind_engineering_workspace(state, ctx, self.step, artifact, self.check(state, artifact))
+            selection = state.artifact(PipelineStep.SELECTION)
+            allowed = set(artifact.by_ref()) | (
+                {part.ref for part in selection.parts} if isinstance(selection, SelectionPlan) else set()
+            )
+
+            def validate_patch(patch: PlacementPatch) -> PlacementPatch:
+                unknown = {item.ref for item in patch.placements} - allowed
+                if unknown:
+                    raise ValueError(f"placement patch refers to unselected components: {sorted(unknown)}")
+                if any(item.side != artifact.by_ref()[item.ref].side
+                       for item in patch.placements if item.ref in artifact.by_ref()):
+                    raise ValueError("placement repair cannot change the board side")
+                return patch
+
+            patch, used = propose_structured(
+                ctx, model=PlacementPatch,
+                system=("Repair the real placement, not its narrative. Return PlacementPatch JSON "
+                        "with only moved/rotated or missing selected components. Inspect the current "
+                        "placement artifact and footprint geometry first if needed. Preserve board "
+                        "dimensions, component identities, side and all physical constraints. "
+                        "You may jointly reposition up to 32 neighbours in one atomic candidate."),
+                user=f"Owner step: {self.step.value}\nFailure and repair plan:\n{feedback}",
+                fallback=lambda: PlacementPatch(placements=artifact.placements[:1]),
+                validate=validate_patch,
+            )
+            placements = artifact.by_ref()
+            placements.update({item.ref: item for item in patch.placements})
+            return PcbPlacementPlan.model_validate({
+                **artifact.model_dump(), "placements": list(placements.values()),
+            }), used
         return self.propose(state, ctx, knowledge)
 
     def rollback_target(
@@ -1416,37 +1704,18 @@ class PipelineStepBase(ABC):
     ) -> tuple[int, int, int]:
         """Return a lower-is-better score for accepting a bounded repair."""
 
-        failed = [check for check in results if not check.ok]
-        return (
-            sum(
-                not check.ok and check.severity == Severity.ERROR
-                for check in results
-            ),
-            len(failed),
-            sum(len(check.message) for check in failed),
-        )
+        return _engineering_failure_score(results)
 
     @staticmethod
     def repair_progress_is_material(
         before: tuple[int, int, int],
         after: tuple[int, int, int],
     ) -> bool:
-        """Return whether a repair made enough progress to retain and extend.
-
-        Error/check count reductions are always meaningful. When those counts
-        are unchanged, accept only a substantial reduction in structured
-        diagnostic detail. This prevents tiny wording changes from consuming
-        and extending the adaptive repair budget.
-        """
-
-        if after[:2] < before[:2]:
-            return True
-        if after[:2] != before[:2] or after[2] >= before[2]:
-            return False
-        required_reduction = max(80, (before[2] + 11) // 12)
-        return before[2] - after[2] >= required_reduction
+        """Accept reduced verified violation counts or a step's physical metric."""
+        return after < before
 
     def run(self, state: PipelineState, ctx: PipelineContext) -> StepResult:
+        _bind_engineering_workspace(state, ctx, self.step)
         knowledge = ""
         knowledge_ids: list[str] = []
         query = self.knowledge_query(state)
@@ -1460,7 +1729,15 @@ class PipelineStepBase(ABC):
         else:
             artifact, used_llm = resumed
             artifact = self.prepare_resumed_artifact(state, artifact)
-            if ctx.active_recovery_tool in _DIRECT_LOCAL_REPAIR_TOOLS:
+            if (
+                isinstance(artifact, PcbPlacementPlan)
+                and ctx.active_recovery_tool == "apply_cad_action_batch"
+                and ctx.active_cad_action_batch is not None
+            ):
+                artifact, ctx.active_cad_action_observation = _apply_placement_cad_action_batch(
+                    artifact, ctx.active_cad_action_batch,
+                )
+            elif ctx.active_recovery_tool in _DIRECT_LOCAL_REPAIR_TOOLS:
                 artifact, repair_used_llm = self.repair(
                     state,
                     ctx,
@@ -1693,9 +1970,10 @@ class PipelineStepBase(ABC):
                     if not check.ok and check.severity == Severity.ERROR
                 ]
                 failure_text = "\n".join(
-                    f"- {c.name}: {c.message}"
+                    json.dumps(c.model_dump(mode="json"), ensure_ascii=False, default=str)
                     for c in fails
                 )
+                _bind_engineering_workspace(state, ctx, self.step, best_artifact, best_checks)
                 rejected_json = best_artifact.model_dump_json(
                     exclude={"rationale"},
                 )
@@ -2002,9 +2280,56 @@ class RequirementsStep(PipelineStepBase):
         return f"requirement '{artifact.project_name}' ({len(artifact.raw_text)} chars)"
 
 
-def _topology_implementation_kind(block: Any) -> str:
-    """Classify where a topology block must be physically realized."""
+_COMPONENT_REF_RE = re.compile(r"^#?[A-Z]+\d+[A-Z]?$", re.IGNORECASE)
 
+
+def _canonical_component_ref(value: object) -> str:
+    return str(value).strip().upper()
+
+
+def _is_ground_star_block(block: Any) -> bool:
+    """Return true for an explicitly named single-point ground junction."""
+
+    text = re.sub(
+        r"[^a-z0-9\u4e00-\u9fff]+",
+        "",
+        f"{block.name} {block.kind}".casefold(),
+    )
+    return (
+        "groundstar" in text
+        or "starpointground" in text
+        or "singlepointground" in text
+        or "groundnettie" in text
+        or "单点接地" in text
+        or "星点接地" in text
+        or "地网桥接" in text
+    )
+
+
+def _ground_star_component_refs(block: Any) -> tuple[str, ...]:
+    """Return explicitly typed physical ownership for one ground-tie block."""
+
+    if not _is_ground_star_block(block):
+        return ()
+    return tuple(
+        dict.fromkeys(
+            _canonical_component_ref(ref)
+            for ref in getattr(block, "implementation_refs", [])
+            if _COMPONENT_REF_RE.fullmatch(str(ref).strip())
+        )
+    )
+
+
+def _topology_implementation_kind(block: Any) -> str:
+    """Classify where a topology block must be physically realized.
+
+    A typed declaration is authoritative.  Text inference is used only for
+    legacy/LLM artifacts that explicitly leave ownership as ``auto``.
+    """
+
+    declared = str(getattr(block, "implementation_kind", "auto"))
+    if declared != "auto":
+        return declared
     text = f"{block.name} {block.kind} {block.description}".casefold()
     if (
         any(token in text for token in ("gnd", "ground", "接地", "地平面"))
@@ -2028,32 +2353,187 @@ def _topology_implementation_kind(block: Any) -> str:
         )
     ):
         return "board_constraint"
-    declared = str(getattr(block, "implementation_kind", "auto"))
-    return declared if declared != "auto" else "component"
+    return "component"
 
 
-def _normalize_topology_plan(plan: TopologyPlan) -> TopologyPlan:
+_GROUND_DOMAIN_RE = re.compile(
+    r"(?<![A-Z0-9_])(?:[A-Z0-9]*GND(?:_[A-Z0-9]+)*|GND[A-Z0-9_]*|VSS)"
+    r"(?![A-Z0-9_])"
+)
+
+
+def _looks_like_ground_net_name(name: str) -> bool:
+    upper = name.strip().upper()
+    if upper.endswith(("_SENSE", "_MON", "_FB", "_DET", "_ADC", "_TEST")):
+        return False
+    return bool(
+        upper in {"GND", "GROUND", "VSS"}
+        or re.fullmatch(r"(?:[A-Z0-9]*GND(?:_[A-Z0-9]+)*|GND[A-Z0-9_]*)", upper)
+    )
+
+
+def _ground_star_contract(
+    topology: TopologyPlan | None,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Flatten typed ground-tie contracts for compact legacy call sites."""
+
+    if topology is None:
+        return (), ()
+    refs = [tie.component_ref for tie in topology.ground_ties]
+    domains = [topology.ground_net, *topology.ground_domains]
+    for tie in topology.ground_ties:
+        domains.extend(tie.domains)
+    return (
+        tuple(dict.fromkeys(refs)),
+        tuple(dict.fromkeys(domain for domain in domains if domain.strip())),
+    )
+
+
+def _ground_star_contracts(
+    topology: TopologyPlan | None,
+) -> tuple[GroundTieContract, ...]:
+    """Return independent typed ties; prose is never an execution contract."""
+
+    return tuple(topology.ground_ties) if topology is not None else ()
+
+
+def _ground_connection_guidance(topology: TopologyPlan | None) -> str:
+    ties = _ground_star_contracts(topology)
+    if ties:
+        mappings = [
+            {"component_ref": tie.component_ref, "domains": tie.domains}
+            for tie in ties
+        ]
+        return (
+            "The typed topology defines independent ground-tie contracts "
+            f"{mappings}. Preserve every domain as kind=ground and connect "
+            "each ordered domain list through only its owned physical component; "
+            "do not collapse domains or infer another bridge from prose. "
+        )
+    return (
+        "Use the single declared ground_net for every ground return. Do not "
+        "create per-channel GND aliases or connect one MCU VSS pin to multiple "
+        "named nets. "
+    )
+
+
+def _compact_topology_context(topology: TopologyPlan | None) -> str:
+    """Expose typed ownership to connectivity without replaying verbose prose."""
+
+    if topology is None:
+        return "[]"
+    rows = []
+    for block in topology.blocks[:32]:
+        rows.append({
+            "name": block.name,
+            "kind": block.kind,
+            "implementation_kind": _topology_implementation_kind(block),
+            "implementation_refs": list(block.implementation_refs),
+            "description": block.description[:300],
+        })
+    return json.dumps({
+        "ground_net": topology.ground_net,
+        "ground_domains": topology.ground_domains,
+        "ground_ties": [
+            tie.model_dump(mode="json") for tie in topology.ground_ties
+        ],
+        "blocks": rows,
+    }, ensure_ascii=False)
+
+
+def _normalize_topology_plan(
+    plan: TopologyPlan,
+    *,
+    recover_legacy_ground_star: bool = False,
+) -> TopologyPlan:
     """Attach typed ownership and stable explicit refs to topology blocks."""
 
     normalized = []
     for block in plan.blocks:
+        refs = [
+            _canonical_component_ref(ref)
+            for ref in block.implementation_refs
+            if _COMPONENT_REF_RE.fullmatch(str(ref).strip())
+        ]
         kind = _topology_implementation_kind(block)
-        refs = list(block.implementation_refs)
-        if not refs:
-            refs = [
-                match.group(0).upper()
-                for match in re.finditer(
-                    r"(?<![A-Za-z0-9])(?:J|P|CN|U|Q|D|R|C|L|H)\d+[A-Za-z]?"
-                    r"(?![A-Za-z0-9])",
-                    f"{block.name} {block.description}",
-                    re.IGNORECASE,
-                )
-            ]
+        if (
+            recover_legacy_ground_star
+            and kind == "copper_zone"
+            and _is_ground_star_block(block)
+            and refs
+        ):
+            # Schema-v7 checkpoints may contain this exact classifier defect:
+            # an explicit resistor/net-tie was overwritten because its prose
+            # mentioned adjacent pours.  Recover only while loading a prior
+            # artifact; fresh typed proposals remain authoritative.
+            kind = "component"
         normalized.append(block.model_copy(update={
             "implementation_kind": kind,
             "implementation_refs": list(dict.fromkeys(refs)),
         }))
-    return plan.model_copy(update={"blocks": normalized})
+
+    ties = [tie.model_copy(deep=True) for tie in plan.ground_ties]
+    existing_tie_refs = {tie.component_ref.casefold() for tie in ties}
+    if recover_legacy_ground_star:
+        for block in normalized:
+            refs = _ground_star_component_refs(block)
+            if len(refs) != 1 or refs[0].casefold() in existing_tie_refs:
+                continue
+            text = f"{block.name} {block.kind} {block.description}".upper()
+            recovered_domains = list(dict.fromkeys([
+                plan.ground_net,
+                *(
+                    domain
+                    for domain in _GROUND_DOMAIN_RE.findall(text)
+                    if _looks_like_ground_net_name(domain)
+                ),
+            ]))
+            if len({item.casefold() for item in recovered_domains}) < 2:
+                continue
+            ties.append(GroundTieContract(
+                component_ref=refs[0],
+                domains=recovered_domains,
+            ))
+            existing_tie_refs.add(refs[0].casefold())
+
+    domains: list[str] = []
+    seen_domains: set[str] = set()
+    for domain in [
+        plan.ground_net,
+        *plan.ground_domains,
+        *(domain for tie in ties for domain in tie.domains),
+    ]:
+        normalized_domain = domain.strip()
+        key = normalized_domain.casefold()
+        if not normalized_domain or key in seen_domains:
+            continue
+        seen_domains.add(key)
+        domains.append(normalized_domain)
+    return TopologyPlan.model_validate({
+        **plan.model_dump(mode="json"),
+        "schema_version": 2,
+        "blocks": [block.model_dump(mode="json") for block in normalized],
+        "ground_domains": domains,
+        "ground_ties": [tie.model_dump(mode="json") for tie in ties],
+    })
+
+
+def _legacy_topology_contract_missing(plan: TopologyPlan) -> bool:
+    """Identify only checkpoints written before the typed topology schema."""
+
+    typed_fields = {"ground_domains", "ground_ties"}
+    typed_present = typed_fields & plan.model_fields_set
+    return not typed_present and (
+        plan.schema_version == 1 or "schema_version" not in plan.model_fields_set
+    )
+
+
+def _current_topology_contract_complete(plan: TopologyPlan) -> bool:
+    return plan.schema_version == 2 and {
+        "schema_version",
+        "ground_domains",
+        "ground_ties",
+    } <= plan.model_fields_set
 
 
 class TopologyStep(PipelineStepBase):
@@ -2069,7 +2549,62 @@ class TopologyStep(PipelineStepBase):
         artifact: BaseModel,
     ) -> BaseModel:
         assert isinstance(artifact, TopologyPlan)
-        return _normalize_topology_plan(artifact)
+        legacy = _legacy_topology_contract_missing(artifact)
+        if not legacy and not _current_topology_contract_complete(artifact):
+            raise ValueError("partial topology checkpoint schema cannot be migrated safely")
+        return _normalize_topology_plan(
+            artifact,
+            recover_legacy_ground_star=legacy,
+        )
+
+    def resumed_artifact_migration_is_safe(
+        self,
+        before: BaseModel,
+        after: BaseModel,
+    ) -> bool:
+        """Accept only the deterministic, idempotent topology normalizer."""
+
+        if not isinstance(before, TopologyPlan) or not isinstance(after, TopologyPlan):
+            return False
+        expected = _normalize_topology_plan(
+            before,
+            recover_legacy_ground_star=_legacy_topology_contract_missing(before),
+        )
+        if after.model_dump(mode="json") != expected.model_dump(mode="json"):
+            return False
+        legacy = _legacy_topology_contract_missing(before)
+        if not legacy:
+            return before.model_dump(mode="json") == after.model_dump(mode="json")
+        if len(before.blocks) != len(after.blocks):
+            return False
+        for old, new in zip(before.blocks, after.blocks, strict=True):
+            old_payload = old.model_dump(
+                mode="json",
+                exclude={"implementation_kind"},
+            )
+            new_payload = new.model_dump(
+                mode="json",
+                exclude={"implementation_kind"},
+            )
+            if old_payload != new_payload:
+                return False
+            if old.implementation_kind == new.implementation_kind:
+                continue
+            if not (
+                old.implementation_kind == "copper_zone"
+                and new.implementation_kind == "component"
+                and _is_ground_star_block(old)
+                and len(_ground_star_component_refs(old)) == 1
+            ):
+                return False
+        stable_fields = {
+            "rails",
+            "ground_net",
+            "rationale",
+        }
+        before_payload = before.model_dump(mode="json", include=stable_fields)
+        after_payload = after.model_dump(mode="json", include=stable_fields)
+        return before_payload == after_payload
 
     def propose(
         self, state: PipelineState, ctx: PipelineContext, knowledge: str
@@ -2088,10 +2623,14 @@ class TopologyStep(PipelineStepBase):
         system = (
             "You design a PCB block-level topology. Return JSON with blocks[] "
             "(name, kind, description, implementation_kind, implementation_refs), "
-            "rails[] (supply rail names), ground_net, rationale. "
+            "rails[] (supply rail names), ground_net, ground_domains[], "
+            "ground_ties[] (component_ref, ordered domains[]), and rationale. "
             "implementation_kind is component, copper_zone, mechanical_feature, "
             "or board_constraint. Put explicit designators such as J1 in "
             "implementation_refs; never represent a copper zone as a BOM part. "
+            "If ground domains are intentionally joined, declare one physical "
+            "component per ground_ties entry. Ground-tie terminals must be "
+            "electrically symmetric; never encode that contract only in prose. "
             "Use the provided design knowledge."
         )
         user = f"Requirement:\n{state.requirement_text}\n\nKnowledge:\n{knowledge}"
@@ -2102,7 +2641,20 @@ class TopologyStep(PipelineStepBase):
 
     def check(self, state: PipelineState, artifact: BaseModel) -> list[CheckResult]:
         assert isinstance(artifact, TopologyPlan)
-        return [
+        checks = [
+            CheckResult(
+                name="topology_contract_schema_current",
+                ok=artifact.schema_version == 2,
+                message=(
+                    "topology uses the current typed contract"
+                    if artifact.schema_version == 2
+                    else "topology schema must be upgraded before execution"
+                ),
+                blocks_execution=artifact.schema_version != 2,
+                reason_code=(
+                    "" if artifact.schema_version == 2 else "stale_topology_schema"
+                ),
+            ),
             CheckResult(
                 name="has_blocks", ok=bool(artifact.blocks),
                 message="topology must define at least one functional block",
@@ -2116,6 +2668,107 @@ class TopologyStep(PipelineStepBase):
                 message="topology must define a ground net",
             ),
         ]
+
+        owner_blocks: dict[str, list[Any]] = {}
+        for block in artifact.blocks:
+            for ref in block.implementation_refs:
+                owner_blocks.setdefault(ref.casefold(), []).append(block)
+        duplicate_owners = {
+            ref: [block.name for block in blocks]
+            for ref, blocks in owner_blocks.items()
+            if len(blocks) > 1
+        }
+        checks.append(CheckResult(
+            name="implementation_ref_has_unique_owner",
+            ok=not duplicate_owners,
+            message=(
+                "each physical reference must have one topology owner; "
+                f"duplicates={duplicate_owners}"
+            ),
+            affected_refs=sorted(duplicate_owners),
+        ))
+
+        contract_failures: list[str] = []
+        declared_domains = {
+            domain.casefold() for domain in artifact.ground_domains
+        }
+        if artifact.ground_net.casefold() not in declared_domains:
+            contract_failures.append(
+                f"primary ground {artifact.ground_net!r} is not declared"
+            )
+        rail_ground_overlap = sorted(
+            rail for rail in artifact.rails
+            if rail.casefold() in declared_domains
+        )
+        if rail_ground_overlap:
+            contract_failures.append(
+                f"supply rails overlap ground domains: {rail_ground_overlap}"
+            )
+
+        ties_by_ref = {
+            tie.component_ref.casefold(): tie for tie in artifact.ground_ties
+        }
+        signatures: dict[frozenset[str], str] = {}
+        for tie in artifact.ground_ties:
+            signature = frozenset(domain.casefold() for domain in tie.domains)
+            previous = signatures.get(signature)
+            if previous is not None:
+                contract_failures.append(
+                    f"{tie.component_ref} duplicates ground bridge {previous} "
+                    f"for {tie.domains}"
+                )
+            signatures[signature] = tie.component_ref
+            missing = [
+                domain for domain in tie.domains
+                if domain.casefold() not in declared_domains
+            ]
+            if missing:
+                contract_failures.append(
+                    f"{tie.component_ref} uses undeclared domains {missing}"
+                )
+            owners = owner_blocks.get(tie.component_ref.casefold(), [])
+            if len(owners) != 1:
+                contract_failures.append(
+                    f"{tie.component_ref} must have exactly one topology owner, "
+                    f"got {[block.name for block in owners]}"
+                )
+            elif _topology_implementation_kind(owners[0]) != "component":
+                contract_failures.append(
+                    f"{tie.component_ref} owner {owners[0].name!r} must be a "
+                    "component-backed block"
+                )
+
+        for block in filter(_is_ground_star_block, artifact.blocks):
+            refs = _ground_star_component_refs(block)
+            if _topology_implementation_kind(block) != "component":
+                contract_failures.append(
+                    f"ground-tie block {block.name!r} cannot be "
+                    f"{_topology_implementation_kind(block)!r}"
+                )
+            if len(refs) != 1:
+                contract_failures.append(
+                    f"ground-tie block {block.name!r} needs exactly one explicit "
+                    f"physical reference, got {list(refs)}"
+                )
+                continue
+            if refs[0].casefold() not in ties_by_ref:
+                contract_failures.append(
+                    f"ground-tie block {block.name!r} lacks typed endpoints for "
+                    f"{refs[0]}"
+                )
+
+        checks.append(CheckResult(
+            name="typed_ground_tie_contracts",
+            ok=not contract_failures,
+            message=(
+                "ground domains, physical owners, and bridge endpoints must be "
+                f"typed and unambiguous: {contract_failures}"
+            ),
+            affected_refs=sorted(
+                tie.component_ref for tie in artifact.ground_ties
+            ),
+        ))
+        return checks
 
     def summarize(self, artifact: BaseModel) -> str:
         assert isinstance(artifact, TopologyPlan)
@@ -2171,6 +2824,7 @@ _MODEL_LIKE_TOKEN_RE = re.compile(
 
 
 _ARCHITECT_EVIDENCE_MARKER = "GROUNDED ARCHITECT EVIDENCE"
+_PARTS_EVIDENCE_MARKER = "BOUNDED PARTS EVIDENCE FOR SELECTION"
 _VCAP_CEXT_RE = re.compile(
     r"C\s*EXT\s+Capacitance[^0-9]{0,120}"
     r"(\d+(?:\.\d+)?)\s*[uµμ]F",
@@ -2225,6 +2879,336 @@ def _architect_evidence_payload(text: str) -> dict[str, Any]:
     }:
         return {}
     return payload
+
+
+def _parts_evidence_payload(text: str) -> dict[str, Any]:
+    evidence = text.rpartition(_PARTS_EVIDENCE_MARKER)[2]
+    start = evidence.find("{")
+    if start < 0:
+        return {}
+    try:
+        payload, _end = json.JSONDecoder().raw_decode(evidence[start:])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("evidence_contract") != {
+        "schema_version": 1,
+        "producer": "parts_phase",
+        "consumer": "hardware_pipeline.selection",
+        "closure_authority": "hardware_pipeline.selection",
+        "closure_before_step": "schematic_connections",
+        "web_evidence_can_bypass_symbol_footprint_pin_pad_closure": False,
+    }:
+        return {}
+    return payload
+
+
+def _normalized_component_identity(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
+
+
+def _part_identity_for_source(part: SelectedPart, source_identity: str) -> str:
+    """Return the exact selected identity proved by a trusted source envelope."""
+
+    source_tokens = [
+        token
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_.+-]{3,}", source_identity)
+        if any(character.isdigit() for character in token)
+    ]
+    selected = [
+        part.mpn,
+        part.requested_identity,
+        part.value,
+        part.symbol.partition(":")[2],
+    ]
+    for candidate in selected:
+        normalized = _normalized_component_identity(candidate)
+        if len(normalized) < 4 or not any(character.isdigit() for character in normalized):
+            continue
+        if any(
+            grounding.symbol_identity_match_kind(candidate, token)
+            in {"exact", "kicad_wildcard"}
+            or grounding.symbol_identity_match_kind(token, candidate)
+            in {"exact", "kicad_wildcard"}
+            for token in source_tokens
+        ):
+            return candidate
+    return ""
+
+
+def _datasheet_package_is_explicit(footprint_lib_id: str, text: str) -> bool:
+    """Require a package-family/count signature in the official page text."""
+
+    footprint_name = footprint_lib_id.partition(":")[2].casefold()
+    compact_footprint = re.sub(r"[^a-z0-9]", "", footprint_name)
+    compact_text = re.sub(r"[^a-z0-9]", "", text.casefold())
+    families = (
+        "ufbga",
+        "vfbga",
+        "wlcsp",
+        "lqfp",
+        "tqfp",
+        "qfn",
+        "dfn",
+        "ssop",
+        "tssop",
+        "soic",
+        "sot",
+        "bga",
+        "qfp",
+        "dip",
+    )
+    family = next((item for item in families if item in compact_footprint), "")
+    if not family:
+        return False
+    family_start = footprint_name.find(family)
+    suffix = footprint_name[family_start + len(family):]
+    count_match = re.match(r"[-_ ]*(\d{1,4})", suffix)
+    if not count_match:
+        return False
+    signature = f"{family}{count_match.group(1)}"
+    aliases = {signature}
+    # SOT-23-5 is also published as SOT-25 by several manufacturers.
+    sot_variant = re.match(r"[-_ ]*23[-_ ]+(\d{1,2})", suffix)
+    if family == "sot" and sot_variant:
+        variant = sot_variant.group(1)
+        aliases = {f"sot23{variant}", f"sot2{variant}"}
+    return any(alias in compact_text for alias in aliases)
+
+
+def _datasheet_pin_functions(
+    pin_rows: Sequence[dict[str, Any]] | None,
+    pages: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Prove every installed symbol pin from a bounded official pin-table row.
+
+    A name and number must be co-located, and that number must be the unique
+    nearest installed pin number on the line.  This deliberately rejects
+    narrative mentions and flattened ambiguous tables instead of blessing the
+    KiCad symbol with its own metadata.
+    """
+
+    rows = [row for row in pin_rows or () if isinstance(row, dict)]
+    expected_numbers = {
+        str(row.get("number", "")).strip()
+        for row in rows
+        if str(row.get("number", "")).strip()
+    }
+    lines = [
+        line[:2_000]
+        for page in pages[:8]
+        if isinstance(page, dict)
+        for line in str(page.get("text", "")).splitlines()
+        if line.strip()
+    ]
+    if not expected_numbers or not lines:
+        return []
+
+    number_patterns = {
+        number: re.compile(
+            rf"(?<![A-Za-z0-9]){re.escape(number)}(?![A-Za-z0-9])"
+        )
+        for number in expected_numbers
+    }
+    functions: list[dict[str, Any]] = []
+    for row in rows:
+        number = str(row.get("number", "")).strip()
+        name = str(row.get("name", "")).strip()
+        pieces = re.findall(r"[A-Za-z0-9]+", name.replace("~{", ""))
+        if not number or not pieces:
+            return []
+        name_pattern = re.compile(
+            r"(?<![A-Za-z0-9])"
+            + r"[^A-Za-z0-9]{0,4}".join(map(re.escape, pieces))
+            + r"(?![A-Za-z0-9])",
+            re.IGNORECASE,
+        )
+        proved = False
+        for line in lines:
+            name_spans = [match.span() for match in name_pattern.finditer(line)]
+            if not name_spans:
+                continue
+            number_spans = {
+                candidate: [match.span() for match in pattern.finditer(line)]
+                for candidate, pattern in number_patterns.items()
+            }
+            for name_start, name_end in name_spans:
+                distances = [
+                    (
+                        max(number_start - name_end, name_start - number_end, 0),
+                        candidate,
+                    )
+                    for candidate, spans in number_spans.items()
+                    for number_start, number_end in spans
+                ]
+                if not distances:
+                    continue
+                nearest_distance = min(distance for distance, _candidate in distances)
+                nearest_numbers = {
+                    candidate
+                    for distance, candidate in distances
+                    if distance == nearest_distance
+                }
+                if nearest_distance <= 96 and nearest_numbers == {number}:
+                    proved = True
+                    break
+            if proved:
+                break
+        if not proved:
+            return []
+        functions.append({"number": number, "functions": [name]})
+    return functions
+
+
+def _datasheet_package_evidence(
+    part: SelectedPart,
+    *,
+    source_identity: str,
+    datasheet: dict[str, Any],
+) -> TechnicalPackageEvidence | None:
+    """Create v2 evidence only from a trusted official-source receipt."""
+
+    if (
+        datasheet.get("evidence_sufficient") is not True
+        or datasheet.get("authority") != "official_manufacturer_datasheet"
+        or datasheet.get("status") not in {"ok", "partial"}
+    ):
+        return None
+    source_url = str(datasheet.get("source_url", "")).strip()
+    pages = datasheet.get("matched_pages", [])
+    if not source_url.startswith("https://") or not isinstance(pages, list) or not pages:
+        return None
+    identity = _part_identity_for_source(part, source_identity)
+    if not identity:
+        return None
+    pin_rows = symbols.symbol_pins(part.symbol)
+    pin_functions = _datasheet_pin_functions(pin_rows, pages)
+    if not pin_functions:
+        return None
+    page_text = "\n".join(
+        str(page.get("text", "")) for page in pages if isinstance(page, dict)
+    )
+    if not _datasheet_package_is_explicit(part.footprint, page_text):
+        return None
+    source_payload = {
+        "source_url": source_url,
+        "pages": [
+            {"page": page.get("page"), "text": str(page.get("text", ""))}
+            for page in pages[:8]
+            if isinstance(page, dict)
+        ],
+        "identity": identity,
+        "symbol_lib_id": part.symbol,
+        "footprint_lib_id": part.footprint,
+    }
+    page_numbers = sorted({
+        int(page["page"])
+        for page in pages
+        if isinstance(page, dict) and isinstance(page.get("page"), int)
+    })
+    return build_technical_package_evidence(
+        source_kind="manufacturer_datasheet",
+        source_id=(
+            source_url
+            + (f"#pages={','.join(map(str, page_numbers))}" if page_numbers else "")
+        ),
+        source_sha256=hashlib.sha256(
+            json.dumps(
+                source_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest(),
+        mpn=identity,
+        package=part.footprint,
+        pin_count=len({item["number"] for item in pin_functions}),
+        pin_functions=pin_functions,
+        footprint_lib_id=part.footprint,
+    )
+
+
+def _trusted_package_evidence(
+    text: str,
+    part: SelectedPart,
+    *,
+    signing_secret: str | bytes | None = None,
+) -> list[TechnicalPackageEvidence]:
+    """Read authenticated receipts and deterministically close official sources."""
+
+    architect = _architect_evidence_payload(text)
+    parts = _parts_evidence_payload(text)
+    raw_items: list[Any] = []
+    for payload in (architect, parts):
+        candidates = payload.get("component_preparation_evidence", [])
+        if isinstance(candidates, list):
+            raw_items.extend(
+                item
+                for item in candidates
+                if isinstance(item, dict)
+            )
+    parsed: list[TechnicalPackageEvidence] = []
+    for item in raw_items[:16]:
+        try:
+            envelope = TrustedTechnicalEvidenceEnvelope.model_validate(item)
+        except Exception:  # noqa: BLE001 - malformed upstream claims fail closed
+            continue
+        if not envelope.verifies(signing_secret):
+            continue
+        receipt = envelope.evidence
+        if (
+            envelope.symbol_lib_id.casefold() == part.symbol.casefold()
+            and envelope.footprint_lib_id.casefold() == part.footprint.casefold()
+            and bool(_part_identity_for_source(part, envelope.requested_identity))
+            and receipt.footprint_lib_id.casefold() == part.footprint.casefold()
+            and bool(_part_identity_for_source(part, receipt.mpn))
+        ):
+            parsed.append(receipt)
+
+    architect_symbol = architect.get("symbol", {})
+    architect_footprint = (
+        str(architect_symbol.get("grounded_footprint") or "")
+        or str(architect_symbol.get("selected_footprint") or "")
+        or str(architect_symbol.get("declared_footprint") or "")
+    ) if isinstance(architect_symbol, dict) else ""
+    if (
+        isinstance(architect_symbol, dict)
+        and str(architect_symbol.get("lib_id", "")).casefold()
+        == part.symbol.casefold()
+        and architect_footprint.casefold() == part.footprint.casefold()
+        and architect_symbol.get("footprint_exists") is True
+    ):
+        candidate = _datasheet_package_evidence(
+            part,
+            source_identity=str(architect.get("requested_device_id", "")),
+            datasheet=(
+                architect.get("datasheet", {})
+                if isinstance(architect.get("datasheet"), dict)
+                else {}
+            ),
+        )
+        if candidate is not None:
+            parsed.append(candidate)
+    for query in parts.get("queries", [])[:12]:
+        if not isinstance(query, dict):
+            continue
+        official = query.get("official_web", {})
+        if not isinstance(official, dict):
+            continue
+        datasheet = official.get("datasheet", {})
+        if not isinstance(datasheet, dict):
+            continue
+        datasheet = {
+            **datasheet,
+            "evidence_sufficient": official.get("evidence_sufficient") is True,
+        }
+        candidate = _datasheet_package_evidence(
+            part,
+            source_identity=str(query.get("query", "")),
+            datasheet=datasheet,
+        )
+        if candidate is not None:
+            parsed.append(candidate)
+    return list({item.evidence_id: item for item in parsed}.values())[:16]
 
 
 _SINGLETON_CONTROL_ALIASES = frozenset({
@@ -3930,6 +4914,25 @@ def _uncovered_topology_blocks(
     return uncovered
 
 
+def _missing_typed_topology_component_refs(
+    state: PipelineState,
+    parts: list[SelectedPart],
+) -> list[str]:
+    """Close every electrically owned topology reference before synthesis."""
+
+    topology = state.artifact(PipelineStep.TOPOLOGY)
+    if not isinstance(topology, TopologyPlan):
+        return []
+    selected = {part.ref.casefold() for part in parts}
+    required = {
+        ref
+        for block in topology.blocks
+        if _topology_implementation_kind(block) == "component"
+        for ref in block.implementation_refs
+    }
+    return sorted(ref for ref in required if ref.casefold() not in selected)
+
+
 def _normalize_footprint_for_symbol(part: SelectedPart) -> str | None:
     """Choose a grounded compatible footprint for known semantic parts/connectors."""
     symbol_pins = symbols.symbol_pins(part.symbol) or []
@@ -4923,11 +5926,19 @@ def _prepare_and_persist_components(
             # Selection gate prevents it reaching schematic synthesis.
             allow_unverified_placeholder=ctx.artifact_first,
             pin_evidence=ctx.component_pin_evidence.get(part.ref),
+            replacement=ctx.approved_component_replacements.get(part.ref.upper()),
             manufacturer=part.manufacturer,
             model_3d_path=part.model_3d_path,
+            technical_package_evidence=_trusted_package_evidence(
+                state.requirement_text,
+                part,
+                signing_secret=ctx.internal_signing_secret,
+            ),
+            workflow_revision=state.revision,
         )
     service = ComponentPreparationService(
         resolution_service=ComponentResolutionService(project_dir=ctx.out_dir),
+        replacement_approval_secret=ctx.internal_signing_secret,
     )
     prepared = service.prepare(
         plan,
@@ -4943,10 +5954,14 @@ def _prepare_and_persist_components(
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / "prepared-components.json"
     temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(prepared.manifest.model_dump_json(indent=2), encoding="utf-8")
+    manifest_json = prepared.manifest.model_dump_json(indent=2)
+    temporary.write_text(manifest_json, encoding="utf-8")
     temporary.replace(path)
     selection = prepared.selection.model_copy(
-        update={"prepared_manifest_path": str(path)}
+        update={
+            "prepared_manifest_path": str(path),
+            "prepared_manifest_json": manifest_json,
+        }
     )
     return selection, prepared.closure
 
@@ -4956,7 +5971,7 @@ def _prepared_component_manifest_check(
     plan: SelectionPlan,
 ) -> CheckResult:
     path = Path(plan.prepared_manifest_path) if plan.prepared_manifest_path else None
-    if path is None or not path.is_file():
+    if not plan.prepared_manifest_json and (path is None or not path.is_file()):
         return CheckResult(
             name="prepared_component_manifest",
             ok=False,
@@ -4970,8 +5985,12 @@ def _prepared_component_manifest_check(
     manifest: PreparedComponentManifest | None = None
     try:
         manifest = PreparedComponentManifest.model_validate_json(
-            path.read_text(encoding="utf-8")
+            plan.prepared_manifest_json
+            if plan.prepared_manifest_json
+            else path.read_text(encoding="utf-8")  # type: ignore[union-attr]
         )
+        if manifest.schema_version != "ratsnestpro.prepared-components.v2":
+            blockers.append("prepared_manifest_v1_requires_selection_upgrade")
         validation = validate_prepared_selection(plan, manifest)
         blockers.extend(validation.blockers)
         if manifest.requirement_sha256 != component_requirement_digest(
@@ -5262,7 +6281,62 @@ class SelectionStep(PipelineStepBase):
             preserve_requested_identities=True,
             identity_constraints=_state_identity_constraints(state),
         )
-        return artifact
+        manifest: PreparedComponentManifest | None = None
+        manifest_json = artifact.prepared_manifest_json
+        if not manifest_json and artifact.prepared_manifest_path:
+            try:
+                manifest_json = Path(artifact.prepared_manifest_path).read_text(
+                    encoding="utf-8"
+                )
+            except OSError:
+                manifest_json = ""
+        if manifest_json:
+            try:
+                manifest = PreparedComponentManifest.model_validate_json(manifest_json)
+            except ValueError:
+                manifest = None
+        if manifest is not None and manifest.schema_version == (
+            "ratsnestpro.prepared-components.v2"
+        ):
+            artifact.prepared_manifest_json = manifest_json
+            return artifact
+
+        # v1 is readable for migration only. Rebuild the v2 receipt at Selection
+        # using the exact resumed BOM; never accept the legacy receipt at release.
+        candidate_dir = (
+            Path(artifact.prepared_manifest_path).parent
+            if artifact.prepared_manifest_path
+            else Path(artifact.component_closure_path).parent
+            if artifact.component_closure_path
+            else Path(tempfile.mkdtemp(prefix="rnp_component_resume_"))
+        )
+        upgraded, closure = _prepare_and_persist_components(
+            artifact,
+            state,
+            PipelineContext(out_dir=str(candidate_dir)),
+            preserve_requested_identities=True,
+        )
+        return _persist_component_closure(upgraded, closure, PipelineContext(
+            out_dir=str(candidate_dir)
+        ))
+
+    def resumed_artifact_migration_is_safe(
+        self,
+        before: BaseModel,
+        after: BaseModel,
+    ) -> bool:
+        assert isinstance(before, SelectionPlan)
+        assert isinstance(after, SelectionPlan)
+        stable = lambda part: (  # noqa: E731 - compact immutable comparison
+            part.ref,
+            part.symbol,
+            part.value,
+            part.footprint,
+            part.role,
+        )
+        return [stable(part) for part in before.parts] == [
+            stable(part) for part in after.parts
+        ]
 
     def propose(
         self, state: PipelineState, ctx: PipelineContext, knowledge: str
@@ -5573,6 +6647,23 @@ class SelectionStep(PipelineStepBase):
                 ),
             ),
         ]
+        missing_owned_refs = _missing_typed_topology_component_refs(
+            state,
+            artifact.parts,
+        )
+        checks.append(CheckResult(
+            name="typed_topology_component_refs_selected",
+            ok=not missing_owned_refs,
+            message=(
+                "all component-owned topology references must close in Selection; "
+                f"missing={missing_owned_refs}"
+            ),
+            blocks_execution=bool(missing_owned_refs),
+            reason_code=(
+                "" if not missing_owned_refs else "typed_component_owner_missing"
+            ),
+            affected_refs=missing_owned_refs,
+        ))
         unbound_footprints = [
             part.ref
             for part in artifact.parts
@@ -7081,6 +8172,23 @@ def _connection_repair_scope(
     )
 
 
+def _validate_netlist_patch_scope(
+    patch: NetlistPatch,
+    plan: NetlistIntent,
+    related_refs: set[str],
+    relevant_nets: set[str],
+) -> NetlistPatch:
+    bounded = _limit_netlist_patch_to_scope(patch, plan, related_refs, relevant_nets)
+    if bounded.model_dump() != patch.model_dump():
+        raise ValueError(
+            "Patch would be partially discarded by ownership scope; nothing was applied. "
+            f"Allowed existing refs={sorted(related_refs)}, nets={sorted(relevant_nets)}. "
+            "Keep the complete edit within scope, or request an evidence-backed upstream "
+            "replan for a larger functional block. Do not assume filtered actions executed."
+        )
+    return patch
+
+
 def _limit_netlist_patch_to_scope(
     patch: NetlistPatch,
     plan: NetlistIntent,
@@ -7166,6 +8274,7 @@ def _connection_repair_cohort(
         "power_pin_rail_class",
         "two_terminal_parts_span_distinct_nets",
         "small_parts_fully_connected",
+        "signal_output_not_directly_on_power_rail",
         "single_power_output_per_net",
         "power_input_net_has_source",
         "external_input_protection_chain",
@@ -7196,59 +8305,107 @@ def _connection_repair_cohort(
     return failed[:1]
 
 
-def _rewire_two_terminal_part(
+def _physical_pin_sort_key(number: str) -> tuple[object, ...]:
+    return tuple(
+        int(token) if token.isdigit() else token.casefold()
+        for token in re.split(r"(\d+)", number)
+        if token
+    )
+
+
+def _rewire_part_terminals(
     plan: NetlistIntent,
     part: SelectedPart,
-    endpoint_a: str | None,
-    endpoint_b: str | None,
+    endpoints: Sequence[str | None],
+    *,
+    ground_domains: Sequence[str] = (),
 ) -> NetlistIntent:
-    """Rewire a grounded two-pin part only when both endpoints are known."""
+    """Map ordered endpoints onto every real terminal, or make no change."""
 
+    endpoint_names = [
+        str(endpoint).strip() for endpoint in endpoints if endpoint is not None
+    ]
     if (
-        not endpoint_a
-        or not endpoint_b
-        or endpoint_a == endpoint_b
+        len(endpoint_names) != len(endpoints)
+        or len(endpoint_names) < 2
+        or any(not name for name in endpoint_names)
+        or len({name.casefold() for name in endpoint_names}) != len(endpoint_names)
     ):
         return plan
     physical = symbols.symbol_pins(part.symbol) or []
-    numbers = [str(pin.get("number", "")) for pin in physical]
-    if len(numbers) != 2 or not all(numbers):
+    numbers = sorted(
+        dict.fromkeys(
+            str(pin.get("number", "")).strip() for pin in physical
+            if str(pin.get("number", "")).strip()
+        ),
+        key=_physical_pin_sort_key,
+    )
+    if len(numbers) != len(endpoint_names):
         return plan
 
     nets = [net.model_copy(deep=True) for net in plan.nets]
     for net in nets:
-        net.pins = [pin for pin in net.pins if pin.ref != part.ref]
-    by_name = {net.name: net for net in nets}
-    for name, number in zip((endpoint_a, endpoint_b), numbers, strict=True):
-        target = by_name.get(name)
+        net.pins = [
+            pin for pin in net.pins
+            if pin.ref.casefold() != part.ref.casefold()
+        ]
+    by_name = {net.name.casefold(): net for net in nets}
+    typed_ground = {
+        plan.ground_net.casefold(),
+        *(domain.casefold() for domain in ground_domains),
+    }
+    supply_nets = {name.casefold() for name in plan.supply_nets}
+    for name, number in zip(endpoint_names, numbers, strict=True):
+        target = by_name.get(name.casefold())
         if target is None:
             target = NetIntent(
                 name=name,
                 kind=(
                     "ground"
-                    if name == plan.ground_net
+                    if name.casefold() in typed_ground
                     else "power"
-                    if name in plan.supply_nets
+                    if name.casefold() in supply_nets
                     else "signal"
                 ),
             )
             nets.append(target)
-            by_name[name] = target
+            by_name[name.casefold()] = target
+        elif name.casefold() in typed_ground:
+            target.kind = "ground"
         target.pins.append(LogicalPin(ref=part.ref, pin=number))
-    protected = {plan.ground_net, *plan.supply_nets}
+    protected = {
+        plan.ground_net.casefold(),
+        *(name.casefold() for name in plan.supply_nets),
+        *(name.casefold() for name in endpoint_names),
+    }
     nets = [
         net for net in nets
-        if net.pins or net.name in protected
+        if net.pins or net.name.casefold() in protected
     ]
     return plan.model_copy(
         update={
             "nets": nets,
             "no_connect_pins": [
                 pin for pin in plan.no_connect_pins
-                if pin.ref != part.ref
+                if pin.ref.casefold() != part.ref.casefold()
             ],
         },
         deep=True,
+    )
+
+
+def _rewire_two_terminal_part(
+    plan: NetlistIntent,
+    part: SelectedPart,
+    endpoint_a: str | None,
+    endpoint_b: str | None,
+) -> NetlistIntent:
+    """Compatibility wrapper for ordinary grounded two-terminal support."""
+
+    return _rewire_part_terminals(
+        plan,
+        part,
+        (endpoint_a, endpoint_b),
     )
 
 
@@ -7515,6 +8672,102 @@ def _normalize_buck_support(
     return normalized
 
 
+def _is_ground_star_part(part: SelectedPart) -> bool:
+    compact = _normalized_function_name(part.role)
+    return (
+        "GROUNDSTAR" in compact
+        or "GROUNDNETTIE" in compact
+        or (
+            "NETTIE" in compact
+            and ("GROUND" in compact or "GND" in compact)
+        )
+    )
+
+
+def _ground_bridge_electrical_class(part: SelectedPart) -> str:
+    """Classify only grounded component evidence, never reference prefixes."""
+
+    role = _normalized_function_name(part.role)
+    device = re.sub(r"[^a-z0-9]+", "", part.symbol.casefold())
+    value = part.value.casefold().replace("ohm", "r").replace("ω", "r")
+    value = re.sub(r"\s+", "", value)
+    if "capacitor" in role or "devicec" in device:
+        return "capacitive"
+    if (
+        "nettie" in device
+        or "jumper" in device
+        or "ferrite" in device
+        or "bead" in device
+        or re.fullmatch(r"0(?:\.0+)?r?0*", value)
+    ):
+        return "galvanic"
+    return "unknown"
+
+
+def _normalize_ground_star_ties(
+    selection: SelectionPlan | None,
+    plan: NetlistIntent,
+    topology: TopologyPlan | None = None,
+) -> NetlistIntent:
+    """Close every typed ground junction once all endpoint loads are present.
+
+    The normalizer never invents a domain or owner.  It consumes independent
+    typed contracts and supports multiple ties and multi-terminal tie symbols.
+    """
+
+    if selection is None:
+        return plan
+    contracts = _ground_star_contracts(topology)
+    if not contracts:
+        return plan
+    parts_by_ref = {
+        part.ref.casefold(): part for part in selection.parts
+    }
+    tie_refs = {tie.component_ref.casefold() for tie in contracts}
+    normalized = plan.model_copy(deep=True)
+    for contract in contracts:
+        part = parts_by_ref.get(contract.component_ref.casefold())
+        if part is None:
+            continue
+        physical_numbers = {
+            str(pin.get("number", "")).strip()
+            for pin in (symbols.symbol_pins(part.symbol) or [])
+            if str(pin.get("number", "")).strip()
+        }
+        if len(physical_numbers) != len(contract.domains):
+            continue
+
+        by_name = {net.name.casefold(): net for net in normalized.nets}
+        domain_nets = [
+            by_name.get(domain.casefold()) for domain in contract.domains
+        ]
+        if any(net is None for net in domain_nets):
+            continue
+        if any(
+            not any(pin.ref.casefold() not in tie_refs for pin in net.pins)
+            for net in domain_nets
+            if net is not None
+        ):
+            continue
+
+        actual_domains = [
+            net.name for net in domain_nets if net is not None
+        ]
+        ground_keys = {domain.casefold() for domain in actual_domains}
+        nets = [net.model_copy(deep=True) for net in normalized.nets]
+        for net in nets:
+            if net.name.casefold() in ground_keys:
+                net.kind = "ground"
+        normalized = normalized.model_copy(update={"nets": nets}, deep=True)
+        normalized = _rewire_part_terminals(
+            normalized,
+            part,
+            actual_domains,
+            ground_domains=actual_domains,
+        )
+    return normalized
+
+
 def _normalize_control_support(
     requirement: str,
     selection: SelectionPlan | None,
@@ -7532,39 +8785,76 @@ def _normalize_control_support(
     view = _ConnectivityView.build(selection, normalized)
     mcu = mcus[0]
     pin_aliases = _verified_pin_aliases(requirement)
-    controls = {
-        "reset": _verified_function_net(
-            view,
-            mcu,
-            pin_aliases,
-            "NRST",
-            "NRESET",
-            "RESET",
-            "EN",
-        ) or view.named_pin_net(mcu, "NRST", "RESET", "EN"),
-        "boot": _verified_function_net(
-            view,
-            mcu,
-            pin_aliases,
-            "BOOT0",
-            "BOOT",
-            "IO0",
-            "GPIO0",
-        ) or view.named_pin_net(mcu, "BOOT0", "BOOT", "IO0", "GPIO0"),
+    control_contracts = {
+        "reset": (("NRST", "NRESET", "RESET", "EN"), "NRST"),
+        "boot": (("BOOT0", "BOOT", "IO0", "GPIO0"), "BOOT0"),
     }
-    supply = view.named_pin_net(mcu, "VDD", "VCC", "3V3")
-    for kind, control_net in controls.items():
+    excluded_reset_domains = (
+        "sensor",
+        "buck",
+        "regulator",
+        "power_mux",
+        "power_path",
+        "rs485",
+        "can_",
+        "flash",
+        "microsd",
+        "usb",
+    )
+
+    def supports_control(part: SelectedPart, kind: str) -> bool:
+        role = part.role.lower()
+        if part.ref == mcu.ref or len(symbols.symbol_pins(part.symbol) or []) != 2:
+            return False
+        if kind == "boot":
+            return "boot" in role and "bootstrap" not in role
+        return (
+            "resettable" not in role
+            and not any(domain in role for domain in excluded_reset_domains)
+            and (
+                "reset" in role
+                or "en_" in role
+                or "en-" in role
+            )
+        )
+
+    for kind, (functions, canonical_name) in control_contracts.items():
+        view = _ConnectivityView.build(selection, normalized)
+        support_parts = [
+            part for part in parts if supports_control(part, kind)
+        ]
+        control_net = _verified_function_net(
+            view,
+            mcu,
+            pin_aliases,
+            *functions,
+        ) or view.named_pin_net(mcu, *functions)
+        if not control_net and support_parts:
+            verified_pin = _verified_function_pin(
+                view,
+                mcu,
+                pin_aliases,
+                *functions,
+            )
+            if verified_pin is not None:
+                normalized = _bind_verified_function_pin(
+                    normalized,
+                    mcu,
+                    verified_pin,
+                    canonical_name,
+                )
+                view = _ConnectivityView.build(selection, normalized)
+                control_net = _verified_function_net(
+                    view,
+                    mcu,
+                    pin_aliases,
+                    *functions,
+                )
         if not control_net:
             continue
-        for part in parts:
+        supply = view.named_pin_net(mcu, "VDD", "VCC", "3V3")
+        for part in support_parts:
             role = part.role.lower()
-            if kind not in role and not (
-                kind == "reset"
-                and any(token in role for token in ("en_", "en-"))
-            ):
-                continue
-            if len(symbols.symbol_pins(part.symbol) or []) != 2:
-                continue
             nets = view.part_nets(part)
             is_switch = (
                 part.ref.upper().startswith("SW")
@@ -7650,6 +8940,7 @@ def _normalize_netlist_intent(
     requirement: str,
     selection: SelectionPlan | None,
     plan: NetlistIntent,
+    topology: TopologyPlan | None = None,
 ) -> NetlistIntent:
     """Apply the same grounded normalizers to proposals, repairs, and resumes."""
 
@@ -7672,6 +8963,11 @@ def _normalize_netlist_intent(
     )
     normalized = _normalize_buck_support(selection, normalized)
     normalized = _normalize_control_support(requirement, selection, normalized)
+    normalized = _normalize_ground_star_ties(
+        selection,
+        normalized,
+        topology,
+    )
     normalized = _normalize_orphan_decoupling(selection, normalized)
     normalized = _mark_evidently_safe_no_connects(selection, normalized)
     normalized = _remove_invalid_no_connect_pins(selection, normalized)
@@ -7724,9 +9020,14 @@ class SchConnectionsStep(PipelineStepBase):
         """Synthesize a large intent as bounded, additive transactions."""
 
         checkpoint = state.connection_synthesis_checkpoint
+        if checkpoint is not None:
+            checkpoint = prepare_resumable_connection_checkpoint(
+                checkpoint,
+                topology,
+                selection,
+            )
         if (
             checkpoint is None
-            or not checkpoint_matches_inputs(checkpoint, topology, selection)
         ):
             plan = plan_connection_batches(
                 topology,
@@ -7735,6 +9036,19 @@ class SchConnectionsStep(PipelineStepBase):
                 max_batches=max(1, ctx.connection_max_batches),
             )
             checkpoint = new_connection_checkpoint(topology, selection, plan)
+            _, ground_domains = _ground_star_contract(topology)
+            existing_names = {
+                net.name.casefold() for net in checkpoint.aggregate.nets
+            }
+            for domain in ground_domains:
+                if domain.casefold() in existing_names:
+                    continue
+                checkpoint.aggregate.nets.append(NetIntent(
+                    name=domain,
+                    kind="ground",
+                    purpose="typed split-ground domain",
+                ))
+                existing_names.add(domain.casefold())
             state.connection_synthesis_checkpoint = checkpoint
             self._persist_connection_progress(state, ctx)
 
@@ -7788,6 +9102,7 @@ class SchConnectionsStep(PipelineStepBase):
                 state.requirement_text,
                 selection,
                 aggregate,
+                topology,
             )
             state.connection_synthesis_checkpoint = checkpoint
             state.connection_synthesis_report = connection_synthesis_report(
@@ -7861,6 +9176,16 @@ class SchConnectionsStep(PipelineStepBase):
                             if name in blocks_by_name
                             else "cross-block endpoint finalization"
                         ),
+                        "implementation_kind": (
+                            _topology_implementation_kind(blocks_by_name[name])
+                            if name in blocks_by_name
+                            else "component"
+                        ),
+                        "implementation_refs": (
+                            list(blocks_by_name[name].implementation_refs)
+                            if name in blocks_by_name
+                            else []
+                        ),
                     }
                     for name in batch.topology_blocks
                 ]
@@ -7880,9 +9205,14 @@ class SchConnectionsStep(PipelineStepBase):
                     "never mark them no-connect. Every created functional net should "
                     "contain all endpoints available in this batch. Extend the "
                     "declared supply and ground nets for power pins. Do not invent "
-                    "parts, pins, rails, interfaces, or support components. Preserve "
-                    "the user's requested topology and use the accepted net ledger "
-                    "to avoid duplicate aliases."
+                    "parts, pins, rails, interfaces, or support components. "
+                    "A pin whose real KiCad electrical type is Output must not be "
+                    "wired directly to a declared supply or ground net. If an "
+                    "address/mode pin needs a fixed level, use a real pull resistor "
+                    "as an additional part; otherwise connect its functional net. "
+                    "Preserve the user's requested topology and use the accepted net ledger "
+                    "to avoid duplicate aliases. "
+                    f"{_ground_connection_guidance(topology)}"
                 )
                 user = (
                     f"BATCH_ID: {batch.batch_id}\n"
@@ -7989,6 +9319,7 @@ class SchConnectionsStep(PipelineStepBase):
             state.requirement_text,
             selection,
             aggregate,
+            topology,
         )
         state.connection_synthesis_report = connection_synthesis_report(
             selection,
@@ -8119,9 +9450,8 @@ class SchConnectionsStep(PipelineStepBase):
             "aliases such as microSD DAT3/CS, choose one canonical net and mention "
             "the alias only in purpose; never emit a second net for the same "
             "physical pin. "
-            "Use the single declared ground_net for every ground return. Do not "
-            "create per-channel GND aliases or connect one MCU VSS pin to multiple "
-            "named nets. Likewise, reuse the declared supply net instead of making "
+            f"{_ground_connection_guidance(topology if isinstance(topology, TopologyPlan) else None)}"
+            "Likewise, reuse the declared supply net instead of making "
             "a one-pin rail alias. "
             "Never emit an unused pin or a test point as a standalone one-pin net: "
             "either attach a test point to the existing functional net, connect a "
@@ -8178,12 +9508,19 @@ class SchConnectionsStep(PipelineStepBase):
             "power-input pins. An IC's internal "
             "regulator output must use its own datasheet rail for core-supply pins "
             "and decoupling, not the external regulator output rail."
+            " A pin whose real KiCad electrical type is Output must never be tied "
+            "directly to a supply or ground net. Implement a datasheet-approved "
+            "address/mode strap through a real pull resistor in additional_parts, "
+            "or reconnect the pin to its functional signal net. Do not change the "
+            "symbol pin type and do not suppress ERC."
         )
         refs_block = _selected_parts_pin_block(
             sel if isinstance(sel, SelectionPlan) else None
         )
         user = (
             f"Requirement:\n{original_requirement}\n\n"
+            "Typed topology ownership (authoritative):\n"
+            f"{_compact_topology_context(topology if isinstance(topology, TopologyPlan) else None)}\n\n"
             "Grounded architect evidence (authoritative where present):\n"
             f"{_architect_evidence_excerpt(state.requirement_text)}\n\n"
             "Selected components with their roles and REAL pin names/numbers:\n"
@@ -8202,6 +9539,7 @@ class SchConnectionsStep(PipelineStepBase):
             state.requirement_text,
             selected,
             plan,
+            topology if isinstance(topology, TopologyPlan) else None,
         )
         if selected is not None:
             direct_reason = ""
@@ -8233,6 +9571,10 @@ class SchConnectionsStep(PipelineStepBase):
         checks: list[CheckResult],
     ) -> tuple[BaseModel, bool]:
         assert isinstance(artifact, NetlistIntent)
+        topology = state.artifact(PipelineStep.TOPOLOGY)
+        typed_topology = (
+            topology if isinstance(topology, TopologyPlan) else None
+        )
         if (
             ctx.active_recovery_tool == "apply_cad_action_batch"
             and ctx.active_cad_action_batch is not None
@@ -8250,6 +9592,7 @@ class SchConnectionsStep(PipelineStepBase):
                     state.requirement_text,
                     selection if isinstance(selection, SelectionPlan) else None,
                     candidate,
+                    typed_topology,
                 ),
                 False,
             )
@@ -8332,10 +9675,9 @@ class SchConnectionsStep(PipelineStepBase):
             "LED path is supply-or-MCU -- resistor -- unique intermediate net -- LED "
             "-- ground-or-supply. The LED and its channel resistor share exactly one "
             "net; do not place both parts in parallel on the same two nets. Remove "
-            "the obsolete isolated endpoint nets after moving their pins. Move all "
-            "ground-return pins into the existing ground_net named in the compact "
-            "context; never create per-channel GND aliases or reuse one MCU VSS pin "
-            "as their peer. Move supply endpoints into an existing declared supply "
+            "the obsolete isolated endpoint nets after moving their pins. "
+            f"{_ground_connection_guidance(typed_topology)}"
+            "Move supply endpoints into an existing declared supply "
             "net in the same way. A USB-C sink/device requires CC1 and CC2 on "
             "separate nets, each through its own 5.1k Rd to the declared ground; "
             "remove CC pins and Rd signal terminals from positive supply rails. "
@@ -8353,8 +9695,14 @@ class SchConnectionsStep(PipelineStepBase):
             "every power-input pin must be on a declared supply rail or a rail with "
             "exactly one real power-output pin. Move an internal regulator output "
             "and its core-supply/decoupling pins "
-            "to their own datasheet rail. For a backfeed-isolated design, split any "
-            "raw USB/external source net that was directly merged and reconnect it "
+            "to their own datasheet rail. "
+            "A real KiCad Output pin cannot be strapped directly to a declared "
+            "supply or ground. For an address/mode strap, add a real pull resistor "
+            "and place the Output pin on the resistor's signal-side net; otherwise "
+            "restore its functional signal net. Never edit the symbol electrical "
+            "type or waive the ERC finding. "
+            "For a backfeed-isolated design, split any raw USB/external source net "
+            "that was directly merged and reconnect it "
             "through the selected power-path element. Rebuild a rejected external "
             "input chain as connector -- fuse -- reverse-polarity element -- filter "
             "-- regulator VIN, with TVS and filter capacitors from protected nodes "
@@ -8379,6 +9727,8 @@ class SchConnectionsStep(PipelineStepBase):
             "symbol and footprint; otherwise keep the current grounded additions.\n\n"
             "Grounded architect evidence:\n"
             f"{_architect_evidence_excerpt(state.requirement_text, 6000)}\n\n"
+            "Typed topology ownership:\n"
+            f"{_compact_topology_context(typed_topology)}\n\n"
             f"Selected components:\n{refs_block}"
         )
         ctx.repair_feedback = (
@@ -8392,6 +9742,9 @@ class SchConnectionsStep(PipelineStepBase):
             system=system,
             user=user,
             fallback=NetlistPatch,
+            validate=lambda proposal: _validate_netlist_patch_scope(
+                proposal, artifact, related_refs, relevant_nets,
+            ),
         )
         patch = _limit_netlist_patch_to_scope(
             patch,
@@ -8413,6 +9766,7 @@ class SchConnectionsStep(PipelineStepBase):
                 state.requirement_text,
                 selected,
                 repaired,
+                typed_topology,
             ),
             used,
         )
@@ -8456,10 +9810,12 @@ class SchConnectionsStep(PipelineStepBase):
 
         assert isinstance(artifact, NetlistIntent)
         selection = state.artifact(PipelineStep.SELECTION)
+        topology = state.artifact(PipelineStep.TOPOLOGY)
         return _normalize_netlist_intent(
             state.requirement_text,
             selection if isinstance(selection, SelectionPlan) else None,
             artifact,
+            topology if isinstance(topology, TopologyPlan) else None,
         )
 
     def check(self, state: PipelineState, artifact: BaseModel) -> list[CheckResult]:
@@ -8772,6 +10128,59 @@ class SchConnectionsStep(PipelineStepBase):
                     f"{rail_polarity_conflicts}"
                 ),
             ))
+            signal_output_rail_conflicts: list[dict[str, str]] = []
+            declared_power_names = supply_names | ground_names | {
+                net.name.lower()
+                for net in artifact.nets
+                if net.kind in {"power", "ground"}
+            }
+            for net in artifact.nets:
+                if net.name.lower() not in declared_power_names:
+                    continue
+                for logical in net.pins:
+                    part = ref_parts.get(logical.ref)
+                    part_pins = (
+                        symbols.symbol_pins(part.symbol) or []
+                        if part is not None
+                        else []
+                    )
+                    number = _resolve_logical_pin(part_pins, logical.pin)
+                    physical = next(
+                        (
+                            pin
+                            for pin in part_pins
+                            if str(pin.get("number", "")) == number
+                        ),
+                        None,
+                    )
+                    if physical is None or str(
+                        physical.get("type", "")
+                    ).casefold() != "output":
+                        continue
+                    signal_output_rail_conflicts.append({
+                        "ref": logical.ref,
+                        "pin": str(number),
+                        "pin_name": str(physical.get("name", "")),
+                        "pin_type": "output",
+                        "net": net.name,
+                    })
+            checks.append(CheckResult(
+                name="signal_output_not_directly_on_power_rail",
+                ok=not signal_output_rail_conflicts,
+                message=(
+                    "ordinary Output pins must not be tied directly to a "
+                    "declared supply/ground rail; use a real pull resistor for "
+                    "a grounded address/mode strap or restore the functional "
+                    f"signal net: {signal_output_rail_conflicts}"
+                ),
+                reason_code="signal_output_direct_power_rail",
+                affected_refs=sorted({
+                    item["ref"] for item in signal_output_rail_conflicts
+                }),
+                evidence={
+                    "pin_net_conflicts": signal_output_rail_conflicts,
+                },
+            ))
             power_output_conflicts: list[str] = []
             for net in artifact.nets:
                 outputs: set[str] = set()
@@ -8990,6 +10399,7 @@ class SchConnectionsStep(PipelineStepBase):
                     combined_selection,
                     artifact,
                     state.requirement_text,
+                    state.artifact(PipelineStep.TOPOLOGY),
                 )
             )
         return checks
@@ -9293,6 +10703,110 @@ def _normalized_function_name(value: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", value.upper())
 
 
+def _verified_function_pin_candidates(
+    view: _ConnectivityView,
+    part: SelectedPart,
+    aliases: Iterable[VerifiedPinAlias],
+    *functions: str,
+) -> set[str]:
+    """Return unique installed physical pins backed by Architect evidence."""
+
+    wanted = {_normalized_function_name(item) for item in functions}
+    installed = {
+        (
+            str(pin.get("number", "")),
+            _normalized_function_name(str(pin.get("name", ""))),
+        )
+        for pin in view.pins.get(part.ref, [])
+    }
+    return {
+        alias.pin_number
+        for alias in aliases
+        if alias.symbol_lib_id.casefold() == part.symbol.casefold()
+        and wanted.intersection(
+            _normalized_function_name(item) for item in alias.aliases
+        )
+        and (
+            alias.pin_number,
+            _normalized_function_name(alias.symbol_pin_name),
+        ) in installed
+    }
+
+
+def _verified_function_pin(
+    view: _ConnectivityView,
+    part: SelectedPart,
+    aliases: Iterable[VerifiedPinAlias],
+    *functions: str,
+) -> str | None:
+    pins = _verified_function_pin_candidates(
+        view,
+        part,
+        aliases,
+        *functions,
+    )
+    return next(iter(pins)) if len(pins) == 1 else None
+
+
+def _bind_verified_function_pin(
+    plan: NetlistIntent,
+    part: SelectedPart,
+    pin_number: str,
+    canonical_name: str,
+) -> NetlistIntent:
+    """Move one proven MCU function onto one exact canonical control net."""
+
+    canonical = _normalized_function_name(canonical_name)
+    accepted_names = {canonical, f"MCU{canonical}"}
+    candidates = [
+        net
+        for net in plan.nets
+        if _normalized_function_name(net.name) in accepted_names
+    ]
+    if len(candidates) > 1:
+        return plan
+
+    target_name = candidates[0].name if candidates else canonical_name
+    physical_pins = symbols.symbol_pins(part.symbol) or []
+    nets = [net.model_copy(deep=True) for net in plan.nets]
+    target = next(
+        (net for net in nets if net.name == target_name),
+        None,
+    )
+    if target is None:
+        target = NetIntent(
+            name=target_name,
+            kind="signal",
+            purpose=f"verified {canonical_name} control net",
+        )
+        nets.append(target)
+
+    for net in nets:
+        kept: list[LogicalPin] = []
+        for logical in net.pins:
+            if logical.ref != part.ref:
+                kept.append(logical)
+                continue
+            resolved = _resolve_logical_pin(physical_pins, logical.pin)
+            if resolved == pin_number or net.name == target_name:
+                continue
+            kept.append(logical)
+        net.pins = kept
+    target.pins.append(LogicalPin(ref=part.ref, pin=pin_number))
+
+    no_connect = []
+    for logical in plan.no_connect_pins:
+        if logical.ref != part.ref:
+            no_connect.append(logical)
+            continue
+        if _resolve_logical_pin(physical_pins, logical.pin) != pin_number:
+            no_connect.append(logical)
+    return plan.model_copy(
+        update={"nets": nets, "no_connect_pins": no_connect},
+        deep=True,
+    )
+
+
 def _verified_function_net_candidates(
     view: _ConnectivityView,
     part: SelectedPart,
@@ -9305,29 +10819,15 @@ def _verified_function_net_candidates(
     number, and the installed pin name must still agree at this boundary.
     """
 
-    wanted = {_normalized_function_name(item) for item in functions}
-    installed = {
-        (
-            str(pin.get("number", "")),
-            _normalized_function_name(str(pin.get("name", ""))),
-        )
-        for pin in view.pins.get(part.ref, [])
-    }
+    verified_pins = _verified_function_pin_candidates(
+        view,
+        part,
+        aliases,
+        *functions,
+    )
     nets: set[str] = set()
-    for alias in aliases:
-        if alias.symbol_lib_id.casefold() != part.symbol.casefold():
-            continue
-        if not wanted.intersection(
-            _normalized_function_name(item) for item in alias.aliases
-        ):
-            continue
-        pin_identity = (
-            alias.pin_number,
-            _normalized_function_name(alias.symbol_pin_name),
-        )
-        if pin_identity not in installed:
-            continue
-        net = view.pin_nets.get((part.ref, alias.pin_number))
+    for pin_number in verified_pins:
+        net = view.pin_nets.get((part.ref, pin_number))
         if net:
             nets.add(net)
     return nets
@@ -11160,10 +12660,190 @@ def _usb_c_sink_cc_topology_checks(
     return checks
 
 
+def _ground_domain_contract_checks(
+    intent: NetlistIntent,
+    topology: BaseModel | None,
+) -> list[CheckResult]:
+    """Keep ground classification owned by the typed topology artifact."""
+
+    if not isinstance(topology, TopologyPlan):
+        return []
+    declared = {
+        domain.casefold(): domain for domain in topology.ground_domains
+    }
+    by_name = {net.name.casefold(): net for net in intent.nets}
+    failures: list[str] = []
+    if intent.ground_net.casefold() != topology.ground_net.casefold():
+        failures.append(
+            f"connection ground_net={intent.ground_net!r} differs from topology "
+            f"ground_net={topology.ground_net!r}"
+        )
+    missing = sorted(
+        domain for key, domain in declared.items() if key not in by_name
+    )
+    if missing:
+        failures.append(f"typed ground domains are missing: {missing}")
+    wrong_kind = sorted(
+        net.name for key, net in by_name.items()
+        if key in declared and net.kind.casefold() != "ground"
+    )
+    if wrong_kind:
+        failures.append(f"typed ground domains have wrong kind: {wrong_kind}")
+    undeclared = sorted(
+        net.name for key, net in by_name.items()
+        if net.kind.casefold() == "ground" and key not in declared
+    )
+    if undeclared:
+        failures.append(
+            f"connection model classified undeclared nets as ground: {undeclared}"
+        )
+    return [CheckResult(
+        name="typed_ground_domain_classification",
+        ok=not failures,
+        message=(
+            "ground net identity and classification must match typed topology: "
+            f"{failures}"
+        ),
+        blocks_execution=bool(failures),
+        reason_code="" if not failures else "ground_domain_contract_mismatch",
+    )]
+
+
+def _ground_star_topology_checks(
+    selection: SelectionPlan,
+    intent: NetlistIntent,
+    topology: BaseModel | None,
+) -> list[CheckResult]:
+    """Verify every typed ground tie before schematic materialization."""
+
+    if not isinstance(topology, TopologyPlan):
+        return []
+    contracts = _ground_star_contracts(topology)
+    role_ties = [part for part in selection.parts if _is_ground_star_part(part)]
+    declared_domains = {
+        domain.casefold() for domain in topology.ground_domains
+    }
+    if not contracts and not role_ties and len(declared_domains) < 2:
+        return []
+    view = _ConnectivityView.build(selection, intent)
+    parts_by_ref = {
+        part.ref.casefold(): part for part in selection.parts
+    }
+    by_name = {net.name.casefold(): net for net in intent.nets}
+    tie_refs = {tie.component_ref.casefold() for tie in contracts}
+    checks: list[CheckResult] = []
+    for contract in contracts:
+        failures: list[str] = []
+        expected = {domain.casefold() for domain in contract.domains}
+        missing = sorted(expected - set(by_name))
+        if missing:
+            failures.append(f"declared ground domains are missing: {missing}")
+        wrong_kind = sorted(
+            by_name[name].name
+            for name in expected & set(by_name)
+            if by_name[name].kind.casefold() != "ground"
+        )
+        if wrong_kind:
+            failures.append(
+                f"declared ground domains are not kind=ground: {wrong_kind}"
+            )
+
+        part = parts_by_ref.get(contract.component_ref.casefold())
+        if part is None:
+            failures.append(
+                f"owned star component {contract.component_ref} is not selected"
+            )
+            checks.append(CheckResult(
+                name=f"split_ground_star_contract:{contract.component_ref}",
+                ok=False,
+                message=f"typed ground tie is unrealizable: {failures}",
+                affected_refs=[contract.component_ref],
+            ))
+            continue
+        pin_count = len({
+            str(pin.get("number", "")).strip()
+            for pin in (symbols.symbol_pins(part.symbol) or [])
+            if str(pin.get("number", "")).strip()
+        })
+        if pin_count != len(contract.domains):
+            failures.append(
+                f"{contract.component_ref} has {pin_count} real terminals but "
+                f"the contract declares {len(contract.domains)} domains"
+            )
+        electrical_class = _ground_bridge_electrical_class(part)
+        if electrical_class != "galvanic":
+            failures.append(
+                f"{contract.component_ref} is not a verified galvanic net-tie, "
+                f"0-ohm link, jumper, or ferrite; class={electrical_class}"
+            )
+        actual = {name.casefold() for name in view.part_nets(part)}
+        if actual != expected:
+            failures.append(
+                f"{contract.component_ref} must bridge only "
+                f"{sorted(contract.domains)}, got {sorted(view.part_nets(part))}"
+            )
+        for domain in expected & set(by_name):
+            net = by_name[domain]
+            if not any(
+                pin.ref.casefold() not in tie_refs for pin in net.pins
+            ):
+                failures.append(
+                    f"ground domain {net.name} has no non-tie load endpoint"
+                )
+        checks.append(CheckResult(
+            name=f"split_ground_star_contract:{contract.component_ref}",
+            ok=not failures,
+            message=(
+                "typed ground domains must be populated and joined only by "
+                f"their owned component: {failures}"
+            ),
+            affected_refs=[contract.component_ref],
+        ))
+
+    unexpected_bridges: list[str] = []
+    for part in selection.parts:
+        if part.ref.casefold() in tie_refs:
+            continue
+        actual_domains = {
+            name.casefold() for name in view.part_nets(part)
+        } & declared_domains
+        real_pin_count = len({
+            str(pin.get("number", "")).strip()
+            for pin in (symbols.symbol_pins(part.symbol) or [])
+            if str(pin.get("number", "")).strip()
+        })
+        if (
+            len(actual_domains) >= 2
+            and (real_pin_count >= 2 or _is_ground_star_part(part))
+            and _ground_bridge_electrical_class(part) == "galvanic"
+        ):
+            unexpected_bridges.append(
+                f"{part.ref}:{sorted(actual_domains)}"
+            )
+    uncontracted_role_ties = sorted(
+        part.ref for part in role_ties if part.ref.casefold() not in tie_refs
+    )
+    checks.append(CheckResult(
+        name="no_unowned_ground_domain_bridges",
+        ok=not unexpected_bridges and not uncontracted_role_ties,
+        message=(
+            "every conductive bridge between declared ground domains must have "
+            "one typed owner; "
+            f"bridges={unexpected_bridges}, uncontracted={uncontracted_role_ties}"
+        ),
+        affected_refs=sorted({
+            *(item.split(":", 1)[0] for item in unexpected_bridges),
+            *uncontracted_role_ties,
+        }),
+    ))
+    return checks
+
+
 def _functional_connection_checks(
     selection: SelectionPlan,
     intent: NetlistIntent,
     requirement: str = "",
+    topology: BaseModel | None = None,
 ) -> list[CheckResult]:
     """Validate safety-critical topology after all logical pins resolve."""
     view = _ConnectivityView.build(selection, intent)
@@ -11188,6 +12868,8 @@ def _functional_connection_checks(
     checks.extend(_power_mux_topology_checks(view))
     checks.extend(_backfeed_isolation_topology_checks(view, requirement))
     checks.extend(_external_input_protection_topology_checks(view))
+    checks.extend(_ground_domain_contract_checks(intent, topology))
+    checks.extend(_ground_star_topology_checks(selection, intent, topology))
     return checks
 
 
@@ -11698,7 +13380,10 @@ class SchLayoutStep(PipelineStepBase):
             "rotation}) in mm, label_nets[] (nets drawn as labels vs local wires), "
             "rationale. Keep symbols from overlapping; power/ground as labels."
         )
-        user = f"Components: {self._refs(state)}\nNets: {self._net_names(state)}\n\n{knowledge}"
+        connectivity = state.artifact(PipelineStep.SCH_CONNECTIONS)
+        user = (f"Components and real symbols: {self._symbol_by_ref(state)}\n"
+                f"Connectivity: {connectivity.model_dump_json() if connectivity else self._net_names(state)}\n"
+                f"Inspect real symbol geometry with the symbol tool before grouping.\n\n{knowledge}")
         plan, used = propose_structured(
             ctx, model=SchLayoutPlan, system=system, user=user, fallback=fallback
         )
@@ -11796,6 +13481,76 @@ class SchMaterializeStep(PipelineStepBase):
 
     step = PipelineStep.SCH_MATERIALIZE
 
+    @staticmethod
+    def _ground_domains(
+        intent: NetlistIntent | None,
+        topology: TopologyPlan | None = None,
+    ) -> list[str]:
+        if intent is None:
+            return [topology.ground_net] if topology is not None else ["GND"]
+        declared = (
+            topology.ground_domains
+            if topology is not None
+            else [intent.ground_net]
+        )
+        actual_names = {net.name.casefold(): net.name for net in intent.nets}
+        return list(dict.fromkeys(
+            actual_names.get(domain.casefold(), domain)
+            for domain in declared
+        ))
+
+    @staticmethod
+    def _materialized_power_flag_nets(doc: Any) -> set[str]:
+        flag_coordinates = {
+            (
+                round(float(component["at"]["x"]), 6),
+                round(float(component["at"]["y"]), 6),
+            )
+            for component in doc.components()
+            if component.get("value") == "PWR_FLAG"
+            and isinstance(component.get("at"), dict)
+        }
+        return {
+            label.net
+            for label in doc.labels()
+            if (round(label.x, 6), round(label.y, 6)) in flag_coordinates
+        }
+
+    @staticmethod
+    def _required_power_flag_nets(state: PipelineState) -> set[str]:
+        intent = state.artifact(PipelineStep.SCH_CONNECTIONS)
+        pinmap = state.artifact(PipelineStep.SCH_PINMAP)
+        selection = state.artifact(PipelineStep.SELECTION)
+        topology = state.artifact(PipelineStep.TOPOLOGY)
+        if not isinstance(intent, NetlistIntent) or not isinstance(
+            pinmap,
+            PinMapPlan,
+        ) or not isinstance(selection, SelectionPlan):
+            return set()
+        symbol_by_ref = {part.ref: part.symbol for part in selection.parts}
+        power_output_nets: set[str] = set()
+        for net in pinmap.nets:
+            for mapped_pin in net.pins:
+                pin_rows = symbols.symbol_pins(
+                    symbol_by_ref.get(mapped_pin.ref, "")
+                ) or []
+                if any(
+                    str(row.get("number", "")) == mapped_pin.number
+                    and str(row.get("type", "")).casefold() == "power_out"
+                    for row in pin_rows
+                ):
+                    power_output_nets.add(net.name)
+                    break
+        populated_nets = {net.name for net in pinmap.nets if net.pins}
+        domains = {
+            *SchMaterializeStep._ground_domains(
+                intent,
+                topology if isinstance(topology, TopologyPlan) else None,
+            ),
+            *intent.supply_nets,
+        }
+        return (domains & populated_nets) - power_output_nets
+
     def _components(self, state: PipelineState) -> list[dict[str, Any]]:
         sel = state.artifact(PipelineStep.SELECTION)
         layout = state.artifact(PipelineStep.SCH_LAYOUT)
@@ -11853,18 +13608,30 @@ class SchMaterializeStep(PipelineStepBase):
         nets = self._nets(state)
         no_connect_pins = self._no_connect_pins(state)
         intent = state.artifact(PipelineStep.SCH_CONNECTIONS)
+        topology = state.artifact(PipelineStep.TOPOLOGY)
         supply = intent.supply_nets if isinstance(intent, NetlistIntent) else []
         ground = intent.ground_net if isinstance(intent, NetlistIntent) else "GND"
+        ground_domains = self._ground_domains(
+            intent if isinstance(intent, NetlistIntent) else None,
+            topology if isinstance(topology, TopologyPlan) else None,
+        )
         doc = materialize_pinmapped(
             components,
             nets,
             no_connect_pins=no_connect_pins,
             supply_nets=supply,
             ground_net=ground,
+            ground_nets=ground_domains,
+            label_nets=(state.artifact(PipelineStep.SCH_LAYOUT).label_nets
+                        if isinstance(state.artifact(PipelineStep.SCH_LAYOUT), SchLayoutPlan)
+                        else [ground, *supply]),
         )
 
         out_dir = Path(ctx.out_dir) if ctx.out_dir else Path(tempfile.mkdtemp(prefix="rnp_sch_"))
         out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "schematic_drawing.json").write_text(
+            json.dumps(doc.drawing_receipt, indent=2), encoding="utf-8"
+        )
         _register_project_library_bindings(
             out_dir,
             [
@@ -11945,6 +13712,22 @@ class SchMaterializeStep(PipelineStepBase):
                 name="lib_symbols_embedded", ok=not missing_syms,
                 message=f"symbol graphics missing from lib_symbols: {missing_syms}",
             ))
+        required_flags = self._required_power_flag_nets(state)
+        actual_flags = self._materialized_power_flag_nets(doc)
+        missing_flags = sorted(required_flags - actual_flags)
+        checks.append(CheckResult(
+            name="power_domains_have_erc_drivers",
+            ok=not missing_flags,
+            message=(
+                "all isolated power domains have materialized ERC drivers"
+                if not missing_flags
+                else f"power domains missing PWR_FLAG drivers: {missing_flags}"
+            ),
+            blocks_execution=bool(missing_flags),
+            reason_code=(
+                "" if not missing_flags else "materialized_power_driver_missing"
+            ),
+        ))
         return checks
 
     def summarize(self, artifact: BaseModel) -> str:
@@ -12076,9 +13859,24 @@ class ErcStep(PipelineStepBase):
             for pin in net.pins
             if isinstance(pinmap, PinMapPlan) and net.name in problem_nets
         }) if isinstance(pinmap, PinMapPlan) else []
-        entity_plans = _bounded_entity_repair_plans(
-            Path(artifact.cli_report_path)
-        ) if artifact.cli_report_path else []
+        entity_plans = (
+            _attach_kicad_pin_net_evidence(
+                _kicad_error_repair_plans(Path(artifact.cli_report_path)),
+                (
+                    Path(artifact.connectivity_netlist_path)
+                    if artifact.connectivity_netlist_path
+                    else None
+                ),
+            )
+            if artifact.cli_report_path
+            else []
+        )
+        bounded_entity_plans = [
+            plan
+            for plan in entity_plans
+            if plan.execution_policy == RepairExecutionPolicy.BOUNDED_CANDIDATE
+            and plan.rollback_step in PipelineStep._value2member_map_
+        ]
         cli_refs = _entity_repair_refs(entity_plans)
         connectivity_refs = sorted({
             item.partition(".")[0]
@@ -12161,8 +13959,10 @@ class ErcStep(PipelineStepBase):
                 ),
                 reason_code=(
                     "entity_repair:"
-                    + ",".join(sorted({plan.strategy for plan in entity_plans}))
-                    if entity_plans
+                    + ",".join(
+                        sorted({plan.strategy for plan in bounded_entity_plans})
+                    )
+                    if bounded_entity_plans
                     else "erc_error_without_bounded_entity_plan"
                 ),
                 affected_refs=cli_refs,
@@ -12192,7 +13992,14 @@ class ErcStep(PipelineStepBase):
             return PipelineStep.SCH_MATERIALIZE
         if isinstance(artifact, ErcSummary) and artifact.cli_report_path:
             return _earliest_entity_rollback(
-                _bounded_entity_repair_plans(Path(artifact.cli_report_path))
+                _bounded_entity_repair_plans(
+                    Path(artifact.cli_report_path),
+                    (
+                        Path(artifact.connectivity_netlist_path)
+                        if artifact.connectivity_netlist_path
+                        else None
+                    ),
+                )
             )
         return None
 
@@ -15204,12 +17011,14 @@ class RoutePlanStep(PipelineStepBase):
 
         system = (
             "You define a PCB stackup and net classes. Return JSON: layers (2-16), "
-            "net_classes[] ({name, width, clearance, via_diameter, via_drill, layer}) "
-            "in mm, rationale. Values must meet the fab minimums."
+            "net_classes[] ({name, nets: [exact net names], width, clearance, via_diameter, via_drill, layer}) "
+            "in mm, rationale. Assign each actual net exactly once. Layer is a preferred layer, "
+            "not a routing prohibition. Values must meet the fab minimums."
         )
         user = (
             f"Requirement:\n{state.requirement_text}\n\n"
             f"Fab minimums: {cap.model_dump()}\n\nKnowledge:\n{knowledge}"
+            f"\nActual nets: {self._routing_nets(state)[0]}"
         )
         artifact, used_llm = propose_structured(
             ctx,
@@ -15263,8 +17072,22 @@ class RoutePlanStep(PipelineStepBase):
             artifact = artifact.model_copy(update=updates)
         return artifact, used_llm
 
+    @staticmethod
+    def _routing_nets(state: PipelineState) -> tuple[list[str], list[str]]:
+        intent = state.artifact(PipelineStep.SCH_CONNECTIONS)
+        if not isinstance(intent, NetlistIntent):
+            return [], []
+        return [n.name for n in intent.nets], [intent.ground_net, *intent.supply_nets]
+
     def check(self, state: PipelineState, artifact: BaseModel) -> list[CheckResult]:
         assert isinstance(artifact, RoutePlan)
+        from ratsnestpro.eda.routing_rules import bind_net_classes
+
+        membership_error = ""
+        try:
+            bind_net_classes([c.model_dump() for c in artifact.net_classes], *self._routing_nets(state))
+        except ValueError as exc:
+            membership_error = str(exc)
         cap = config.process_capability()
         thin = [c.name for c in artifact.net_classes if c.width < cap.min_track_width]
         tight = [c.name for c in artifact.net_classes if c.clearance < cap.min_clearance]
@@ -15294,6 +17117,7 @@ class RoutePlanStep(PipelineStepBase):
             ),
             CheckResult(name="has_net_classes", ok=bool(artifact.net_classes),
                         message="no net classes defined"),
+            CheckResult(name="net_class_membership", ok=not membership_error, message=membership_error),
             CheckResult(name="track_width_ok", ok=not thin,
                         message=f"net classes below min track width: {thin}"),
             CheckResult(name="clearance_ok", ok=not tight,
@@ -17855,6 +19679,37 @@ def _routing_physical_invariant_blockers(state: PipelineState) -> list[str]:
     ]
 
 
+def _net_class_geometry_blockers(state: PipelineState) -> list[str]:
+    """Independently measure final copper; a preferred KiCad netclass is not a DRC minimum."""
+    from ratsnestpro.eda.routing_rules import bind_net_classes
+    from ratsnestpro.eda.vendor.pcb import PcbBoard
+    from ratsnestpro.eda.vendor.sexpr import find_all, find_first
+
+    plan, write = state.artifact(PipelineStep.ROUTE_PLAN), state.artifact(PipelineStep.LAYOUT_WRITE)
+    if not isinstance(plan, RoutePlan) or not isinstance(write, PcbWriteResult):
+        return []
+    try:
+        names, power = RoutePlanStep._routing_nets(state)
+        classes = bind_net_classes([c.model_dump() for c in plan.net_classes], names, power)
+        rules = {name: c for c in classes for name in c["nets"]}
+        board = PcbBoard.load(Path(write.pcb_path))
+        failures = []
+        for track in board.list_tracks():
+            rule = rules.get(track["net_name"])
+            if rule and (track["width"] is None or track["width"] + 1e-6 < rule["width"]):
+                failures.append(f"track {track['uuid']} net {track['net_name']}: width {track['width']} < {rule['width']}")
+        net_names = {n["index"]: n["name"] for n in board.list_nets()}
+        for via in find_all(board.root, "via"):
+            net, size, drill = find_first(via, "net"), find_first(via, "size"), find_first(via, "drill")
+            rule = rules.get(net_names.get(int(str(net[1])))) if net else None
+            if rule and (not size or not drill or float(str(size[1])) + 1e-6 < rule["via_diameter"]
+                         or abs(float(str(drill[1])) - rule["via_drill"]) > 1e-6):
+                failures.append(f"via on {net_names.get(int(str(net[1])))} does not match its physical class geometry")
+        return failures[:20]
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return [f"net-class physical audit unavailable: {exc}"]
+
+
 class RouteSignalsStep(PipelineStepBase):
     """Route remaining signals with Freerouting.
 
@@ -17884,10 +19739,10 @@ class RouteSignalsStep(PipelineStepBase):
                 note="no board or pin-map available; signal routing deferred",
             ), False
 
-        # net -> [(ref, pad_number)]; only nets with >=2 pins are routable.
+        # Include singleton nets too: their pin identity and class must not be lost.
         netmap = {
             n.name: [[p.ref, p.number] for p in n.pins]
-            for n in pm.nets if len(n.pins) >= 2
+            for n in pm.nets if n.pins
         }
         route_plan = state.artifact(PipelineStep.ROUTE_PLAN)
         planned_layers = (
@@ -17908,9 +19763,7 @@ class RouteSignalsStep(PipelineStepBase):
                 (net_class.clearance for net_class in net_classes),
                 default=cap.min_clearance,
             ),
-            # The current Freerouting adapter accepts one global width.  Use
-            # the strictest explicit user minimum so a power-net contract can
-            # never be silently weakened by the signal-class minimum.
+            # Default geometry only; every actual net gets its own DSN class below.
             "track_width_mm": max(
                 explicit_track_width,
                 min(
@@ -17983,6 +19836,12 @@ class RouteSignalsStep(PipelineStepBase):
                 max_passes=max_passes,
                 layer_count=attempt_layers,
                 random_seed=seed,
+                net_classes=[{**c.model_dump(), "width": max(c.width, explicit_track_width)}
+                             for c in net_classes],
+                power_nets=RoutePlanStep._routing_nets(state)[1],
+                critical_nets=(state.artifact(PipelineStep.ROUTE_PLANES).critical_nets
+                               if isinstance(state.artifact(PipelineStep.ROUTE_PLANES), PlanePlan)
+                               else []),
                 **rules,
             )
             current.note = (
@@ -18182,6 +20041,7 @@ class RouteSignalsStep(PipelineStepBase):
         )
         missing_planes = _physical_plane_mismatches(state, artifact.layers)
         routing_invariant_blockers = _routing_physical_invariant_blockers(state)
+        net_class_blockers = _net_class_geometry_blockers(state)
         explicit_layers = extract_requirement_invariants(
             state.requirement_text
         ).copper_layer_count
@@ -18213,6 +20073,9 @@ class RouteSignalsStep(PipelineStepBase):
                 ok=not missing_planes,
                 message=f"planned physical copper zones are missing: {missing_planes}",
             ),
+            CheckResult(name="net_class_geometry", ok=not net_class_blockers,
+                        message="final track/via geometry must satisfy every assigned net class: "
+                        + "; ".join(net_class_blockers)),
             CheckResult(
                 name="explicit_layer_count_preserved",
                 ok=explicit_layers is None or artifact.layers == explicit_layers,
@@ -18477,12 +20340,52 @@ def _kicad_error_repair_plans(report_path: Path) -> list[EntityRepairPlan]:
     return classify_kicad_report(filtered)
 
 
+def _attach_kicad_pin_net_evidence(
+    plans: list[EntityRepairPlan],
+    netlist_path: Path | None,
+) -> list[EntityRepairPlan]:
+    """Bind ERC terminals to the exported KiCad netlist before reflection."""
+
+    if netlist_path is None or not netlist_path.is_file():
+        return plans
+    try:
+        snapshot = read_kicad_xml_pin_net_set(netlist_path)
+    except (OSError, ValueError):
+        return plans
+    by_terminal = {
+        (fact.ref.casefold(), fact.pin): fact.net
+        for fact in snapshot.facts
+    }
+    enriched: list[EntityRepairPlan] = []
+    for plan in plans:
+        facts = list({
+            (pin.ref, pin.number, net): AffectedPinNet(
+                ref=pin.ref,
+                pin=pin.number,
+                net=net,
+            )
+            for pin in plan.affected_pins
+            if (
+                net := by_terminal.get((pin.ref.casefold(), pin.number))
+            ) is not None
+        }.values())
+        enriched.append(plan.model_copy(update={
+            "pin_net_facts": facts,
+            "affected_nets": sorted({fact.net for fact in facts}),
+        }))
+    return enriched
+
+
 def _bounded_entity_repair_plans(
     report_path: Path,
+    netlist_path: Path | None = None,
 ) -> list[EntityRepairPlan]:
     return [
         plan
-        for plan in _kicad_error_repair_plans(report_path)
+        for plan in _attach_kicad_pin_net_evidence(
+            _kicad_error_repair_plans(report_path),
+            netlist_path,
+        )
         if plan.execution_policy == RepairExecutionPolicy.BOUNDED_CANDIDATE
         and plan.rollback_step in PipelineStep._value2member_map_
     ]
@@ -19161,10 +21064,14 @@ class ManufactureStep(PipelineStepBase):
                 )
         nonrelease_refs = {issue["ref"] for issue in component_issues}
         prepared_manifest: PreparedComponentManifest | None = None
-        if isinstance(sel, SelectionPlan) and sel.prepared_manifest_path:
+        if isinstance(sel, SelectionPlan) and (
+            sel.prepared_manifest_json or sel.prepared_manifest_path
+        ):
             try:
                 prepared_manifest = PreparedComponentManifest.model_validate_json(
-                    Path(sel.prepared_manifest_path).read_text(encoding="utf-8")
+                    sel.prepared_manifest_json
+                    if sel.prepared_manifest_json
+                    else Path(sel.prepared_manifest_path).read_text(encoding="utf-8")
                 )
             except (OSError, ValueError):
                 prepared_manifest = None
@@ -20281,16 +22188,26 @@ def restore_pipeline_state(
             topology = state.artifact(PipelineStep.TOPOLOGY)
             selection = state.artifact(PipelineStep.SELECTION)
             try:
-                inflight = ConnectionSynthesisCheckpoint.model_validate(
+                raw_inflight = ConnectionSynthesisCheckpoint.model_validate(
                     connection_synthesis_checkpoint
                 )
             except Exception:  # noqa: BLE001 - stale partial work is discardable
                 inflight = None
+            else:
+                inflight = (
+                    prepare_resumable_connection_checkpoint(
+                        raw_inflight,
+                        topology,
+                        selection,
+                    )
+                    if isinstance(topology, TopologyPlan)
+                    and isinstance(selection, SelectionPlan)
+                    else None
+                )
             if (
                 inflight is not None
                 and isinstance(topology, TopologyPlan)
                 and isinstance(selection, SelectionPlan)
-                and checkpoint_matches_inputs(inflight, topology, selection)
                 and any(item.status != "completed" for item in inflight.batches)
             ):
                 # A draft may have continued through downstream artifact-first
@@ -20303,6 +22220,7 @@ def restore_pipeline_state(
         if raw_artifact is None:
             break
         artifact = ARTIFACT_MODELS[expected].model_validate(raw_artifact)
+        persisted_artifact = artifact.model_copy(deep=True)
         requirement_refreshed = (
             expected == PipelineStep.REQUIREMENTS
             and isinstance(artifact, RequirementSpec)
@@ -20323,7 +22241,11 @@ def restore_pipeline_state(
         if not validator.resume_artifact_is_current(state, artifact):
             state.artifacts.pop(expected, None)
             break
-        if _artifact_fingerprint(artifact) != saved_fingerprint:
+        migrated = _artifact_fingerprint(artifact) != saved_fingerprint
+        if migrated and not validator.resumed_artifact_migration_is_safe(
+            persisted_artifact,
+            artifact,
+        ):
             state.resume_candidates[expected] = (
                 artifact,
                 bool(saved.get("used_llm")),
@@ -20432,18 +22354,19 @@ def restore_pipeline_state(
                 SelectionPlan,
             ):
                 try:
-                    inflight = ConnectionSynthesisCheckpoint.model_validate(
+                    raw_inflight = ConnectionSynthesisCheckpoint.model_validate(
                         connection_synthesis_checkpoint
                     )
                 except Exception:  # noqa: BLE001 - stale partial work is discardable
                     inflight = None
-                if (
-                    inflight is not None
-                    and checkpoint_matches_inputs(
-                        inflight,
+                else:
+                    inflight = prepare_resumable_connection_checkpoint(
+                        raw_inflight,
                         topology,
                         selection,
                     )
+                if (
+                    inflight is not None
                 ):
                     state.connection_synthesis_checkpoint = inflight
     return state
@@ -20565,12 +22488,11 @@ class Pipeline:
                 return
 
         def score(result: StepResult) -> tuple[int, int, int]:
-            failed = [check for check in result.checks if not check.ok]
-            return (
-                len(result.error_checks),
-                len(failed),
-                sum(len(check.message) for check in failed),
-            )
+            artifact = state.artifact(result.step)
+            implementation = next((item for item in self.steps if item.step == result.step), None)
+            if artifact is not None and implementation is not None:
+                return implementation.convergence_score(artifact, result.checks)
+            return _engineering_failure_score(result.checks)
 
         def reopen_failed_step(target: PipelineStep) -> int:
             """Re-enter one rejected gate from its restored trusted artifact."""
@@ -20613,6 +22535,25 @@ class Pipeline:
                 None,
             )
 
+        def reject_replan(record: ReplanRecord, failed: StepResult) -> int:
+            record.status = "stagnated"
+            record.after_score = score(failed)
+            _restore_candidate_baseline(state, ctx, record.candidate_baseline)
+            record.candidate_baseline = None
+            for turn in reversed(state.recovery_history):
+                if (turn.status == "acted" and turn.step == record.trigger_step
+                        and turn.decision.action == RecoveryAction.REPLAN_UPSTREAM):
+                    turn.status = "rejected"
+                    turn.after_score = record.after_score
+                    turn.observation = f"Upstream candidate rolled back after failure at {failed.step.value}."
+                    emit_recovery("recovery_observed", turn)
+                    break
+            emit_replan("replan_stagnated", record)
+            target_index = reopen_failed_step(PipelineStep(record.trigger_step))
+            if ctx.on_progress_checkpoint is not None:
+                ctx.on_progress_checkpoint(state)
+            return target_index
+
         index = 0
         while index < len(self.steps):
             step = self.steps[index]
@@ -20646,7 +22587,10 @@ class Pipeline:
             ctx.active_recovery_tool = ""
             ctx.active_cad_action_batch = None
             ctx.active_cad_action_observation = None
-            if active_replan is not None:
+            if active_replan is not None and not (
+                active_recovery is not None
+                and active_recovery.decision.action == RecoveryAction.LOCAL_REPAIR
+            ):
                 ctx.repair_feedback = active_replan.feedback
             elif (
                 active_recovery is not None
@@ -20813,46 +22757,30 @@ class Pipeline:
                 continue
 
             if result.blocked:
+                extend_candidate = bool(
+                    active_replan is not None
+                    and active_replan.candidate_baseline is not None
+                    and active_replan.intermediate_repair_attempts
+                    < max(0, ctx.max_candidate_intermediate_repairs)
+                    and ctx.agentic_recovery_enabled
+                    and ctx.client is not None
+                    and ctx.mode != LlmMode.OFFLINE
+                    and not result.execution_blocked
+                    and state.artifact(step.step) is not None
+                )
                 if (
                     active_replan is not None
                     and active_replan.candidate_baseline is not None
+                    and not extend_candidate
                 ):
-                    # The candidate must pass every stage through its trigger.
-                    # A failure at either the trigger or an intermediate stage
-                    # rejects the whole transaction; never branch a nested
-                    # replan from partially accepted candidate state.
-                    active_replan.status = "stagnated"
-                    active_replan.after_score = score(result)
-                    baseline = active_replan.candidate_baseline
-                    _restore_candidate_baseline(state, ctx, baseline)
-                    active_replan.candidate_baseline = None
-                    originating_recovery = next(
-                        (
-                            turn
-                            for turn in reversed(state.recovery_history)
-                            if turn.status == "acted"
-                            and turn.step == active_replan.trigger_step
-                            and turn.decision.action
-                            == RecoveryAction.REPLAN_UPSTREAM
-                        ),
-                        None,
-                    )
-                    if originating_recovery is not None:
-                        originating_recovery.status = "rejected"
-                        originating_recovery.after_score = active_replan.after_score
-                        originating_recovery.observation = (
-                            "Upstream candidate rolled back after deterministic "
-                            f"failure at {step.step.value}."
-                        )
-                        emit_recovery("recovery_observed", originating_recovery)
-                    emit_replan("replan_stagnated", active_replan)
-                    index = reopen_failed_step(
-                        PipelineStep(active_replan.trigger_step)
-                    )
+                    index = reject_replan(active_replan, result)
                     completed_set = set(state.completed)
-                    if ctx.on_progress_checkpoint is not None:
-                        ctx.on_progress_checkpoint(state)
                     continue
+                if extend_candidate and active_replan is not None:
+                    # Retain the isolated upstream candidate while repairing an
+                    # intermediate design gate. Never launch a nested upstream
+                    # transaction; commit only after all affected stages pass.
+                    active_replan.intermediate_repair_attempts += 1
                 step_artifact = state.artifacts.get(step.step)
                 suggested_rollback = (
                     step.rollback_target(
@@ -20889,6 +22817,14 @@ class Pipeline:
                     )
                     < max(0, ctx.max_replan_attempts)
                 ]
+                evidence_owner = _evidence_owned_rollback(result)
+                if evidence_owner is not None:
+                    # Prefer the verifier's owner hypothesis, but permit the
+                    # model to inspect and disprove it. Location is not cause.
+                    suggested_rollback = evidence_owner
+                if active_replan is not None:
+                    allowed_targets = []
+                    suggested_rollback = None
                 local_repair_available = bool(
                     step_artifact is not None
                     and (
@@ -21203,6 +23139,15 @@ class Pipeline:
                             f"- {check.name}: {check.message}"
                             for check in result.error_checks
                         )
+                        + (
+                            "\nStructured verifier evidence (authoritative):\n"
+                            + structured_evidence
+                            if (
+                                structured_evidence
+                                := _compact_failed_check_evidence(result)
+                            )
+                            else ""
+                        )
                     )[:12_000]
                     record = ReplanRecord(
                         trigger_step=step.step.value,
@@ -21284,6 +23229,10 @@ class Pipeline:
                         "validated target and recovery budgets."
                     )
                     emit_recovery("recovery_exhausted", recovery_turn)
+                if active_replan is not None and active_replan.candidate_baseline is not None:
+                    index = reject_replan(active_replan, result)
+                    completed_set = set(state.completed)
+                    continue
                 for failure in result.failures:
                     attribution = attribute_failure(failure)
                     event_name = {

@@ -136,6 +136,13 @@ class ComponentClosureEntry(ContractModel):
         return self
 
 
+def _manifest_lib_id(value: str) -> str:
+    """Keep a closure manifest valid while recording unresolved library IDs."""
+
+    candidate = value.strip()
+    return candidate if len(candidate) >= 3 else "missing:missing"
+
+
 class ComponentClosureManifest(ContractModel):
     """Versioned BOM closure receipt produced before schematic generation."""
 
@@ -368,8 +375,8 @@ def build_component_closure_manifest(
             identity_mode=identity_mode,
             identity_provenance=identity_provenance,
             resolution_status=resolution_status,
-            symbol_lib_id=part.symbol,
-            footprint_lib_id=part.footprint or "missing:missing",
+            symbol_lib_id=_manifest_lib_id(part.symbol),
+            footprint_lib_id=_manifest_lib_id(part.footprint),
             symbol_pin_numbers=pin_numbers,
             footprint_pad_numbers=pad_numbers,
             pin_pad_bindings=bindings,

@@ -177,7 +177,7 @@ def _explicit_layer_count(text: str) -> int | None:
 def _board_limits(text: str) -> tuple[float | None, float | None]:
     candidates: list[tuple[int, float, float]] = []
     dimension = re.compile(
-        r"(?P<w>\d+(?:\.\d+)?)\s*(?:mm)?\s*[x×*]\s*"
+        r"(?P<w>\d+(?:\.\d+)?)\s*(?:mm)?\s*(?:[x×*]|by)\s*"
         r"(?P<h>\d+(?:\.\d+)?)\s*mm\b",
         re.IGNORECASE,
     )
@@ -200,6 +200,8 @@ def _board_limits(text: str) -> tuple[float | None, float | None]:
                 "≤",
                 "maximum",
                 "max ",
+                "no larger than",
+                "at most",
             )
         ):
             continue

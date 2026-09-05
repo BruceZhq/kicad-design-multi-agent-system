@@ -146,6 +146,7 @@ _WORKFLOW_IDENTITY_FIELDS: tuple[str, ...] = (
     "model_name",
     "model_type",
     "ahe_budget",
+    "approved_component_replacements",
     "tenant_id",
     "project_id",
     "principal_id",

@@ -13,6 +13,16 @@ RUN apt-get -o Acquire::Retries=5 -o Acquire::https::Timeout=60 update \
     && mkdir -p /evolution-sandbox \
     && chown 10001:10001 /evolution-sandbox
 
+# The candidate checkout is scrubbed of evals/sealed and Git objects before any
+# candidate code runs.  Production suite manifests and sources are copied to an
+# immutable image path and executed by this trusted runner, never from the
+# candidate worktree.  This is workspace separation, not a malicious-code
+# process boundary; see README.md before treating results as promotion evidence.
+COPY src/evolution/regression_runner.py /opt/ratsnest-evolution-evaluator/regression_runner.py
+COPY src/evolution/generator_validation.py /opt/ratsnest-evolution-evaluator/generator_validation.py
+COPY evals/sealed/regression/ /opt/ratsnest-evolution-evaluator/evals/sealed/regression/
+RUN chmod -R a-w /opt/ratsnest-evolution-evaluator
+
 USER 10001:10001
 
 CMD ["python", "-m", "evolution.temporal.worker"]

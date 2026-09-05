@@ -60,6 +60,7 @@ ratsnest:
   agent-runtime:
     base-url: ${RATSNEST_AGENT_RUNTIME_URL:}
     canary-base-url: ${RATSNEST_AGENT_RUNTIME_CANARY_URL:}
+    version-endpoints: '${RATSNEST_AGENT_RUNTIME_VERSION_ENDPOINTS:{}}'
     transport: ${RATSNEST_AGENT_RUNTIME_TRANSPORT:http}
     grpc-target: ${RATSNEST_AGENT_RUNTIME_GRPC_TARGET:}
     grpc-plaintext: ${RATSNEST_AGENT_RUNTIME_GRPC_PLAINTEXT:false}
@@ -77,6 +78,8 @@ ratsnest:
     holdout-suite-digest: ${RATSNEST_EVOLUTION_HOLDOUT_SUITE_DIGEST:}
     adversarial-suite-digest: ${RATSNEST_EVOLUTION_ADVERSARIAL_SUITE_DIGEST:}
     required-executor-mode: ${RATSNEST_EVOLUTION_REQUIRED_EXECUTOR_MODE:kubernetes_job}
+    canary-percent: ${RATSNEST_EVOLUTION_CANARY_PERCENT:10}
+    canary-minimum-samples: ${RATSNEST_EVOLUTION_CANARY_MINIMUM_SAMPLES:5}
   database:
     verify-isolation: true
   run-outbox:

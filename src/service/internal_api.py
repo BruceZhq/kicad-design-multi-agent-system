@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import subprocess
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -13,6 +14,11 @@ from evolution.temporal.client import (
     EvolutionTrialIdentityConflict,
     evolution_trial_status,
     start_evolution_trial,
+)
+from evolution.proposal_service import (
+    EvolutionProposalRequest,
+    EvolutionProposalResponse,
+    generate_proposal,
 )
 from evolution.temporal.trial_contracts import EvolutionTrialStartRequest
 from schema import (
@@ -181,6 +187,31 @@ async def internal_start_evolution_trial(
         )
     except EvolutionTrialIdentityConflict as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post(
+    "/evolution/candidates/{candidate_id}:propose",
+    response_model=EvolutionProposalResponse,
+)
+async def internal_propose_evolution_patch(
+    candidate_id: Annotated[str, Path(pattern=r"^[0-9a-f]{64}$")],
+    input: EvolutionProposalRequest,
+    claims: Annotated[InternalClaims, Depends(verified_internal_claims)],
+) -> EvolutionProposalResponse:
+    _require_request_run(claims, input.proposal_id)
+    _require_evolution_control_plane(claims)
+    if input.candidate.candidate_id != candidate_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="candidate_id does not match the request path",
+        )
+    try:
+        return await generate_proposal(input)
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"governed proposal rejected: {type(exc).__name__}",
+        ) from exc
 
 
 @router.get("/evolution/trials/{trial_id}")

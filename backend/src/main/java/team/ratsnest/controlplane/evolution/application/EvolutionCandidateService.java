@@ -1,5 +1,6 @@
 package team.ratsnest.controlplane.evolution.application;
 
+import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 
@@ -23,14 +24,17 @@ public class EvolutionCandidateService {
     private final TenantAccess tenantAccess;
     private final TenantContext tenantContext;
     private final EvolutionRepository evolution;
+    private final EvolutionRolloutService rollouts;
 
     public EvolutionCandidateService(
             TenantAccess tenantAccess,
             TenantContext tenantContext,
-            EvolutionRepository evolution) {
+            EvolutionRepository evolution,
+            EvolutionRolloutService rollouts) {
         this.tenantAccess = tenantAccess;
         this.tenantContext = tenantContext;
         this.evolution = evolution;
+        this.rollouts = rollouts;
     }
 
     @Transactional
@@ -55,6 +59,8 @@ public class EvolutionCandidateService {
         if (target == EvolutionCandidate.Status.EVALUATING
                 || target == EvolutionCandidate.Status.AWAITING_APPROVAL
                 || target == EvolutionCandidate.Status.APPROVED
+                || target == EvolutionCandidate.Status.CANARY
+                || target == EvolutionCandidate.Status.PROMOTED
                 || candidate.status() == EvolutionCandidate.Status.EVALUATING) {
             throw new ApiException(
                     "EVOLUTION_EVALUATION_PROOF_REQUIRED",
@@ -71,6 +77,73 @@ public class EvolutionCandidateService {
             throw stale();
         }
         return requireCandidate(tenantId, candidateId);
+    }
+
+    @Transactional
+    public EvolutionCandidate enterCanary(
+            UUID tenantId,
+            String candidateId,
+            long expectedVersion,
+            CanaryArtifactInput evidence,
+            String reason,
+            AuthenticatedActor actor) {
+        tenantContext.activate(tenantId);
+        EvolutionCandidate candidate = requireCandidate(tenantId, candidateId);
+        EvolutionTrial trial = requireTrial(tenantId, evidence.trialId());
+        if (candidate.rowVersion() != expectedVersion
+                || candidate.status() != EvolutionCandidate.Status.APPROVED) {
+            throw stale();
+        }
+        if (!approvalProofMatches(candidateId, evidence.reportDigest(), trial)) {
+            throw new ApiException(
+                    "EVOLUTION_CANARY_EVIDENCE_INVALID",
+                    HttpStatus.CONFLICT,
+                    "Canary requires the exact approved Trial proof.");
+        }
+        var bound = rollouts.activate(candidate, trial, evidence, actor);
+        if (!evolution.bindCanaryArtifacts(tenantId, trial, bound)
+                || !evolution.transition(tenantId, candidate, EvolutionCandidate.Status.CANARY, reason.strip(), actor)) {
+            throw stale(); // Same transaction rolls back both rollout and trial binding.
+        }
+        return requireCandidate(tenantId, candidateId);
+    }
+
+    @Transactional
+    public EvolutionCandidate promoteCandidate(
+            UUID tenantId,
+            String candidateId,
+            long expectedVersion,
+            CanaryMetricsInput evidence,
+            String reason,
+            AuthenticatedActor actor) {
+        tenantContext.activate(tenantId);
+        EvolutionCandidate candidate = requireCandidate(tenantId, candidateId);
+        EvolutionTrial trial = requireTrial(tenantId, evidence.trialId());
+        if (candidate.rowVersion() != expectedVersion
+                || candidate.status() != EvolutionCandidate.Status.CANARY) {
+            throw stale();
+        }
+        if (!approvalProofMatches(candidateId, evidence.reportDigest(), trial)) {
+            throw new ApiException(
+                    "EVOLUTION_PROMOTION_EVIDENCE_INVALID",
+                    HttpStatus.CONFLICT,
+                    "Promotion requires the exact approved Trial proof.");
+        }
+        var measured = rollouts.promote(tenantId, trial, actor);
+        if (!evolution.bindCanaryMetrics(tenantId, trial, measured)
+                || !evolution.transition(tenantId, candidate, EvolutionCandidate.Status.PROMOTED, reason.strip(), actor)) {
+            throw stale();
+        }
+        return requireCandidate(tenantId, candidateId);
+    }
+
+    @Transactional(readOnly = true)
+    public Map<String, Object> canaryReport(UUID tenantId, String candidateId, UUID trialId) {
+        tenantContext.activate(tenantId);
+        requireCandidate(tenantId, candidateId);
+        var trial = requireTrial(tenantId, trialId);
+        if (!candidateId.equals(trial.candidateId())) { throw stale(); }
+        return rollouts.report(tenantId, trial);
     }
 
     @Transactional
@@ -150,5 +223,37 @@ public class EvolutionCandidateService {
                 "EVOLUTION_CANDIDATE_STALE",
                 HttpStatus.CONFLICT,
                 "The evolution candidate changed; reload it before retrying the transition.");
+    }
+
+    public record CanaryArtifactInput(
+            UUID trialId,
+            String reportDigest,
+            String patchCommit,
+            String patchSha256,
+            String candidateImageDigest,
+            String artifactManifestDigest,
+            String artifactObjectKey,
+            String buildProvenanceDigest) {
+    }
+
+    public record CanaryMetricsInput(
+            UUID trialId,
+            String reportDigest,
+            Instant windowStartedAt,
+            Instant windowEndedAt,
+            int sampleSize,
+            double releaseReadyRate,
+            double strictReleaseEvidenceRate,
+            int ercErrorCount,
+            int drcErrorCount,
+            int unconnectedCount,
+            double routingCompletionRate,
+            double coreArtifactClosureRate,
+            double artifactIdentityRate,
+            int falseReleaseCount,
+            int regressionCount,
+            int infrastructureFailureCount,
+            String sourceDigest,
+            String metricsDigest) {
     }
 }

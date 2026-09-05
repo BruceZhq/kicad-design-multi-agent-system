@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from evolution.optimizer import (
 )
 from evolution.sandbox import (
     CandidateEvalReport,
+    governed_eval_commands,
     materialize_and_evaluate_candidate,
     patch_digest,
 )
@@ -45,6 +47,19 @@ def _policy_path(repository_root: Path, value: Any) -> Path:
     if actual != expected:
         raise ValueError("evolution policy must use config/harness/invariants.v1.json")
     return actual
+
+
+def _trusted_local_identity(manifest: HarnessManifest) -> tuple[str, str]:
+    image = os.environ.get("RATSNEST_EVOLUTION_EXECUTOR_IMAGE_DIGEST", "").strip()
+    toolchain = os.environ.get("RATSNEST_EVOLUTION_TOOLCHAIN_DIGEST", "").strip()
+    if (
+        not re.fullmatch(r"sha256:[0-9a-f]{64}", image)
+        or not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", toolchain)
+        or image != manifest.runtime_image_digest
+        or toolchain != manifest.toolchain_digest
+    ):
+        raise ValueError("local evaluator identity does not match the pinned manifest")
+    return image, toolchain
 
 
 @activity.defn(name=EVALUATE_CANDIDATE_ACTIVITY)
@@ -75,6 +90,7 @@ async def evaluate_candidate_activity(command: dict[str, Any]) -> dict[str, Any]
         policy = load_governance_policy(_policy_path(repository_root, command.get("policy_path")))
         candidate = EvolutionCandidate.model_validate(command["candidate"])
         manifest = HarnessManifest.model_validate(command["harness_manifest"])
+        executor_image_digest, toolchain_digest = _trusted_local_identity(manifest)
         plan = PatchPlan.model_validate(command["patch_plan"])
         bundle = PatchBundle.model_validate(command["patch_bundle"])
         report = materialize_and_evaluate_candidate(
@@ -86,7 +102,12 @@ async def evaluate_candidate_activity(command: dict[str, Any]) -> dict[str, Any]
             repository_root=repository_root,
             sandbox_root=sandbox_root,
             eval_ids=FIXED_EVAL_IDS,
+            eval_registry=governed_eval_commands(command["evaluation_suites"]),
         )
+        report = report.model_copy(update={
+            "executor_image_digest": executor_image_digest,
+            "toolchain_digest": toolchain_digest,
+        })
     except (KeyError, OSError, TypeError, ValueError) as exc:
         raise ApplicationError(
             f"{type(exc).__name__}: {exc}",
@@ -119,6 +140,8 @@ async def build_failure_report_activity(command: dict[str, Any]) -> dict[str, An
                 == "kubernetes_job"
                 else "local_process"
             ),
+            executor_image_digest=request.trial_input.harness_manifest.runtime_image_digest,
+            toolchain_digest=request.trial_input.harness_manifest.toolchain_digest,
         )
         return report.model_dump(mode="json", by_alias=True)
     except (KeyError, TypeError, ValueError) as exc:

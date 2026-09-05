@@ -5,6 +5,7 @@ import json
 
 from langchain_core.messages import HumanMessage
 
+from agents.ratsnestpro import ratsnestpro_agent as agent_module
 from agents.ratsnestpro.intent_router import classify_intent
 from agents.ratsnestpro.profiles.registry import REGISTRY
 from agents.ratsnestpro.ratsnestpro_agent import initialize
@@ -163,6 +164,68 @@ def test_initialize_keeps_workspace_identity_for_real_amendment() -> None:
     assert result["workspace_run_name"] == original_workspace
     assert result["incremental_resume"] is False
     assert "把板框尺寸改为100x80mm" in result["requirement"]
+
+
+def test_initialize_preserves_build_route_after_structured_hitl_answer(
+    monkeypatch,
+) -> None:
+    profile = REGISTRY.all()[0].model_dump(mode="json")
+    clarified_requirement = (
+        "Design a two-layer 50 x 40 mm KiCad ESP32-C3-WROOM-02U telemetry board "
+        "with external 5 V input, an AP2112 3.3 V rail, a UART download header, "
+        "a 1 kOhm LED resistor and an external 10 kOhm button pull-up. Any unsatisfied "
+        "engineering gate must be truthfully blocked.\n"
+        "DECISION: mounting=A — For mounting, the user confirmed: Four non-plated M2 "
+        "mounting holes. Use exactly this and do not substitute it."
+    )
+    state = {
+        "messages": [HumanMessage(content=clarified_requirement)],
+        "requirement": clarified_requirement,
+        "workflow_mode": "build",
+        "intent": classify_intent(clarified_requirement).model_dump(mode="json"),
+        "run_name": "case-10-run",
+        "execution_scope": "0123456789abcdef",
+        "workspace_run_name": "case-10-workspace",
+        "project_name": "case-10-board",
+        "capability_profile": profile,
+        "resume_after_clarification": True,
+        "resolved_decisions": [
+            {
+                "slot": "mounting",
+                "kind": "assumption",
+                "key": "A",
+                "label": "Four non-plated M2 mounting holes",
+                "value": (
+                    "For mounting, the user confirmed: Four non-plated M2 mounting "
+                    "holes. Use exactly this and do not substitute it."
+                ),
+            }
+        ],
+        "trace": [],
+    }
+
+    async def unexpected_reroute(*args, **kwargs):
+        raise AssertionError("checkpointed HITL answers must not be reclassified")
+
+    monkeypatch.setattr(agent_module, "_resolve_intent", unexpected_reroute)
+    result = asyncio.run(
+        initialize(
+            state,
+            {
+                "configurable": {
+                    "client_thread_id": "thread-10",
+                    "user_id": "user-1",
+                }
+            },
+        )
+    )
+
+    assert result["workflow_mode"] == "build"
+    assert result["intent"]["context_relation"] == "resume"
+    assert "DECISION: mounting=A" in result["requirement"]
+    assert result["run_name"] == "case-10-run"
+    assert result["workspace_run_name"] == "case-10-workspace"
+    assert agent_module._after_initialize(result) == agent_module._ARCHITECT_NODE
 
 
 def test_initialize_recovers_workspace_orphaned_by_old_procedural_amendment(

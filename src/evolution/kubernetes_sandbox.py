@@ -21,12 +21,16 @@ from evolution.temporal.trial_contracts import canonical_json, trial_request_fro
 
 _WORKLOAD_LABEL = "evolution-candidate-sandbox"
 _MAX_CONFIG_MAP_BYTES = 768 * 1024
-_ACTIVE_DEADLINE_SECONDS = 300
-_POLL_DEADLINE_SECONDS = 360
+_ACTIVE_DEADLINE_SECONDS = 1_200
+_POLL_DEADLINE_SECONDS = 1_260
 _SERVICE_ACCOUNT_DIRECTORY = Path("/var/run/secrets/kubernetes.io/serviceaccount")
 _MATERIALIZER = "materialize"
+_CANDIDATE_ROOT = "/workspace/repo"
+_TRUSTED_EVALUATOR_ROOT = "/opt/ratsnest-evolution-evaluator"
+_TRUSTED_REGRESSION_RUNNER = f"{_TRUSTED_EVALUATOR_ROOT}/regression_runner.py"
+_SEALED_EVALUATION_MODE = "workspace-separated-non-blind"
 
-_EVAL_CONTAINERS: tuple[tuple[str, tuple[str, ...], int], ...] = (
+_BASE_EVAL_CONTAINERS: tuple[tuple[str, tuple[str, ...], int], ...] = (
     (
         "python-compile",
         (
@@ -57,10 +61,50 @@ _EVAL_CONTAINERS: tuple[tuple[str, tuple[str, ...], int], ...] = (
             "--confcutdir=tests/evolution",
             "tests/evolution/test_evolution_core.py",
             "tests/evolution/test_sandbox.py",
+            "-k",
+            (
+                "not sealed_holdout_and_adversarial_cases_are_deterministic "
+                "and not eval_suite_index_is_content_addressed"
+            ),
         ),
         180,
     ),
 )
+
+
+def _eval_containers(request: Any) -> tuple[tuple[str, tuple[str, ...], int], ...]:
+    from evolution.generator_validation import GENERATOR_PATHS
+
+    generator_patch = any(f.path in GENERATOR_PATHS for f in request.trial_input.patch_bundle.files)
+    base_containers = tuple(
+        (name, ("/usr/bin/timeout", "--signal=KILL", "420s", "/usr/local/bin/python", "-I",
+                f"{_TRUSTED_EVALUATOR_ROOT}/generator_validation.py", "--candidate-root", _CANDIDATE_ROOT), 420)
+        if name == "python-compile" and generator_patch else (name, argv, timeout)
+        for name, argv, timeout in _BASE_EVAL_CONTAINERS
+    )
+    suites = tuple(
+        (
+            suite.eval_id,
+            (
+                "/usr/bin/timeout",
+                "--signal=KILL",
+                "240s",
+                "/usr/local/bin/python",
+                _TRUSTED_REGRESSION_RUNNER,
+                "--root",
+                _CANDIDATE_ROOT,
+                "--suite-root",
+                _TRUSTED_EVALUATOR_ROOT if suite.sealed else _CANDIDATE_ROOT,
+                "--suite",
+                suite.manifest_ref,
+                "--expected-suite-digest",
+                suite.suite_digest,
+            ),
+            240,
+        )
+        for suite in request.trial_input.evaluation_suites
+    )
+    return (*base_containers, *suites)
 
 
 class KubernetesSandboxConfigurationError(ValueError):
@@ -73,6 +117,8 @@ class KubernetesSandboxExecutor:
     def __init__(self) -> None:
         self.namespace = _required_dns_name("RATSNEST_EVOLUTION_SANDBOX_NAMESPACE")
         self.image = _required_immutable_image()
+        self.image_digest = self.image.rsplit("@", 1)[1]
+        self.toolchain_digest = _required_toolchain_digest()
         self.mirror_claim = _required_dns_name("RATSNEST_EVOLUTION_GIT_MIRROR_CLAIM")
         host = os.environ.get("KUBERNETES_SERVICE_HOST", "").strip()
         port = os.environ.get("KUBERNETES_SERVICE_PORT_HTTPS", "443").strip()
@@ -89,6 +135,16 @@ class KubernetesSandboxExecutor:
 
     async def evaluate(self, command: dict[str, Any]) -> CandidateEvalReport:
         request = trial_request_from_command(command)
+        manifest = request.trial_input.harness_manifest
+        if manifest.runtime_image_digest != self.image_digest:
+            raise KubernetesSandboxConfigurationError(
+                "sandbox image digest does not match the pinned harness manifest"
+            )
+        if manifest.toolchain_digest != self.toolchain_digest:
+            raise KubernetesSandboxConfigurationError(
+                "sandbox toolchain digest does not match the pinned harness manifest"
+            )
+        eval_containers = _eval_containers(request)
         source = request.model_dump(mode="json", by_alias=False)
         encoded = canonical_json(source)
         if len(encoded) > _MAX_CONFIG_MAP_BYTES:
@@ -103,7 +159,7 @@ class KubernetesSandboxExecutor:
             "ratsnest.io/trial-id": trial_hash,
         }
         config_map = self._config_map(name, labels, encoded.decode("utf-8"))
-        job = self._job(name, labels)
+        job = self._job(name, labels, eval_containers)
         config_map_created = False
         job_created = False
         report: CandidateEvalReport | None = None
@@ -127,7 +183,7 @@ class KubernetesSandboxExecutor:
                 job_created = True
                 job_value = await self._wait_for_job(client, name)
                 pod = await self._job_pod(client, name)
-                report = self._report(command, job_value, pod)
+                report = self._report(command, job_value, pod, eval_containers)
             finally:
                 if job_created:
                     cleanup_succeeded = await self._delete(
@@ -224,6 +280,7 @@ class KubernetesSandboxExecutor:
         command: dict[str, Any],
         job: dict[str, Any],
         pod: dict[str, Any] | None,
+        eval_containers: tuple[tuple[str, tuple[str, ...], int], ...],
     ) -> CandidateEvalReport:
         request = trial_request_from_command(command)
         trial_input = request.trial_input
@@ -236,7 +293,7 @@ class KubernetesSandboxExecutor:
         materializer_code = _exit_code(materializer)
         command_results = [
             _command_result(eval_id, argv, statuses.get(eval_id))
-            for eval_id, argv, _ in _EVAL_CONTAINERS
+            for eval_id, argv, _ in eval_containers
             if statuses.get(eval_id) is not None
         ]
         job_failed = any(
@@ -274,7 +331,11 @@ class KubernetesSandboxExecutor:
             command_results=command_results,
             error=error,
             cleanup_succeeded=True,
+            generator_cad_validated=any("generator_validation.py" in " ".join(r.argv) and r.passed
+                                        for r in command_results),
             executor_mode="kubernetes_job",
+            executor_image_digest=self.image_digest,
+            toolchain_digest=self.toolchain_digest,
         )
 
     def _collection_path(self, resource: str, *, batch: bool = False) -> str:
@@ -292,7 +353,12 @@ class KubernetesSandboxExecutor:
             "data": {"trial.json": payload},
         }
 
-    def _job(self, name: str, labels: dict[str, str]) -> dict[str, Any]:
+    def _job(
+        self,
+        name: str,
+        labels: dict[str, str],
+        eval_containers: tuple[tuple[str, tuple[str, ...], int], ...],
+    ) -> dict[str, Any]:
         materializer = _container(
             name=_MATERIALIZER,
             image=self.image,
@@ -321,24 +387,44 @@ class KubernetesSandboxExecutor:
                 image=self.image,
                 argv=argv,
                 mounts=(
-                    {"name": "workspace", "mountPath": "/workspace"},
+                    {"name": "workspace", "mountPath": "/workspace", "readOnly": True},
                     {"name": "tmp", "mountPath": "/tmp"},
                 ),
                 working_directory="/workspace/repo",
                 candidate_environment=True,
             )
-            for eval_id, argv, _ in _EVAL_CONTAINERS
+            for eval_id, argv, _ in eval_containers
         ]
+        for evaluator in evaluators:
+            if any("generator_validation.py" in arg for arg in evaluator["command"]):
+                evaluator["resources"] = {
+                    "requests": {"cpu": "500m", "memory": "1Gi", "ephemeral-storage": "128Mi"},
+                    "limits": {"cpu": "2", "memory": "3Gi", "ephemeral-storage": "512Mi"},
+                }
         return {
             "apiVersion": "batch/v1",
             "kind": "Job",
-            "metadata": {"name": name, "namespace": self.namespace, "labels": labels},
+            "metadata": {
+                "name": name,
+                "namespace": self.namespace,
+                "labels": labels,
+                "annotations": {
+                    "ratsnest.io/sealed-evaluation-mode": _SEALED_EVALUATION_MODE,
+                    "ratsnest.io/promotion-authoritative": "false",
+                },
+            },
             "spec": {
                 "activeDeadlineSeconds": _ACTIVE_DEADLINE_SECONDS,
                 "backoffLimit": 0,
                 "ttlSecondsAfterFinished": 300,
                 "template": {
-                    "metadata": {"labels": labels},
+                    "metadata": {
+                        "labels": labels,
+                        "annotations": {
+                            "ratsnest.io/sealed-evaluation-mode": _SEALED_EVALUATION_MODE,
+                            "ratsnest.io/promotion-authoritative": "false",
+                        },
+                    },
                     "spec": {
                         "automountServiceAccountToken": False,
                         "enableServiceLinks": False,
@@ -397,6 +483,8 @@ def _container(
                 {"name": "PYTHONPATH", "value": "/workspace/repo/src"},
                 {"name": "PYTHONHASHSEED", "value": "0"},
                 {"name": "PYTHONNOUSERSITE", "value": "1"},
+                {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
+                {"name": "PYTHONPYCACHEPREFIX", "value": "/tmp/pycache"},
                 {"name": "PYTEST_DISABLE_PLUGIN_AUTOLOAD", "value": "1"},
                 {"name": "HTTP_PROXY", "value": "http://127.0.0.1:9"},
                 {"name": "HTTPS_PROXY", "value": "http://127.0.0.1:9"},
@@ -473,5 +561,15 @@ def _required_immutable_image() -> str:
     if not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", value):
         raise KubernetesSandboxConfigurationError(
             "RATSNEST_EVOLUTION_SANDBOX_IMAGE must be pinned by sha256 digest"
+        )
+    return value
+
+
+def _required_toolchain_digest() -> str:
+    name = "RATSNEST_EVOLUTION_TOOLCHAIN_DIGEST"
+    value = os.environ.get(name, "").strip()
+    if not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", value):
+        raise KubernetesSandboxConfigurationError(
+            f"{name} must be an explicit lowercase SHA-256 digest"
         )
     return value

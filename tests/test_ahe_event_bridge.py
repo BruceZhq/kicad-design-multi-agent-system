@@ -375,6 +375,18 @@ def test_deterministic_failure_attribution_is_fail_closed() -> None:
         make_capability_gap(design)
 
 
+def test_selection_message_with_missing_evidence_is_not_misclassified_as_design() -> None:
+    missing_evidence = make_failure(
+        step="selection",
+        check_name="component_closure",
+        message="MPN package evidence is missing for the selected device",
+        repair_available=False,
+    )
+
+    assert missing_evidence.origin == FailureOrigin.EXTERNAL_EVIDENCE
+    assert attribute_failure(missing_evidence).action == FailureAction.HITL
+
+
 def test_unknown_harness_reason_cannot_pollute_cross_project_recurrence(
     tmp_path: Path,
     monkeypatch,

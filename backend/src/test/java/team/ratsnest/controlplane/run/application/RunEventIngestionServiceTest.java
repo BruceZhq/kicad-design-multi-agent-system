@@ -150,7 +150,7 @@ class RunEventIngestionServiceTest {
                 run.runId().toString(), run.threadId(), identity,
                 run.message(), run.model(), null, run.runtimeConfig(), true);
         RunReference reference = new RunReference(
-                run.runId().toString(), identity, run.harnessChannel());
+                run.runId().toString(), identity, run.harnessChannel() + "@" + run.harnessVersionId());
         RuntimeRun snapshot = new RuntimeRun(
                 run.runId().toString(), "runtime-run", "build", runtimeState,
                 "agent", run.threadId(), Instant.now(), Instant.now(), Instant.now(),

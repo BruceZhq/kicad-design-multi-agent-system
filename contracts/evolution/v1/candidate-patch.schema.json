@@ -149,6 +149,20 @@
         "patchDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "verdict": { "enum": ["passed", "failed", "policy_rejected", "error"] },
         "executorMode": { "enum": ["local_process", "kubernetes_job"] },
+        "executorImageDigest": {
+          "anyOf": [
+            { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            { "type": "null" }
+          ],
+          "default": null
+        },
+        "toolchainDigest": {
+          "anyOf": [
+            { "type": "string", "pattern": "^(?:sha256:)?[0-9a-f]{64}$" },
+            { "type": "null" }
+          ],
+          "default": null
+        },
         "worktreeCreated": { "type": "boolean" },
         "materializedFiles": {
           "type": "array",
@@ -168,6 +182,7 @@
           "default": null
         },
         "cleanupSucceeded": { "type": "boolean" },
+        "generatorCadValidated": { "type": "boolean", "default": false },
         "automaticMerge": { "const": false, "default": false },
         "automaticPush": { "const": false, "default": false },
         "automaticDeploy": { "const": false, "default": false }

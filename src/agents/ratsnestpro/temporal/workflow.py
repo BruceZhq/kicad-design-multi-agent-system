@@ -382,6 +382,10 @@ class RatsNestHardwareWorkflow:
                             "ahe_budget": input.get("ahe_budget", {}),
                         }
                     )
+                    if input.get("approved_component_replacements"):
+                        command["approved_component_replacements"] = input[
+                            "approved_component_replacements"
+                        ]
                 self._update(status="running", phase=step, detail=f"step {index}/17")
                 self._current_activity = workflow.start_activity(
                     EXECUTE_STEP_ACTIVITY,

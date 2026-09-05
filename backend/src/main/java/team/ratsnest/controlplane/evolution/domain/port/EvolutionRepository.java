@@ -46,6 +46,17 @@ public interface EvolutionRepository {
 
     Optional<EvolutionTrial> findPendingTrial(UUID tenantId, String candidateId);
 
+    Optional<ProposalRecord> findProposal(UUID tenantId, String proposalId);
+
+    boolean insertProposal(UUID tenantId, ProposalRecord proposal);
+
+    boolean completeProposal(
+            UUID tenantId,
+            String proposalId,
+            String requestFingerprint,
+            String proposalDigest,
+            Map<String, Object> response);
+
     int nextAttempt(UUID tenantId, String candidateId);
 
     boolean insertTrial(UUID tenantId, EvolutionTrial trial);
@@ -53,6 +64,16 @@ public interface EvolutionRepository {
     boolean bindWorkflow(UUID tenantId, EvolutionTrial trial, String workflowId);
 
     boolean completeTrial(UUID tenantId, EvolutionTrial trial, TrialResult result);
+
+    boolean bindCanaryArtifacts(
+            UUID tenantId,
+            EvolutionTrial trial,
+            CanaryArtifactEvidence evidence);
+
+    boolean bindCanaryMetrics(
+            UUID tenantId,
+            EvolutionTrial trial,
+            CanaryMetricsEvidence evidence);
 
     boolean transition(
             UUID tenantId,
@@ -76,5 +97,34 @@ public interface EvolutionRepository {
             long llmTokens,
             long wallClockMs,
             Instant completedAt) {
+    }
+
+    record ProposalRecord(
+            String proposalId,
+            String candidateId,
+            String baseManifestDigest,
+            String requestFingerprint,
+            Map<String, Object> request,
+            String proposalDigest,
+            Map<String, Object> response,
+            Instant createdAt,
+            Instant completedAt) {
+    }
+
+    record CanaryArtifactEvidence(
+            String patchCommit,
+            String patchSha256,
+            String candidateImageDigest,
+            String artifactManifestDigest,
+            String artifactObjectKey,
+            String buildProvenanceDigest,
+            String harnessVersionId,
+            String rolloutId,
+            Instant startedAt) {
+    }
+
+    record CanaryMetricsEvidence(
+            Map<String, Object> metrics,
+            String evidenceDigest) {
     }
 }

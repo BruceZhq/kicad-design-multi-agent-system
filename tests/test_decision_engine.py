@@ -10,6 +10,7 @@ from agents.ratsnestpro.decision_engine import (
     design_decisions,
     parse_resolutions,
     public_questions,
+    reconcile_resolutions,
 )
 
 REQUIREMENT = """
@@ -122,3 +123,75 @@ def test_hitl_cannot_override_an_explicit_original_constraint() -> None:
                 "citation": "engineering default",
             }],
         )
+
+
+def test_esp32_module_with_uart_download_does_not_get_clock_or_swd_questions() -> None:
+    requirement = (
+        "请设计 ESP32-C3 运动遥测节点，主控使用 ESP32-C3-WROOM-02U，"
+        "SDA/SCL 各 4.7 kΩ 上拉，另有状态 LED 和四针 UART 下载接口。"
+    )
+
+    slots = {item.slot for item in design_decisions(requirement, limit=12)}
+
+    assert "clock_source" not in slots
+    assert "debug_port" not in slots
+    assert "led_resistor" in slots
+
+
+def test_unspecified_esp32_module_programming_choice_never_offers_cortex_swd() -> None:
+    decisions = design_decisions("Design an ESP32-C3-WROOM-02U MCU board.")
+    debug = next(item for item in decisions if item.slot == "debug_port")
+    labels = " ".join(option.label for option in debug.options).lower()
+
+    assert "clock_source" not in {item.slot for item in decisions}
+    assert "uart" in debug.options[0].label.lower()
+    assert "cortex" not in labels
+    assert "swd" not in labels
+
+
+def test_atmega_programming_choice_uses_isp_instead_of_swd() -> None:
+    decisions = design_decisions("Design an ATmega328P MCU controller board.")
+    debug = next(item for item in decisions if item.slot == "debug_port")
+    labels = " ".join(option.label for option in debug.options).lower()
+
+    assert "isp" in debug.options[0].label.lower()
+    assert "swd" not in labels
+
+
+def test_unrelated_i2c_pullup_does_not_settle_button_bias() -> None:
+    requirement = (
+        "ESP32-C3 board with 4.7 kOhm I2C pull-ups and a separate user button."
+    )
+
+    assert "button_bias" in {
+        item.slot for item in design_decisions(requirement, limit=12)
+    }
+
+
+def test_resume_drops_stale_esp32_clock_and_cortex_swd_decisions() -> None:
+    original = (
+        "设计 ESP32-C3-WROOM-02U 模块板，提供四针 UART 下载接口。"
+    )
+    requirement = (
+        f"{original}\n"
+        "DECISION: clock_source=A — Use the internal oscillator.\n"
+        "DECISION: debug_port=A — Use a 10-pin Cortex SWD connector."
+    )
+    carried = [
+        {
+            "slot": "clock_source",
+            "key": "A",
+            "value": "Use the internal oscillator.",
+        },
+        {
+            "slot": "debug_port",
+            "key": "A",
+            "value": "Use a 10-pin Cortex SWD connector.",
+        },
+    ]
+
+    reconciled_requirement, reconciled = reconcile_resolutions(requirement, carried)
+
+    assert reconciled == []
+    assert reconciled_requirement == original
+    assert "Cortex SWD" not in reconciled_requirement

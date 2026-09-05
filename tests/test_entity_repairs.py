@@ -29,6 +29,35 @@ def test_pin_not_connected_targets_schematic_connectivity() -> None:
     assert plan.execution_policy == RepairExecutionPolicy.BOUNDED_CANDIDATE
 
 
+def test_pin_type_conflict_preserves_items_and_targets_design_ir_owner() -> None:
+    plan = classify_kicad_finding({
+        "type": "pin_to_pin",
+        "description": "Pins of type Output and Power output are connected",
+        "items": [
+            _item("Symbol U3 Pin 7 [SDO, Output, Line]", 0.3175, 0.8128),
+            _item(
+                "Symbol #PWR01 Pin 1 [Power output, Line]",
+                0.1143,
+                0.3556,
+            ),
+        ],
+    })
+
+    assert plan.category == EntityRepairCategory.SCHEMATIC_CONNECTIVITY
+    assert plan.rollback_step == "schematic_connections"
+    assert plan.strategy == "repair_pin_electrical_conflict_in_design_ir"
+    assert plan.affected_refs == ["U3", "#PWR01"]
+    assert [(pin.ref, pin.number) for pin in plan.affected_pins] == [
+        ("U3", "7"),
+        ("#PWR01", "1"),
+    ]
+    assert [item.description for item in plan.observed_items] == [
+        "Symbol U3 Pin 7 [SDO, Output, Line]",
+        "Symbol #PWR01 Pin 1 [Power output, Line]",
+    ]
+    assert plan.execution_policy == RepairExecutionPolicy.BOUNDED_CANDIDATE
+
+
 def test_same_footprint_short_targets_footprint_geometry() -> None:
     plan = classify_kicad_finding({
         "type": "shorting_items",

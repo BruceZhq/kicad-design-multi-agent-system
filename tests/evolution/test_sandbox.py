@@ -12,6 +12,8 @@ import pytest
 
 import evolution.sandbox as sandbox_module
 from evolution.contracts import EvolutionCandidate, HarnessManifest
+from evolution.kubernetes_sandbox import KubernetesSandboxExecutor, _eval_containers
+from evolution.kubernetes_sandbox_runner import _remove_private_candidate_inputs
 from evolution.optimizer import (
     CandidateFilePatch,
     PatchBundle,
@@ -25,8 +27,10 @@ from evolution.sandbox import (
     EvalCommand,
     _materialize_files,
     _sanitized_eval_environment,
+    governed_eval_commands,
     materialize_and_evaluate_candidate,
 )
+from evolution.temporal.contracts import FIXED_EVAL_IDS
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -39,6 +43,112 @@ def test_eval_environment_imports_only_from_candidate_worktree(tmp_path: Path) -
     assert environment["PYTHONPATH"] == str(worktree / "src")
     assert environment["PYTHONNOUSERSITE"] == "1"
     assert "RATSNEST_INTERNAL_SIGNING_SECRET" not in environment
+
+
+def test_governed_suite_commands_are_fixed_and_digest_bound() -> None:
+    class Suite:
+        def __init__(self, eval_id: str, manifest_ref: str, suite_digest: str) -> None:
+            self.eval_id = eval_id
+            self.manifest_ref = manifest_ref
+            self.suite_digest = suite_digest
+
+    suites = [
+        Suite("optimization-suite", "evals/regression/optimization.v1.json", "1" * 64),
+        Suite("holdout-suite", "evals/sealed/regression/holdout.v1.json", "2" * 64),
+        Suite("adversarial-suite", "evals/sealed/regression/adversarial.v1.json", "3" * 64),
+    ]
+
+    commands = governed_eval_commands(suites)
+
+    assert tuple(commands) == FIXED_EVAL_IDS
+    assert commands["holdout-suite"].argv[-2:] == (
+        "--expected-suite-digest",
+        "2" * 64,
+    )
+    assert "evals/sealed/regression/holdout.v1.json" in commands["holdout-suite"].argv
+
+
+def test_kubernetes_sealed_suites_use_trusted_root_and_public_suite_uses_checkout() -> None:
+    class Suite:
+        def __init__(
+            self,
+            eval_id: str,
+            manifest_ref: str,
+            suite_digest: str,
+            *,
+            sealed: bool,
+        ) -> None:
+            self.eval_id = eval_id
+            self.manifest_ref = manifest_ref
+            self.suite_digest = suite_digest
+            self.sealed = sealed
+
+    class TrialInput:
+        patch_bundle = type("Bundle", (), {"files": []})()
+        evaluation_suites = [
+            Suite(
+                "optimization-suite",
+                "evals/regression/optimization.v1.json",
+                "1" * 64,
+                sealed=False,
+            ),
+            Suite(
+                "holdout-suite",
+                "evals/sealed/regression/holdout.v1.json",
+                "2" * 64,
+                sealed=True,
+            ),
+        ]
+
+    class Request:
+        trial_input = TrialInput()
+
+    commands = {item[0]: item[1] for item in _eval_containers(Request())}
+
+    assert commands["optimization-suite"][5:9] == (
+        "--root",
+        "/workspace/repo",
+        "--suite-root",
+        "/workspace/repo",
+    )
+    assert commands["holdout-suite"][5:9] == (
+        "--root",
+        "/workspace/repo",
+        "--suite-root",
+        "/opt/ratsnest-evolution-evaluator",
+    )
+    assert commands["optimization-suite"][4].startswith("/opt/ratsnest-evolution-evaluator/")
+
+
+def test_materializer_scrubs_sealed_sources_and_git_objects(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    (worktree / "evals" / "sealed").mkdir(parents=True)
+    (worktree / "evals" / "sealed" / "holdout.json").write_text("secret")
+    (worktree / "evals" / "regression").mkdir(parents=True)
+    (worktree / "evals" / "regression" / "optimization.json").write_text("public")
+    (worktree / ".git" / "objects").mkdir(parents=True)
+    (worktree / ".git" / "objects" / "sealed-blob").write_text("secret")
+
+    _remove_private_candidate_inputs(worktree)
+
+    assert not (worktree / "evals" / "sealed").exists()
+    assert not (worktree / ".git").exists()
+    assert (worktree / "evals" / "regression" / "optimization.json").is_file()
+
+
+def test_kubernetes_job_marks_workspace_separation_as_non_authoritative() -> None:
+    executor = object.__new__(KubernetesSandboxExecutor)
+    executor.image = "registry.invalid/evaluator@sha256:" + "8" * 64
+    executor.mirror_claim = "trusted-mirror"
+    executor.namespace = "sandbox"
+
+    job = executor._job("trial", {"test": "sealed"}, ())
+
+    annotations = job["metadata"]["annotations"]
+    assert annotations["ratsnest.io/sealed-evaluation-mode"] == (
+        "workspace-separated-non-blind"
+    )
+    assert annotations["ratsnest.io/promotion-authoritative"] == "false"
 
 
 def _git(repository: Path, *args: str) -> str:
@@ -69,6 +179,8 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
         bundle_digest="2" * 64,
         contract_digest="3" * 64,
         policy_digest="4" * 64,
+        runtime_image_digest="sha256:" + "8" * 64,
+        toolchain_digest="9" * 64,
         manifest_digest="5" * 64,
     )
     manifest = manifest_seed.model_copy(
@@ -272,6 +384,8 @@ def test_temporal_activity_ignores_caller_supplied_candidate_report(
 
     monkeypatch.setenv("RATSNEST_EVOLUTION_SANDBOX_MODE", "local_process")
     monkeypatch.setenv("RATSNEST_EVOLUTION_ALLOW_LOCAL_SANDBOX", "true")
+    monkeypatch.setenv("RATSNEST_EVOLUTION_EXECUTOR_IMAGE_DIGEST", "sha256:" + "8" * 64)
+    monkeypatch.setenv("RATSNEST_EVOLUTION_TOOLCHAIN_DIGEST", "9" * 64)
 
     fixture = _fixture(tmp_path)
     generated = CandidateEvalReport(
@@ -298,6 +412,23 @@ def test_temporal_activity_ignores_caller_supplied_candidate_report(
         "harness_manifest": fixture["manifest"].model_dump(mode="json", by_alias=True),
         "patch_plan": fixture["plan"].model_dump(mode="json", by_alias=True),
         "patch_bundle": fixture["bundle"].model_dump(mode="json", by_alias=True),
+        "evaluation_suites": [
+            {
+                "eval_id": "optimization-suite",
+                "manifest_ref": "evals/regression/optimization.v1.json",
+                "suite_digest": "1" * 64,
+            },
+            {
+                "eval_id": "holdout-suite",
+                "manifest_ref": "evals/sealed/regression/holdout.v1.json",
+                "suite_digest": "2" * 64,
+            },
+            {
+                "eval_id": "adversarial-suite",
+                "manifest_ref": "evals/sealed/regression/adversarial.v1.json",
+                "suite_digest": "3" * 64,
+            },
+        ],
         "candidate_report": {"verdict": "passed", "forged": True},
     }
     report = asyncio.run(activities.evaluate_candidate_activity(command))

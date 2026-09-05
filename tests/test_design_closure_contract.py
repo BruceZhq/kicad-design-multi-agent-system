@@ -133,6 +133,32 @@ def test_component_manifest_blocks_incomplete_pin_pad_mapping_before_schematic(
     assert manifest.blockers == ["J1:pin_pad_mapping_incomplete"]
 
 
+def test_optional_footprint_placeholder_becomes_repairable_missing_binding() -> None:
+    part = SelectedPart(
+        ref="J1",
+        symbol="Connector_Generic:Conn_01x02",
+        value="input",
+        footprint="~",
+    )
+    assert part.footprint == ""
+
+    manifest = build_component_closure_manifest(
+        SelectionPlan(parts=[part]),
+        _closure(),
+        symbol_pins=lambda _lib_id: [
+            {"number": "1", "name": "Pin_1"},
+            {"number": "2", "name": "Pin_2"},
+        ],
+        footprint_pads=lambda _lib_id: None,
+        symbol_path=lambda _lib_id: None,
+        footprint_path=lambda _lib_id: None,
+    )
+
+    assert manifest.release_ready is False
+    assert manifest.components[0].footprint_lib_id == "missing:missing"
+    assert "J1:footprint_missing" in manifest.blockers
+
+
 def test_kicad_xml_diff_exposes_physically_unconnected_j1_pin(
     tmp_path: Path,
 ) -> None:

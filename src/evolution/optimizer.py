@@ -39,6 +39,7 @@ class Invariant(EvolutionModel):
 
 class ChangePolicy(EvolutionModel):
     allowed_low_risk_globs: list[str] = Field(min_length=1, max_length=128)
+    allowed_generator_globs: list[str] = Field(default_factory=list, max_length=32)
     denied_globs: list[str] = Field(min_length=1, max_length=128)
     max_changed_files: int = Field(ge=1, le=100)
     max_added_lines: int = Field(ge=1, le=10_000)
@@ -255,7 +256,8 @@ def validate_patch_plan(
         if any(_matches(path, pattern) for pattern in policy.change_policy.denied_globs):
             raise ValueError(f"governance policy denies patch path: {path}")
         if not any(
-            _matches(path, pattern) for pattern in policy.change_policy.allowed_low_risk_globs
+            _matches(path, pattern) for pattern in [*policy.change_policy.allowed_low_risk_globs,
+                                                   *policy.change_policy.allowed_generator_globs]
         ):
             raise ValueError(f"path is outside the low-risk allowlist: {path}")
     if policy.change_policy.allow_automatic_merge:
@@ -283,7 +285,8 @@ def validate_patch_bundle(
         if any(_matches(path, pattern) for pattern in policy.change_policy.denied_globs):
             raise ValueError(f"governance policy denies patch path: {path}")
         if not any(
-            _matches(path, pattern) for pattern in policy.change_policy.allowed_low_risk_globs
+            _matches(path, pattern) for pattern in [*policy.change_policy.allowed_low_risk_globs,
+                                                   *policy.change_policy.allowed_generator_globs]
         ):
             raise ValueError(f"path is outside the low-risk allowlist: {path}")
     return bundle
@@ -296,6 +299,23 @@ def _is_sealed_path(path: str) -> bool:
         or normalized.startswith("evals/sealed/")
         or normalized in _SEALED_PATCH_PATHS
     )
+
+
+def validate_optimizer_context_path(path: str, policy: GovernancePolicy) -> str:
+    """Validate a source path before any content is read for the optimizer."""
+
+    normalized = _normalized_relative_path(path)
+    if _is_sealed_path(normalized):
+        raise ValueError(f"optimizer context denied path (sealed): {normalized}")
+    if any(_matches(normalized, pattern) for pattern in policy.change_policy.denied_globs):
+        raise ValueError(f"optimizer context cannot include denied path: {normalized}")
+    if not any(
+        _matches(normalized, pattern)
+        for pattern in [*policy.change_policy.allowed_low_risk_globs,
+                        *policy.change_policy.allowed_generator_globs]
+    ):
+        raise ValueError(f"optimizer context is outside the allowlist: {normalized}")
+    return normalized
 
 
 def build_worktree_plan(
@@ -346,15 +366,7 @@ def optimizer_prompt(request: OptimizerRequest, policy: GovernancePolicy) -> str
 
     safe_context: dict[str, str] = {}
     for raw_path, content in request.repository_context.items():
-        path = _normalized_relative_path(raw_path)
-        if _is_sealed_path(path):
-            raise ValueError(f"optimizer context denied path (sealed): {path}")
-        if any(_matches(path, pattern) for pattern in policy.change_policy.denied_globs):
-            raise ValueError(f"optimizer context cannot include denied path: {path}")
-        if not any(
-            _matches(path, pattern) for pattern in policy.change_policy.allowed_low_risk_globs
-        ):
-            raise ValueError(f"optimizer context is outside the allowlist: {path}")
+        path = validate_optimizer_context_path(raw_path, policy)
         safe_context[path] = content
     materialization_context = {
         path: {

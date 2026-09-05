@@ -20,6 +20,7 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
         kicad \
         kicad-footprints \
         kicad-symbols \
+        librsvg2-bin \
         openjdk-25-jre-headless \
     && rm -rf /var/lib/apt/lists/*
 

@@ -7,4 +7,20 @@ EVALUATE_CANDIDATE_ACTIVITY = "ratsnest.evolution.materialize-and-evaluate-candi
 BUILD_FAILURE_REPORT_ACTIVITY = "ratsnest.evolution.build-failure-report"
 ATTEST_RESULT_ACTIVITY = "ratsnest.evolution.attest-result"
 DELIVER_RESULT_ACTIVITY = "ratsnest.evolution.deliver-result"
-FIXED_EVAL_IDS = ("python-compile", "evolution-core")
+FIXED_EVAL_IDS = (
+    "python-compile",
+    "evolution-core",
+    "optimization-suite",
+    "holdout-suite",
+    "adversarial-suite",
+)
+FIXED_SUITE_MANIFESTS = (
+    ("optimization-suite", "optimization", "evals/regression/optimization.v1.json", False),
+    ("holdout-suite", "holdout", "evals/sealed/regression/holdout.v1.json", True),
+    (
+        "adversarial-suite",
+        "adversarial",
+        "evals/sealed/regression/adversarial.v1.json",
+        True,
+    ),
+)

@@ -12,8 +12,12 @@ import json
 import os
 import subprocess
 import sys
+import time
+from pathlib import Path
 
 import pcbnew
+
+from routing_rules import apply_dsn_classes, persist_project_classes
 
 
 def _router_timeout(layer_count):
@@ -111,6 +115,7 @@ def main():
     via_diameter_mm = float(sys.argv[9]) if len(sys.argv) > 9 else 0.6
     via_drill_mm = float(sys.argv[10]) if len(sys.argv) > 10 else 0.3
     random_seed = sys.argv[11] if len(sys.argv) > 11 else ""
+    rules = _load(sys.argv[12]) if len(sys.argv) > 12 else {}
 
     stem = os.path.splitext(os.path.basename(pcb))[0]
     dsn = os.path.join(workdir, stem + ".dsn")
@@ -173,22 +178,54 @@ def main():
             )
         pcbnew.SaveBoard(pcb, board)  # persist connectivity
 
-        pcbnew.ExportSpecctraDSN(board, dsn)
-
-        router_args = [fr_exe, "-de", dsn, "-do", ses, "-mp", str(max_passes)]
-        if random_seed:
-            router_args.extend(["-random_seed", random_seed])
-        proc = subprocess.run(
-            router_args,
-            capture_output=True,
-            text=True,
-            timeout=_router_timeout(layer_count),
-        )
+        classes = rules.get("classes", [])
+        if classes:
+            persist_project_classes(Path(pcb), classes)
+        critical = set(rules.get("critical_nets", []))
+        stages = [critical, None] if critical and classes else [None]
+        if os.path.isfile(ses):
+            os.remove(ses)  # A failed critical pass must not reuse yesterday's full SES.
+        deadline = time.monotonic() + _router_timeout(layer_count)
+        result["routing_stages"] = []
+        for subset in stages:
+            stage_dsn = dsn if subset is None else dsn + ".critical.dsn"
+            stage_ses = ses if subset is None else ses + ".critical.ses"
+            pcbnew.ExportSpecctraDSN(board, stage_dsn)
+            if classes:
+                apply_dsn_classes(Path(stage_dsn), classes, only_nets=subset)
+            # Do not accept a stale SES from a previous invocation.
+            if os.path.isfile(stage_ses):
+                os.remove(stage_ses)
+            router_args = [fr_exe, "-de", stage_dsn, "-do", stage_ses, "-mp", str(max_passes)]
+            if random_seed:
+                router_args.extend(["-random_seed", random_seed])
+            proc = subprocess.run(router_args, capture_output=True, text=True,
+                                  timeout=max(1, deadline - time.monotonic()))
+            result["routing_stages"].append({"nets": sorted(subset) if subset else "all",
+                                             "exit_code": proc.returncode})
+            if proc.returncode or not os.path.isfile(stage_ses):
+                break
+            if subset is not None:
+                if _import_ses(board, stage_ses) is False:
+                    raise RuntimeError("critical-net SES import failed")
+                pcbnew.SaveBoard(pcb, board)
+        with open(os.path.join(workdir, "routing-rules-receipt.json"), "w", encoding="utf-8") as stream:
+            json.dump({"classes": classes, "stages": result["routing_stages"]}, stream, indent=2)
         combined = "\n".join((proc.stdout + "\n" + proc.stderr).splitlines()[-6:])
         result["fr_tail"] = combined
-        if proc.returncode == 0 and os.path.exists(ses) and os.path.getsize(ses) > 0:
+        if (proc.returncode == 0 and result["routing_stages"][-1]["nets"] == "all"
+                and os.path.exists(ses) and os.path.getsize(ses) > 0):
             board2 = pcbnew.LoadBoard(pcb)  # reload (carries nets)
-            _import_ses(board2, ses)
+            if _import_ses(board2, ses) is False:
+                raise RuntimeError("final SES import failed")
+            # SES uses a DSN via padstack; enforce the class drill explicitly on
+            # the imported physical vias (and persist it for KiCad DRC).
+            by_net = {n: c for c in classes for n in c["nets"]}
+            for track in board2.GetTracks():
+                if isinstance(track, pcbnew.PCB_VIA) and track.GetNetname() in by_net:
+                    rule = by_net[track.GetNetname()]
+                    track.SetDrill(pcbnew.FromMM(rule["via_drill"]))
+                    track.SetWidth(pcbnew.FromMM(rule["via_diameter"]))
             result["unconnected"] = _unconnected(board2)
             if (
                 result["total_connections"] >= 0

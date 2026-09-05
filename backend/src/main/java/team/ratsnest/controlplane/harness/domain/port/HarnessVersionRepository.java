@@ -9,6 +9,8 @@ public interface HarnessVersionRepository {
 
     Optional<HarnessVersion> find(String harnessVersionId);
 
+    Optional<HarnessVersion> findByManifest(String manifestDigest);
+
     boolean insert(HarnessVersion value);
 
     boolean transition(

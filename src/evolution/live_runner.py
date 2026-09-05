@@ -280,6 +280,267 @@ def _artifact_facts(manifest: dict[str, Any], root: Path) -> tuple[list[dict[str
     return facts, all_valid
 
 
+def _artifact_path(root: Path, object_key: str) -> Path:
+    """Resolve one published object without allowing an artifact-root escape."""
+
+    artifact_root = (root / "data" / "ratsnestpro" / "artifacts").resolve()
+    candidate = (artifact_root / object_key).resolve()
+    candidate.relative_to(artifact_root)
+    return _native_path(candidate)
+
+
+def _artifact_manifest_identity(
+    manifest: dict[str, Any], root: Path
+) -> dict[str, Any] | None:
+    fields = (
+        "artifact_id",
+        "kind",
+        "media_type",
+        "name",
+        "object_key",
+        "sha256",
+        "size_bytes",
+    )
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        return None
+    try:
+        canonical = [
+            {field: artifact[field] for field in fields}
+            for artifact in artifacts
+            if isinstance(artifact, dict)
+        ]
+    except KeyError:
+        return None
+    if len(canonical) != len(artifacts):
+        return None
+    canonical.sort(key=lambda item: str(item["artifact_id"]))
+    calculated = _sha256_bytes(
+        json.dumps(
+            canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    )
+    expected = str(manifest.get("manifest_digest") or "")
+    _, files_valid = _artifact_facts(manifest, root)
+    valid = len(expected) == 64 and calculated == expected and files_valid
+    return {
+        "manifestId": str(manifest.get("manifest_id") or "")[:80] or None,
+        "manifestDigest": expected[:64] or None,
+        "artifactCount": len(canonical),
+        "storageBackend": str(manifest.get("storage_backend") or "")[:40] or None,
+        "valid": valid,
+    }
+
+
+def _failure_facts(result: dict[str, Any]) -> list[dict[str, str]]:
+    """Return bounded, stable failure identities without persisting diagnostics."""
+
+    facts: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    ledger = result.get("issue_ledger")
+    if isinstance(ledger, list):
+        for item in ledger[:256]:
+            if not isinstance(item, dict):
+                continue
+            stage = str(item.get("step") or "unknown")[:80]
+            check = str(item.get("name") or "unknown")[:120]
+            severity = str(item.get("severity") or "error")[:40]
+            identity = (stage, check, severity)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            facts.append(
+                {
+                    "stage": stage,
+                    "check": check,
+                    "severity": severity,
+                    "signature": _sha256_bytes(
+                        "\0".join(identity).encode("utf-8")
+                    ),
+                }
+            )
+    if facts:
+        return facts
+
+    blockers = result.get("release_blockers")
+    if not isinstance(blockers, list):
+        return facts
+    for value in blockers[:256]:
+        parts = str(value).split(":", 2)
+        stage = (parts[0] or "release_gate")[:80]
+        check = (parts[1] if len(parts) > 1 else "unclassified")[:120]
+        identity = (stage, check, "error")
+        if identity in seen:
+            continue
+        seen.add(identity)
+        facts.append(
+            {
+                "stage": stage,
+                "check": check,
+                "severity": "error",
+                "signature": _sha256_bytes("\0".join(identity).encode("utf-8")),
+            }
+        )
+    return facts
+
+
+def _pipeline_release_evidence(
+    manifest: dict[str, Any], root: Path
+) -> dict[str, Any]:
+    """Read only content-addressed release facts from the published pipeline result."""
+
+    unavailable = {
+        "pipelineResultValid": False,
+        "pipelineComplete": None,
+        "releaseReady": None,
+        "releaseBlockerCount": None,
+        "ercErrors": None,
+        "drcErrors": None,
+        "unconnected": None,
+        "routingUnconnected": None,
+        "drcUnconnected": None,
+        "ercClean": None,
+        "drcClean": None,
+        "zeroUnconnected": None,
+        "routingComplete": None,
+        "productionBomPresent": None,
+        "procurementBomPresent": None,
+        "coreArtifactsPresent": None,
+        "artifactIdentity": None,
+        "failureFacts": [],
+        "strictGatePassed": False,
+    }
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        return unavailable
+    selected = next(
+        (
+            item
+            for item in artifacts
+            if isinstance(item, dict)
+            and str(item.get("name", "")).casefold().endswith("pipeline_result.json")
+        ),
+        None,
+    )
+    if selected is None:
+        return unavailable
+    digest = str(selected.get("sha256", ""))
+    try:
+        path = _artifact_path(root, str(selected.get("object_key", "")))
+        if not path.is_file() or path.stat().st_size > 8 * 1024 * 1024:
+            return unavailable
+        raw = path.read_bytes()
+        if len(digest) != 64 or _sha256_bytes(raw) != digest:
+            return unavailable
+        result = json.loads(raw)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return unavailable
+    if not isinstance(result, dict):
+        return unavailable
+
+    verification = result.get("verification")
+    verification = verification if isinstance(verification, dict) else {}
+    erc = verification.get("erc")
+    erc = erc if isinstance(erc, dict) else {}
+    drc = verification.get("drc")
+    drc = drc if isinstance(drc, dict) else {}
+    routing = result.get("routing")
+    routing = routing if isinstance(routing, dict) else {}
+    blockers = result.get("release_blockers")
+    blocker_count = len(blockers) if isinstance(blockers, list) else None
+    erc_clean = (
+        erc.get("applicable") is True
+        and erc.get("available") is True
+        and erc.get("ran") is True
+        and erc.get("errors") == 0
+    )
+    drc_clean = (
+        drc.get("applicable") is True
+        and drc.get("available") is True
+        and drc.get("ran") is True
+        and drc.get("errors") == 0
+    )
+    zero_unconnected = drc.get("unconnected") == 0 and routing.get("unconnected") == 0
+    drc_unconnected = drc.get("unconnected") if isinstance(drc.get("unconnected"), int) else None
+    routing_unconnected = (
+        routing.get("unconnected") if isinstance(routing.get("unconnected"), int) else None
+    )
+    unconnected = (
+        max(drc_unconnected, routing_unconnected)
+        if drc_unconnected is not None and routing_unconnected is not None
+        else None
+    )
+    routing_complete = (
+        routing.get("method") == "freerouting"
+        and routing.get("unconnected") == 0
+        and bool(routing.get("dsn_path"))
+        and bool(routing.get("ses_path"))
+    )
+    artifact_facts, artifacts_valid = _artifact_facts(manifest, root)
+    artifact_identity = _artifact_manifest_identity(manifest, root)
+    artifact_names = [str(item.get("name", "")).casefold() for item in artifact_facts]
+    production_bom_present = any(
+        name.endswith("_production_bom.csv") for name in artifact_names
+    )
+    procurement_bom_present = any(
+        name.endswith("_procurement_bom.csv") for name in artifact_names
+    )
+    core_artifacts_present = artifacts_valid and all(
+        any(name.endswith(required) for name in artifact_names)
+        for required in (
+            "pipeline_result.json",
+            ".kicad_sch",
+            ".kicad_pcb",
+            ".dsn",
+            ".ses",
+            "_cpl.csv",
+        )
+    ) and production_bom_present and procurement_bom_present
+    pipeline_complete = (
+        result.get("completed_steps") == 17
+        and result.get("total_steps") == 17
+        and result.get("execution_complete") is True
+        and result.get("execution_blocked") is False
+    )
+    release_ready = (
+        result.get("release_ready") is True
+        and result.get("outcome") == "release_ready"
+    )
+    strict = (
+        pipeline_complete
+        and release_ready
+        and blocker_count == 0
+        and erc_clean
+        and drc_clean
+        and zero_unconnected
+        and routing_complete
+        and core_artifacts_present
+        and artifact_identity is not None
+        and artifact_identity["valid"] is True
+    )
+    return {
+        "pipelineResultValid": True,
+        "pipelineComplete": pipeline_complete,
+        "releaseReady": release_ready,
+        "releaseBlockerCount": blocker_count,
+        "ercErrors": erc.get("errors") if isinstance(erc.get("errors"), int) else None,
+        "drcErrors": drc.get("errors") if isinstance(drc.get("errors"), int) else None,
+        "unconnected": unconnected,
+        "routingUnconnected": routing_unconnected,
+        "drcUnconnected": drc_unconnected,
+        "ercClean": erc_clean,
+        "drcClean": drc_clean,
+        "zeroUnconnected": zero_unconnected,
+        "routingComplete": routing_complete,
+        "productionBomPresent": production_bom_present,
+        "procurementBomPresent": procurement_bom_present,
+        "coreArtifactsPresent": core_artifacts_present,
+        "artifactIdentity": artifact_identity,
+        "failureFacts": _failure_facts(result),
+        "strictGatePassed": strict,
+    }
+
+
 def _capture_stream(
     client: httpx.Client,
     *,
@@ -332,6 +593,7 @@ def _capture_stream(
                 "deliveryStatus": None,
                 "artifacts": [],
                 "artifactsValid": True,
+                "releaseEvidence": _pipeline_release_evidence({}, root),
                 "eventDigest": _canonical_digest([]),
             }
         for line in response.iter_lines():
@@ -503,6 +765,10 @@ def _capture_stream(
                 )
 
     artifact_facts, artifacts_valid = _artifact_facts(manifest, root) if manifest else ([], True)
+    release_evidence = _pipeline_release_evidence(manifest, root)
+    pipeline_steps = release_evidence.get("pipelineComplete")
+    if pipeline_steps is True:
+        completed_steps = max(completed_steps, 17)
     delivery_status = manifest.get("delivery_status") if manifest else None
     event_facts = {
         "events": events,
@@ -512,6 +778,7 @@ def _capture_stream(
         "artifacts": artifact_facts,
         "toolCalls": tool_calls,
         "handoffs": handoffs,
+        "releaseEvidence": release_evidence,
     }
     hitl_latency = None
     if hitl_request_times and hitl_response_times:
@@ -545,6 +812,7 @@ def _capture_stream(
         "deliveryStatus": delivery_status,
         "artifacts": artifact_facts,
         "artifactsValid": artifacts_valid,
+        "releaseEvidence": release_evidence,
         "eventDigest": _canonical_digest(event_facts),
     }
 
@@ -575,7 +843,13 @@ def _grade(
         else release_ready == case.expect_release_ready
     )
     if release_ready:
-        release_ok = release_ok and bool(observed["artifacts"]) and observed["artifactsValid"]
+        release_ok = (
+            release_ok
+            and artifact_ok
+            and bool(observed["artifacts"])
+            and observed["artifactsValid"]
+            and observed.get("releaseEvidence", {}).get("strictGatePassed") is True
+        )
     eda_pipeline_ok = True
     if case.category == "eda_pipeline":
         required_eda_artifacts = (
@@ -660,6 +934,14 @@ def _write_report(path: Path, report: dict[str, Any]) -> None:
         f"- Tool-contract accuracy: {metrics['toolContractAccuracy']:.3f}",
         f"- Gate accuracy: {metrics['gateAccuracy']:.3f}",
         f"- False releases: {metrics['falseReleaseCount']}",
+        f"- Strict release evidence: {metrics['strictReleaseEvidenceRate']}",
+        f"- ERC clean: {metrics['ercCleanRate']}",
+        f"- DRC clean: {metrics['drcCleanRate']}",
+        f"- Zero unconnected: {metrics['zeroUnconnectedRate']}",
+        f"- Freerouting complete: {metrics['routingCompletionRate']}",
+        f"- ERC / DRC / unconnected totals: {metrics['ercErrorCount']} / "
+        f"{metrics['drcErrorCount']} / {metrics['unconnectedCount']}",
+        f"- Artifact identity verified: {metrics['artifactIdentityRate']}",
         "",
         "| Case | Category | Intent | Status | Tools | Duration | Result |",
         "|---|---|---|---|---:|---:|---|",
@@ -953,13 +1235,94 @@ def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def _release_metric(items: list[dict[str, Any]], key: str) -> float | None:
+    eda_items = [item for item in items if item.get("category") == "eda_pipeline"]
+    if not eda_items:
+        return None
+    return sum(
+        item.get("observed", {}).get("releaseEvidence", {}).get(key) is True
+        for item in eda_items
+    ) / len(eda_items)
+
+
+def _eda_check_metric(items: list[dict[str, Any]], key: str) -> float | None:
+    eda_items = [item for item in items if item.get("category") == "eda_pipeline"]
+    if not eda_items:
+        return None
+    return sum(item.get("checks", {}).get(key) is True for item in eda_items) / len(
+        eda_items
+    )
+
+
+def _release_count(items: list[dict[str, Any]], key: str) -> int | None:
+    eda_items = [item for item in items if item.get("category") == "eda_pipeline"]
+    values = [
+        item.get("observed", {}).get("releaseEvidence", {}).get(key)
+        for item in eda_items
+    ]
+    if not values or any(not isinstance(value, int) for value in values):
+        return None
+    return sum(values)
+
+
+def _artifact_identity_rate(items: list[dict[str, Any]]) -> float | None:
+    eda_items = [item for item in items if item.get("category") == "eda_pipeline"]
+    if not eda_items:
+        return None
+    valid = 0
+    for item in eda_items:
+        identity = (
+            item.get("observed", {})
+            .get("releaseEvidence", {})
+            .get("artifactIdentity")
+        )
+        valid += isinstance(identity, dict) and identity.get("valid") is True
+    return valid / len(eda_items)
+
+
+def _failure_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
+    stages: dict[str, int] = {}
+    signatures: dict[str, dict[str, Any]] = {}
+    for item in items:
+        facts = item.get("observed", {}).get("releaseEvidence", {}).get("failureFacts", [])
+        if not isinstance(facts, list):
+            continue
+        for fact in facts:
+            if not isinstance(fact, dict):
+                continue
+            stage = str(fact.get("stage") or "unknown")[:80]
+            check = str(fact.get("check") or "unknown")[:120]
+            severity = str(fact.get("severity") or "error")[:40]
+            signature = str(fact.get("signature") or "")[:64]
+            if len(signature) != 64:
+                continue
+            stages[stage] = stages.get(stage, 0) + 1
+            entry = signatures.setdefault(
+                signature,
+                {
+                    "signature": signature,
+                    "stage": stage,
+                    "check": check,
+                    "severity": severity,
+                    "count": 0,
+                },
+            )
+            entry["count"] += 1
+    return {
+        "byStage": dict(sorted(stages.items())),
+        "bySignature": sorted(
+            signatures.values(), key=lambda item: (-item["count"], item["signature"])
+        ),
+    }
+
+
 def _arm_metrics(items: list[dict[str, Any]], arm: str) -> dict[str, Any]:
     durations = [
         float(item["observed"]["durationSeconds"])
         for item in items
         if isinstance(item.get("observed", {}).get("durationSeconds"), (int, float))
     ]
-    releases = [
+    reported_releases = [
         (
             None
             if item["observed"].get("deliveryStatus") is None
@@ -1052,9 +1415,25 @@ def _arm_metrics(items: list[dict[str, Any]], arm: str) -> dict[str, Any]:
         "strictTaskSuccessRate": _nullable_rate(
             [item.get("passed") if isinstance(item.get("passed"), bool) else None for item in items]
         ),
-        "releaseReadyRate": _nullable_rate(releases),
+        "releaseReadyRate": _release_metric(items, "strictGatePassed"),
+        "reportedReleaseReadyRate": _nullable_rate(reported_releases),
+        "releaseReadyEvidenceRate": _release_metric(items, "releaseReady"),
+        "strictReleaseEvidenceRate": _release_metric(items, "strictGatePassed"),
+        "ercErrorCount": _release_count(items, "ercErrors"),
+        "drcErrorCount": _release_count(items, "drcErrors"),
+        "unconnectedCount": _release_count(items, "unconnected"),
+        "ercCleanRate": _release_metric(items, "ercClean"),
+        "drcCleanRate": _release_metric(items, "drcClean"),
+        "zeroUnconnectedRate": _release_metric(items, "zeroUnconnected"),
+        "routingCompletionRate": _release_metric(items, "routingComplete"),
+        "pipelineResultEvidenceRate": _release_metric(items, "pipelineResultValid"),
+        "coreArtifactClosureRate": _release_metric(items, "coreArtifactsPresent"),
+        "artifactIdentityRate": _artifact_identity_rate(items),
+        "artifactGatePassRate": _eda_check_metric(items, "artifacts"),
         "releaseStatusObservationCoverage": (
-            sum(value is not None for value in releases) / len(releases) if releases else None
+            sum(value is not None for value in reported_releases) / len(reported_releases)
+            if reported_releases
+            else None
         ),
         "humanAcceptanceRate": _nullable_rate(human),
         "humanReviewCoverage": (
@@ -1153,7 +1532,15 @@ def _paired_comparison(
                 "protocolCompleted": item.get("checks", {}).get("terminal"),
                 "completedSteps": observed.get("completedSteps"),
                 "strictTaskSuccess": item.get("passed"),
-                "releaseReady": None if status is None else status == "release_ready",
+                "releaseReady": observed.get("releaseEvidence", {}).get(
+                    "strictGatePassed"
+                ),
+                "reportedReleaseReady": None
+                if status is None
+                else status == "release_ready",
+                "strictReleaseEvidence": observed.get("releaseEvidence", {}).get(
+                    "strictGatePassed"
+                ),
                 "humanAccepted": (
                     None
                     if item.get("humanAcceptance") is None
@@ -1204,6 +1591,20 @@ def _paired_comparison(
         "pipeline17StepCompletionRate",
         "strictTaskSuccessRate",
         "releaseReadyRate",
+        "reportedReleaseReadyRate",
+        "releaseReadyEvidenceRate",
+        "strictReleaseEvidenceRate",
+        "ercErrorCount",
+        "drcErrorCount",
+        "unconnectedCount",
+        "ercCleanRate",
+        "drcCleanRate",
+        "zeroUnconnectedRate",
+        "routingCompletionRate",
+        "pipelineResultEvidenceRate",
+        "coreArtifactClosureRate",
+        "artifactIdentityRate",
+        "artifactGatePassRate",
         "humanAcceptanceRate",
         "phaseContractErrorRate",
         "toolContractErrorRate",
@@ -1305,6 +1706,7 @@ def _report(
         "cases": results,
         "armMetrics": arm_metrics,
         "pairedComparison": paired_comparison,
+        "failureSummary": _failure_summary(results),
         "metrics": {
             "caseCount": count,
             "passedCases": passed,
@@ -1321,7 +1723,7 @@ def _report(
                 if eda_results
                 else None
             ),
-            "releaseReadyRate": (
+            "reportedReleaseReadyRate": (
                 sum(
                     item["observed"].get("deliveryStatus") == "release_ready"
                     for item in results
@@ -1330,6 +1732,24 @@ def _report(
                 if count
                 else 0.0
             ),
+            "releaseReadyRate": _release_metric(results, "strictGatePassed"),
+            "releaseReadyEvidenceRate": _release_metric(results, "releaseReady"),
+            "strictReleaseEvidenceRate": _release_metric(results, "strictGatePassed"),
+            "ercErrorCount": _release_count(results, "ercErrors"),
+            "drcErrorCount": _release_count(results, "drcErrors"),
+            "unconnectedCount": _release_count(results, "unconnected"),
+            "ercCleanRate": _release_metric(results, "ercClean"),
+            "drcCleanRate": _release_metric(results, "drcClean"),
+            "zeroUnconnectedRate": _release_metric(results, "zeroUnconnected"),
+            "routingCompletionRate": _release_metric(results, "routingComplete"),
+            "pipelineResultEvidenceRate": _release_metric(
+                results, "pipelineResultValid"
+            ),
+            "coreArtifactClosureRate": _release_metric(
+                results, "coreArtifactsPresent"
+            ),
+            "artifactIdentityRate": _artifact_identity_rate(results),
+            "artifactGatePassRate": _eda_check_metric(results, "artifacts"),
             "intentAccuracy": check_rate("intent"),
             "toolContractAccuracy": (
                 (check_rate("requiredTools") + check_rate("forbiddenTools")) / 2

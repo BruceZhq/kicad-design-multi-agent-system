@@ -353,6 +353,25 @@ class AffectedTerminal(ContractModel):
     kind: Literal["pin", "pad"]
 
 
+class AffectedPinNet(ContractModel):
+    """One report terminal bound to an authoritative netlist fact."""
+
+    ref: str
+    pin: str
+    net: str
+    source: Literal["kicad_xml_netlist"] = "kicad_xml_netlist"
+
+
+class FindingItemEvidence(ContractModel):
+    """Compact, self-contained copy of one KiCad report item."""
+
+    description: str = ""
+    refs: list[str] = Field(default_factory=list)
+    pins: list[AffectedTerminal] = Field(default_factory=list)
+    pads: list[AffectedTerminal] = Field(default_factory=list)
+    position: FindingPosition | None = None
+
+
 class EntityRepairPlan(ContractModel):
     finding_type: str
     source_section: str = ""
@@ -363,20 +382,24 @@ class EntityRepairPlan(ContractModel):
     affected_refs: list[str] = Field(default_factory=list)
     affected_pins: list[AffectedTerminal] = Field(default_factory=list)
     affected_pads: list[AffectedTerminal] = Field(default_factory=list)
+    affected_nets: list[str] = Field(default_factory=list)
+    pin_net_facts: list[AffectedPinNet] = Field(default_factory=list)
+    observed_items: list[FindingItemEvidence] = Field(default_factory=list)
     positions: list[FindingPosition] = Field(default_factory=list)
     reason: str
 
 
 _REF_RE = re.compile(
-    r"(?<![A-Za-z0-9_])([A-Z]{1,4}\d+[A-Z]?)(?![A-Za-z0-9_])"
+    r"(?<![A-Za-z0-9_])(#?[A-Z]{1,4}\d+[A-Z]?)(?![A-Za-z0-9_])"
 )
 _TERMINAL_OF_REF_RE = re.compile(
     r"\b(?P<kind>Pad|PTH\s+pad|Pin)\s+(?P<number>[^\s,;()\[\]]+)"
-    r".*?\b(?:of|on)\s+(?P<ref>[A-Z]{1,4}\d+[A-Z]?)\b",
+    r".*?\b(?:of|on)\s+(?P<ref>#?[A-Z]{1,4}\d+[A-Z]?)\b",
     re.IGNORECASE,
 )
 _REF_TERMINAL_RE = re.compile(
-    r"\b(?P<ref>[A-Z]{1,4}\d+[A-Z]?)\s*(?:[:/.,-]\s*)?"
+    r"(?<![A-Za-z0-9_])(?P<ref>#?[A-Z]{1,4}\d+[A-Z]?)"
+    r"\s*(?:[:/.,-]\s*)?"
     r"(?P<kind>pad|pin)\s+(?P<number>[^\s,;()\[\]]+)",
     re.IGNORECASE,
 )
@@ -395,6 +418,7 @@ _PIN_NOT_CONNECTED_TYPES = {
     "unconnected_pin",
     "input_pin_not_driven",
 }
+_PIN_ELECTRICAL_CONFLICT_TYPES = {"pin_to_pin"}
 _FOOTPRINT_GEOMETRY_TYPES = {"shorting_items", "solder_mask_bridge"}
 _LAYOUT_TYPES = {"clearance", "courtyards_overlap", "footprint_overlap"}
 _ROUTING_TYPES = {"tracks_crossing", "track_clearance", "via_clearance"}
@@ -476,6 +500,7 @@ def _evidence(finding: Mapping[str, Any]) -> tuple[
     list[AffectedTerminal],
     list[AffectedTerminal],
     list[FindingPosition],
+    list[FindingItemEvidence],
 ]:
     records = [finding, *_finding_items(finding)]
     descriptions = [_description(record) for record in records]
@@ -504,7 +529,23 @@ def _evidence(finding: Mapping[str, Any]) -> tuple[
     }.values())
     pins = [terminal for terminal in unique_terminals if terminal.kind == "pin"]
     pads = [terminal for terminal in unique_terminals if terminal.kind == "pad"]
-    return text, unique_refs, pins, pads, unique_positions
+    observed_items: list[FindingItemEvidence] = []
+    for record, description in zip(records[1:], descriptions[1:], strict=True):
+        item_terminals = _terminals(description)
+        explicit_ref = _explicit_ref(record)
+        item_refs = list(dict.fromkeys([
+            *([explicit_ref] if explicit_ref is not None else []),
+            *_REF_RE.findall(description),
+            *(terminal.ref for terminal in item_terminals),
+        ]))
+        observed_items.append(FindingItemEvidence(
+            description=description,
+            refs=item_refs,
+            pins=[item for item in item_terminals if item.kind == "pin"],
+            pads=[item for item in item_terminals if item.kind == "pad"],
+            position=_position(record, description),
+        ))
+    return text, unique_refs, pins, pads, unique_positions, observed_items
 
 
 def _plan_attributes(
@@ -529,6 +570,14 @@ def _plan_attributes(
             "reconnect_exact_pin_endpoint_from_design_ir",
             bool(refs and pins),
             "ERC reports an electrically unconnected schematic pin",
+        )
+    if finding_type in _PIN_ELECTRICAL_CONFLICT_TYPES:
+        return (
+            EntityRepairCategory.SCHEMATIC_CONNECTIVITY,
+            "schematic_connections",
+            "repair_pin_electrical_conflict_in_design_ir",
+            len(pins) >= 2 and len(refs) >= 2,
+            "ERC reports incompatible electrical pin types on one schematic net",
         )
     if is_unconnected:
         enough = len(positions) >= 2 or len(pads) >= 2
@@ -596,7 +645,7 @@ def classify_kicad_finding(
     finding_type = _normalized_type(
         finding.get("type", finding.get("rule", finding.get("rule_id", "unknown")))
     )
-    text, refs, pins, pads, positions = _evidence(finding)
+    text, refs, pins, pads, positions, observed_items = _evidence(finding)
     category, rollback_step, strategy, evidence_complete, reason = _plan_attributes(
         finding_type,
         source_section,
@@ -620,6 +669,7 @@ def classify_kicad_finding(
         affected_refs=refs,
         affected_pins=pins,
         affected_pads=pads,
+        observed_items=observed_items,
         positions=positions,
         reason=(
             reason

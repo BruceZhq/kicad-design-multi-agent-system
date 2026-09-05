@@ -143,6 +143,7 @@ class ReplanRecord(ContractModel):
     feedback: str = ""
     baseline_fingerprint: str = ""
     candidate_baseline: CandidateStateSnapshot | None = None
+    intermediate_repair_attempts: int = Field(default=0, ge=0)
 
 
 class CapabilityGap(ContractModel):
@@ -250,7 +251,7 @@ def _category(step: str, check_name: str, message: str) -> FailureCategory:
         return FailureCategory.HARD_CONSTRAINT
     if _STRUCTURED_OUTPUT_RE.search(combined):
         return FailureCategory.STRUCTURED_OUTPUT
-    if _EVIDENCE_RE.search(check_name):
+    if _EVIDENCE_RE.search(combined):
         return FailureCategory.EVIDENCE_GAP
     if _TRANSIENT_RE.search(combined):
         return FailureCategory.TRANSIENT_TOOL

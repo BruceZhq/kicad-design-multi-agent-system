@@ -11,9 +11,11 @@ from evolution.live_runner import (
     LivePlan,
     _artifact_facts,
     _capture_stream,
+    _failure_summary,
     _grade,
     _load_blind_reviews,
     _native_path,
+    _pipeline_release_evidence,
     _report,
     _usage_tokens,
     _validate_frozen_execution,
@@ -393,3 +395,132 @@ def test_local_artifact_validation_supports_content_addressed_long_paths(
 def test_usage_tokens_prefers_provider_total() -> None:
     event = {"response_metadata": {"usage_metadata": {"total_tokens": 42}}}
     assert _usage_tokens(event) == 42
+
+
+def test_release_ready_requires_content_addressed_eda_evidence(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "data" / "ratsnestpro" / "artifacts" / "runs" / "one"
+    artifact_root.mkdir(parents=True)
+    result = {
+        "outcome": "release_ready",
+        "release_ready": True,
+        "completed_steps": 17,
+        "total_steps": 17,
+        "execution_complete": True,
+        "execution_blocked": False,
+        "release_blockers": [],
+        "issue_ledger": [],
+        "routing": {
+            "method": "freerouting",
+            "unconnected": 0,
+            "dsn_path": "/run/board.dsn",
+            "ses_path": "/run/board.ses",
+        },
+        "verification": {
+            "erc": {"applicable": True, "available": True, "ran": True, "errors": 0},
+            "drc": {
+                "applicable": True,
+                "available": True,
+                "ran": True,
+                "errors": 0,
+                "unconnected": 0,
+            },
+        },
+    }
+    files = {
+        "pipeline_result.json": json.dumps(result).encode(),
+        "board.kicad_sch": b"schematic",
+        "board.kicad_pcb": b"board",
+        "board.dsn": b"dsn",
+        "board.ses": b"ses",
+        "board_production_bom.csv": b"production-bom",
+        "board_procurement_bom.csv": b"procurement-bom",
+        "board_cpl.csv": b"cpl",
+    }
+    artifacts = []
+    for index, (name, content) in enumerate(files.items(), start=1):
+        path = artifact_root / name
+        path.write_bytes(content)
+        artifacts.append(
+            {
+                "artifact_id": f"artifact-{index:02d}",
+                "name": name,
+                "kind": "test",
+                "media_type": "application/octet-stream",
+                "size_bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "object_key": f"runs/one/{name}",
+            }
+        )
+    digest_fields = (
+        "artifact_id",
+        "kind",
+        "media_type",
+        "name",
+        "object_key",
+        "sha256",
+        "size_bytes",
+    )
+    canonical = [{key: item[key] for key in digest_fields} for item in artifacts]
+    manifest_digest = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    manifest = {
+        "manifest_id": "manifest-one",
+        "manifest_digest": manifest_digest,
+        "storage_backend": "local",
+        "artifacts": artifacts,
+    }
+
+    evidence = _pipeline_release_evidence(manifest, tmp_path)
+
+    assert evidence["strictGatePassed"] is True
+    assert evidence["ercClean"] is True
+    assert evidence["drcClean"] is True
+    assert evidence["zeroUnconnected"] is True
+    assert evidence["routingComplete"] is True
+    assert evidence["productionBomPresent"] is True
+    assert evidence["procurementBomPresent"] is True
+    assert evidence["coreArtifactsPresent"] is True
+
+
+def test_forged_release_status_fails_without_clean_pipeline_evidence() -> None:
+    case = _case(
+        caseId="eda.strict-release",
+        category="eda_pipeline",
+        expectedIntents=["build"],
+        expectReleaseReady=True,
+    )
+    observed = {
+        "httpStatus": 200,
+        "done": True,
+        "humanInput": False,
+        "errors": [],
+        "intent": "build",
+        "phases": [],
+        "tools": [],
+        "completedSteps": 17,
+        "deliveryStatus": "release_ready",
+        "artifacts": [{"name": "pipeline_result.json", "valid": True}],
+        "artifactsValid": True,
+        "releaseEvidence": {"strictGatePassed": False},
+    }
+
+    assert _grade(case, observed, None)["releaseGate"] is False
+
+
+def test_failure_summary_groups_stable_stage_and_signature() -> None:
+    fact = {
+        "stage": "route_signals",
+        "check": "signals_routed",
+        "severity": "error",
+        "signature": "a" * 64,
+    }
+    summary = _failure_summary(
+        [
+            {"observed": {"releaseEvidence": {"failureFacts": [fact]}}},
+            {"observed": {"releaseEvidence": {"failureFacts": [fact]}}},
+        ]
+    )
+
+    assert summary["byStage"] == {"route_signals": 2}
+    assert summary["bySignature"][0]["count"] == 2

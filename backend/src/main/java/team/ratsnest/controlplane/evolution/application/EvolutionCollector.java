@@ -44,6 +44,7 @@ public class EvolutionCollector {
     private static final Pattern AUDIT_REFERENCE = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,254}");
     private static final Set<String> GOVERNED_FAILURE_REASON_CODES = Set.of(
             "generic_capability_closure_contradiction",
+            "missing_mutation_capability",
             "verified_pin_alias_resolution_lost");
     private static final Set<String> TOP_LEVEL_FIELDS = Set.of(
             "kind", "event", "step", "revision", "failure", "repair", "gap", "replan",
