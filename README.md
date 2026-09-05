@@ -332,17 +332,6 @@ docker compose --profile evolution up -d --build evolution_worker evolution_eval
 - Java 是浏览器唯一业务后端；Python Runtime 不接受浏览器伪造的 `user_id`/`tenant_id`。
 - Keycloak 只负责身份认证与用户资料；业务权限由 Java Membership/RBAC/RLS 决定。
 
-## 相关文档
-
-- [多智能体内核与硬化](docs/multi-agent-kernel-hardening.md)
-- [意图识别、AHE 与 EHE](docs/RATSNESTPRO_INTENT_AHE_EHE_ARCHITECTURE.md)
-- [LangGraph + Temporal 架构](docs/RATSNESTPRO_LANGGRAPH_TEMPORAL_ARCHITECTURE.md)
-- [生产 Runtime 与恢复](docs/RATSNESTPRO_PRODUCTION_RUNTIME.md)
-- [外部 Agentic RAG 接入契约](docs/AGENTIC_RAG_GATEWAY.md)
-- [分布式 Runtime](docs/DISTRIBUTED_RUNTIME.md)
-- [Harness Canary、Flyway 与回滚手册](docs/HARNESS_CANARY_RUNBOOK.md)
-- [完整技术报告](docs/RATSNESTPRO_COMPLETE_PROJECT_TECHNICAL_REPORT_ZH.md)
-
 ## License
 
 项目基于 Joshua Carroll 的 [agent-service-toolkit](https://github.com/JoshuaC215/agent-service-toolkit) 进行扩展，保留原项目 MIT License 与版权声明。改造内容包括 KiCad 硬件设计多智能体内核、耐久执行、证据门禁、Java 控制面及相关工程化能力。详见 [LICENSE](LICENSE) 与 [NOTICE.md](NOTICE.md)。
