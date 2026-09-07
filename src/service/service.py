@@ -55,6 +55,11 @@ from schema import (
     StreamInput,
     UserInput,
 )
+from schema.models import (
+    OPENAI_REASONING_EFFORTS,
+    OPENAI_VISION_MODELS,
+    OpenAIModelName,
+)
 from service.ahe_event import AHE_EVENT_KIND, sanitize_ahe_event
 from service.governance_scope import (
     TrustedGovernanceScope,
@@ -96,6 +101,42 @@ _long_term_memory: LongTermMemory | None = None
 _AHE_RECORD_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 
 RunRecordLike = RunRecord | RunHandle
+
+
+def _validate_model_runtime_config(
+    model: Any,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate user-selectable model controls before they enter a checkpoint."""
+
+    result = dict(config)
+    main_effort = result.get("reasoning_effort")
+    if main_effort is not None:
+        if not isinstance(model, OpenAIModelName) or main_effort not in OPENAI_REASONING_EFFORTS.get(model, ()):
+            raise HTTPException(
+                status_code=422,
+                detail="reasoning_effort is not supported by the selected main model",
+            )
+
+    vision_name = result.get("vision_model")
+    vision_effort = result.get("vision_reasoning_effort")
+    if vision_name is None:
+        if vision_effort is not None:
+            raise HTTPException(status_code=422, detail="vision_reasoning_effort requires vision_model")
+        return result
+    try:
+        vision_model = OpenAIModelName(str(vision_name))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="vision_model is not a supported OpenAI model") from exc
+    if vision_model not in OPENAI_VISION_MODELS or vision_model not in settings.AVAILABLE_MODELS:
+        raise HTTPException(status_code=422, detail="vision_model is not available in this Runtime")
+    if vision_effort is not None and vision_effort not in OPENAI_REASONING_EFFORTS[vision_model]:
+        raise HTTPException(
+            status_code=422,
+            detail="vision_reasoning_effort is not supported by vision_model",
+        )
+    result["vision_model"] = vision_model.value
+    return result
 
 
 def _effective_run_timeout_seconds(
@@ -510,7 +551,10 @@ async def _handle_input(
 
         callbacks.append(langfuse_handler)
 
-    runtime_agent_config = dict(user_input.agent_config)
+    runtime_agent_config = _validate_model_runtime_config(
+        user_input.model or settings.DEFAULT_MODEL,
+        dict(user_input.agent_config),
+    )
     runtime_agent_config.pop("harness_version", None)
     if runtime_agent_config:
         # Check for reserved keys (including 'model' even if not in configurable)
@@ -584,6 +628,13 @@ async def _handle_input(
         input = None
     else:
         input = {"messages": [HumanMessage(content=user_input.message)]}
+        if agent_id == "ratsnestpro-multi-agent" and state.values:
+            from agents.ratsnestpro.resume_context import recover_context
+            try:
+                recovered = await recover_context(agent, config, state.values, user_input.message)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            input.update(recovered)
 
     kwargs = {
         "input": input,

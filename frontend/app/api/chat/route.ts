@@ -13,6 +13,10 @@ import {
   runSubmission,
 } from "@/lib/backend";
 import { profileForkRequestBody } from "@/lib/request-intent";
+import {
+  OPENAI_VISION_MODELS,
+  validReasoningEffort,
+} from "@/lib/model-options";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -158,6 +162,9 @@ export async function POST(request: Request): Promise<Response> {
   const idempotencyKey = input.request_id;
   const lastEventId = eventCursor(input.last_event_id ?? 0);
   const model = input.model;
+  const reasoningEffort = input.reasoning_effort;
+  const visionModel = input.vision_model;
+  const visionReasoningEffort = input.vision_reasoning_effort;
   const selectedProfile = capabilityProfile(input.capability_profile);
   if (!message || message.length > 100_000) {
     return jsonError(request, "message must contain between 1 and 100000 characters.");
@@ -181,6 +188,18 @@ export async function POST(request: Request): Promise<Response> {
   if (lastEventId === null) return jsonError(request, "last_event_id must be a non-negative integer.");
   if (model !== undefined && model !== null && (typeof model !== "string" || model.length > 200)) {
     return jsonError(request, "model must be a string of at most 200 characters.");
+  }
+  if (reasoningEffort !== undefined && reasoningEffort !== null &&
+      (typeof model !== "string" || !validReasoningEffort(model, reasoningEffort))) {
+    return jsonError(request, "reasoning_effort is not supported by model.");
+  }
+  if (visionModel !== undefined && visionModel !== null &&
+      (typeof visionModel !== "string" || !OPENAI_VISION_MODELS.includes(visionModel))) {
+    return jsonError(request, "vision_model is not supported.");
+  }
+  if (visionReasoningEffort !== undefined && visionReasoningEffort !== null &&
+      (typeof visionModel !== "string" || !validReasoningEffort(visionModel, visionReasoningEffort))) {
+    return jsonError(request, "vision_reasoning_effort is not supported by vision_model.");
   }
   if (!selectedProfile) {
     return jsonError(request, "capability_profile must contain a valid id and version.");
@@ -240,11 +259,23 @@ export async function POST(request: Request): Promise<Response> {
             selectedProfile,
             typeof model === "string" ? model : null,
             members,
+            {
+              reasoningEffort: typeof reasoningEffort === "string" ? reasoningEffort : null,
+              visionModel: typeof visionModel === "string" ? visionModel : null,
+              visionReasoningEffort: typeof visionReasoningEffort === "string"
+                ? visionReasoningEffort
+                : null,
+            },
           ),
         }
       : runSubmission(revisionRunId, projectId, message, {
           message,
           model: typeof model === "string" ? model : null,
+          reasoningEffort: typeof reasoningEffort === "string" ? reasoningEffort : null,
+          visionModel: typeof visionModel === "string" ? visionModel : null,
+          visionReasoningEffort: typeof visionReasoningEffort === "string"
+            ? visionReasoningEffort
+            : null,
           threadId,
           teamMembers: members,
           capabilityProfile: selectedProfile,

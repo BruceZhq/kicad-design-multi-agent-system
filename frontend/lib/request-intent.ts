@@ -3,7 +3,12 @@ const NEW_PROJECT_RE = /(?:\bnew\s+(?:kicad\s+)?(?:project|build|board|design|ta
 const CAPABILITY_PROFILE_RE = /capability[_\s-]*profile\s*[:\uff1a=]\s*["'`]?([a-z0-9][a-z0-9-]{1,63}@[0-9]+\.[0-9]+(?:\.[0-9]+)?)/i;
 
 export function startsNewProject(message: string): boolean {
-  return NEW_PROJECT_RE.test(message);
+  for (const match of message.matchAll(new RegExp(NEW_PROJECT_RE.source, "gi"))) {
+    const prefix = message.slice(Math.max(0, match.index! - 45), match.index);
+    if (/(?:不|不要|不得|禁止|无需|别)(?:再|重新|另外|另行)?\s*$|\b(?:do\s+not|don't|must\s+not|without|never|no)\s+(?:start\s+(?:a\s+)?|create\s+(?:a\s+)?|a\s+)?$/i.test(prefix)) continue;
+    return true;
+  }
+  return false;
 }
 
 export function requestedCapabilityProfile(message: string): string | null {
@@ -39,6 +44,11 @@ export function profileForkRequestBody(
   profile: Pick<CapabilityProfileSnapshotRef, "id" | "version">,
   model: string | null,
   teamMembers: Array<{ roleId: string; name: string; responsibility: string }>,
+  modelOptions: {
+    reasoningEffort?: string | null;
+    visionModel?: string | null;
+    visionReasoningEffort?: string | null;
+  } = {},
 ): Record<string, unknown> {
   return {
     capabilityProfile: { id: profile.id, version: profile.version },
@@ -46,6 +56,7 @@ export function profileForkRequestBody(
     changeRequest,
     model,
     teamMembers,
+    ...modelOptions,
   };
 }
 

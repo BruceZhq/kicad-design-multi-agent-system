@@ -379,6 +379,11 @@ class RatsNestHardwareWorkflow:
                             "llm_mode": str(input.get("llm_mode", "required")),
                             "model_name": input.get("model_name"),
                             "model_type": input.get("model_type"),
+                            "reasoning_effort": input.get("reasoning_effort"),
+                            "vision_model_name": input.get("vision_model_name"),
+                            "vision_reasoning_effort": input.get(
+                                "vision_reasoning_effort"
+                            ),
                             "ahe_budget": input.get("ahe_budget", {}),
                         }
                     )

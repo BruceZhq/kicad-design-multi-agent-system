@@ -295,7 +295,31 @@ def test_active_device_requires_independent_pin_function_evidence(
     result = _service(symbol_file, footprint_file).prepare(selection, "use EXACT_LDO")
 
     assert result.manifest.design_ready is False
-    assert "REG1:pin_pad_consistency_failed" in result.manifest.electrical_blockers
+    assert "REG1:independent_package_evidence_missing" in result.manifest.electrical_blockers
+
+
+@pytest.mark.parametrize("symbol,value,ref", [
+    ("Device:LED", "LED", "D1"),
+    ("Switch:SW_Push", "SW_Push", "SW1"),
+])
+def test_generic_indicator_and_contact_resume_without_invented_mpn_evidence(
+    tmp_path: Path, symbol: str, value: str, ref: str,
+) -> None:
+    symbol_file = tmp_path / "library.kicad_sym"
+    footprint_file = tmp_path / "part.kicad_mod"
+    symbol_file.write_text("symbol", encoding="utf-8")
+    footprint_file.write_text("footprint", encoding="utf-8")
+    plan = SelectionPlan(parts=[SelectedPart(
+        ref=ref, symbol=symbol, value=value, requested_identity=value,
+        mpn=value, footprint="Package:TwoPin",
+    )])
+    service = _service(symbol_file, footprint_file)
+    result = service.prepare(plan, "generic LED and push button")
+    assert result.manifest.design_ready
+    # A real part number must not inherit this generic exemption.
+    plan.parts[0].mpn = "EXACT1234"
+    result = service.prepare(plan, "generic LED and push button")
+    assert not result.manifest.design_ready
 
 
 def test_active_device_with_official_exact_pin_evidence_can_close(
@@ -456,8 +480,8 @@ def test_distributor_pin_claims_cannot_release_an_active_component(
         },
     )
 
-    assert "REG1:package_consistency_unverified" in result.manifest.electrical_blockers
-    assert "REG1:pin_pad_consistency_failed" in result.manifest.electrical_blockers
+    assert "REG1:independent_package_evidence_missing" in result.manifest.electrical_blockers
+    assert result.manifest.electrical_status == "blocked"
 
 
 def test_prompt_embedded_component_pack_requires_trusted_producer_receipt() -> None:

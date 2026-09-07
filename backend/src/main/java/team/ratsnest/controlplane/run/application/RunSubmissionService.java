@@ -94,7 +94,10 @@ public class RunSubmissionService {
                 profile,
                 harness,
                 request.agentId(),
-                request.evaluationContext());
+                request.evaluationContext(),
+                request.reasoningEffort(),
+                request.visionModel(),
+                request.visionReasoningEffort());
         String fingerprint = fingerprints.start(
                 tenantId,
                 projectId,
@@ -185,7 +188,9 @@ public class RunSubmissionService {
         HarnessSelection harness = harnessReleaseRouter.route(
                 tenantId, initial.source().projectId(), idempotencyKey);
         Map<String, Object> config = runtimeConfiguration.create(
-                request.teamMembers(), profile, harness);
+                request.teamMembers(), profile, harness, null, Map.of(),
+                request.reasoningEffort(), request.visionModel(),
+                request.visionReasoningEffort());
 
         Creation creation;
         try {
@@ -443,7 +448,12 @@ public class RunSubmissionService {
                 existing.profileVersion(),
                 existing.profileDigest(),
                 harnessVersions.get(existing.harnessVersionId()),
-                existing.harnessChannel());
+                existing.harnessChannel(),
+                null,
+                Map.of(),
+                request.reasoningEffort(),
+                request.visionModel(),
+                request.visionReasoningEffort());
         String fingerprint = forkFingerprint(
                 source,
                 request,
@@ -577,7 +587,10 @@ public class RunSubmissionService {
                         harnessVersions.get(existing.harnessVersionId()),
                         existing.harnessChannel(),
                         request.agentId(),
-                        request.evaluationContext()));
+                        request.evaluationContext(),
+                        request.reasoningEffort(),
+                        request.visionModel(),
+                        request.visionReasoningEffort()));
         return matching(existing, replayFingerprint).run();
     }
 

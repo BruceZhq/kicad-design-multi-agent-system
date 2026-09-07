@@ -408,6 +408,7 @@ class PipelineContext:
     ahe_enabled: bool = True
     max_total_repair_attempts: int = 12
     max_same_failure_retries: int = 2
+    package_evidence_fetcher: Callable[[SelectedPart], list[dict[str, Any]]] | None = None
     ahe_deadline_monotonic: float | None = None
     max_replan_attempts: int = 2
     on_ahe_event: Callable[[dict[str, Any]], None] | None = None
@@ -1800,7 +1801,9 @@ class PipelineStepBase(ABC):
                     step=self.step.value,
                     check_name=check.name,
                     message=check.message,
-                    repair_available=strategy_available,
+                    repair_available=(
+                        strategy_available and check.origin != FailureOrigin.EXTERNAL_EVIDENCE
+                    ),
                     origin=check.origin,
                     reason_code=check.reason_code,
                     affected_refs=check.affected_refs,
@@ -1867,6 +1870,10 @@ class PipelineStepBase(ABC):
         # bounded repair implementation. The total task budget prevents loops.
         can_repair = (
             blocked
+            and any(
+                not check.ok and check.origin != FailureOrigin.EXTERNAL_EVIDENCE
+                for check in best_checks
+            )
             and not ctx.active_recovery_tool
             and repair_scope
             and (ctx.ahe_enabled or design_recovery_scope)
@@ -2978,6 +2985,7 @@ def _datasheet_package_is_explicit(footprint_lib_id: str, text: str) -> bool:
 def _datasheet_pin_functions(
     pin_rows: Sequence[dict[str, Any]] | None,
     pages: Sequence[dict[str, Any]],
+    footprint: str = "",
 ) -> list[dict[str, Any]]:
     """Prove every installed symbol pin from a bounded official pin-table row.
 
@@ -3002,6 +3010,43 @@ def _datasheet_pin_functions(
     ]
     if not expected_numbers or not lines:
         return []
+
+    # Layout-preserving PDF text exposes package columns separated by spaces.
+    # Select the explicit package column before considering numbers: nearest
+    # numbers are unsafe in multi-package tables.
+    package = re.search(r"(?i)(LQFP|TQFP|QFN|TSSOP|SOIC)[-_ ]*(\d+)", footprint)
+    if package:
+        header_pattern = re.compile(
+            rf"(?i)\b{package.group(1)}[-_ ]*{package.group(2)}\b"
+        )
+        column = None
+        table_seen = False
+        proved_numbers: set[str] = set()
+        for line in lines:
+            cells = list(re.finditer(r"\S(?:.*?\S)?(?= {2,}|$)", line))
+            headers = [cell for cell in cells if header_pattern.search(cell.group())]
+            if headers and len(cells) > 1:
+                header = headers[0]
+                index = cells.index(header)
+                column = (header.start(), cells[index + 1].start() if index + 1 < len(cells) else len(line))
+                table_seen = True
+                continue
+            if column is None:
+                continue
+            number = line[column[0]:column[1]].strip()
+            if number not in expected_numbers:
+                continue
+            for row in rows:
+                if str(row.get("number", "")).strip() != number:
+                    continue
+                name = str(row.get("name", "")).strip()
+                if re.search(r"(?<![A-Za-z0-9])" + re.escape(name) + r"(?![A-Za-z0-9])", line):
+                    proved_numbers.add(number)
+        if table_seen:
+            return [
+                {"number": str(row["number"]).strip(), "functions": [str(row["name"]).strip()]}
+                for row in rows
+            ] if proved_numbers == expected_numbers else []
 
     number_patterns = {
         number: re.compile(
@@ -3064,6 +3109,7 @@ def _datasheet_package_evidence(
     *,
     source_identity: str,
     datasheet: dict[str, Any],
+    visual_pin_table: dict[str, Any] | None = None,
 ) -> TechnicalPackageEvidence | None:
     """Create v2 evidence only from a trusted official-source receipt."""
 
@@ -3081,7 +3127,33 @@ def _datasheet_package_evidence(
     if not identity:
         return None
     pin_rows = symbols.symbol_pins(part.symbol)
-    pin_functions = _datasheet_pin_functions(pin_rows, pages)
+    pin_functions = _datasheet_pin_functions(pin_rows, pages, part.footprint)
+    if not pin_functions and visual_pin_table is not None:
+        digest = datasheet.get("source_sha256", "")
+        if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or visual_pin_table.get("source_sha256") != digest):
+            return None
+        observed = visual_pin_table.get("pins", [])
+        source_pages = {p.get("page") for p in pages if isinstance(p, dict)}
+        if (not isinstance(observed, list) or not observed or len(observed) > 512
+                or any(not isinstance(pin, dict) or pin.get("page") not in source_pages
+                       or not isinstance(pin.get("functions"), list)
+                       or not pin["functions"]
+                       or any(not isinstance(f, str) or not f.strip() for f in pin["functions"])
+                       for pin in observed)):
+            return None
+        by_number = {str(pin.get("number", "")): pin for pin in observed}
+        if len(by_number) != len(observed) or set(by_number) != {
+            str(row["number"]) for row in pin_rows or []
+        }:
+            return None
+        from agents.ratsnestpro.pin_evidence import pin_differences
+        if pin_differences(pin_rows or [], visual_pin_table):
+            return None
+        pin_functions = [
+            {"number": str(row["number"]), "functions": [str(row["name"])]}
+            for row in pin_rows or []
+        ]
     if not pin_functions:
         return None
     page_text = "\n".join(
@@ -3099,6 +3171,7 @@ def _datasheet_package_evidence(
         "identity": identity,
         "symbol_lib_id": part.symbol,
         "footprint_lib_id": part.footprint,
+        "visual_pin_table": visual_pin_table,
     }
     page_numbers = sorted({
         int(page["page"])
@@ -5946,6 +6019,40 @@ def _prepare_and_persist_components(
         inputs=directives,
         mutate_selection=True,
     )
+    if ctx.package_evidence_fetcher is not None:
+        missing = {
+            record.ref for record in prepared.manifest.records
+            if "independent_package_evidence_missing" in record.electrical_blockers
+        }
+        added = False
+        for part in prepared.selection.parts:
+            if part.ref not in missing:
+                continue
+            for document in ctx.package_evidence_fetcher(part):
+                receipt = _datasheet_package_evidence(
+                    part, source_identity=part.requested_identity or part.mpn or part.value,
+                    datasheet=document,
+                    visual_pin_table=document.get("visual_pin_table"),
+                )
+                if receipt is None and ctx.out_dir:
+                    from agents.ratsnestpro.symbol_evidence_repair import repair_symbol
+                    candidate = repair_symbol(part, document, Path(ctx.out_dir))
+                    if candidate is not None:
+                        receipt = _datasheet_package_evidence(
+                            candidate, source_identity=candidate.requested_identity or candidate.value,
+                            datasheet=document, visual_pin_table=document.get("visual_pin_table"),
+                        )
+                        if receipt is not None:
+                            part.symbol = candidate.symbol
+                            part.value = candidate.value
+                if receipt is not None:
+                    directives[part.ref].technical_package_evidence.append(receipt)
+                    added = True
+        if added:
+            prepared = service.prepare(
+                prepared.selection, state.requirement_text,
+                inputs=directives, mutate_selection=True,
+            )
     out_dir = (
         Path(ctx.out_dir)
         if ctx.out_dir
@@ -6025,9 +6132,40 @@ def _prepared_component_manifest_check(
             else f"prepared component blockers: {blockers}"
         ),
         blocks_execution=not ready,
-        reason_code="" if ready else "prepared_component_contract_failed",
+        origin=(
+            FailureOrigin.EXTERNAL_EVIDENCE
+            if blockers and all(
+                item.endswith(":independent_package_evidence_missing")
+                for item in blockers
+            ) else None
+        ),
+        reason_code=(
+            "" if ready else "independent_package_evidence_missing"
+            if blockers and all(
+                item.endswith(":independent_package_evidence_missing")
+                for item in blockers
+            ) else "prepared_component_contract_failed"
+        ),
         affected_refs=sorted(affected_refs),
         evidence={
+            "component_diagnostics": [
+                {
+                    "ref": record.ref,
+                    "identity": record.requested_identity,
+                    "symbol": record.symbol_lib_id,
+                    "footprint": record.footprint_lib_id,
+                    "blockers": record.electrical_blockers,
+                    "available_source_kinds": sorted({
+                        item.source_kind for item in record.technical_package_evidence
+                    }),
+                    "required_action": (
+                        "retrieve_independent_package_and_pin_table"
+                        if "independent_package_evidence_missing" in record.electrical_blockers
+                        else "repair_component_binding"
+                    ),
+                }
+                for record in manifest.records if record.electrical_blockers
+            ] if manifest is not None else [],
             "electrical_status": (
                 manifest.electrical_status
                 if manifest is not None
@@ -22839,6 +22977,15 @@ class Pipeline:
                         is not None
                     )
                 )
+                if result.failures and all(
+                    failure.origin == FailureOrigin.EXTERNAL_EVIDENCE
+                    for failure in result.failures
+                ):
+                    # Re-generating a selection cannot supply missing external
+                    # provenance. Preserve the selection for evidence recovery.
+                    local_repair_available = False
+                    allowed_targets = []
+                    suggested_rollback = None
                 related_recovery_turns = [
                     record
                     for record in state.recovery_history
@@ -22924,6 +23071,16 @@ class Pipeline:
                         }
                     )
                     invalid_action = (
+                        (external_decision_required and decision.action not in {
+                            RecoveryAction.ASK_HUMAN, RecoveryAction.STOP
+                        })
+                        or (
+                            decision.action == RecoveryAction.LOCAL_REPAIR
+                            and decision.cad_action_batch is None
+                            and not str(decision.tool_args.get("repair_instructions", "")).strip()
+                            and not decision.strategy.strip()
+                        )
+                        or
                         (
                             decision.action == RecoveryAction.LOCAL_REPAIR
                             and not local_repair_available
@@ -22996,12 +23153,12 @@ class Pipeline:
                             )[:4_000],
                         }
                     )
-                    repeated_stagnant_action = any(
+                    repeated_stagnant_action = decision.action != RecoveryAction.ASK_HUMAN and any(
                         _recovery_action_fingerprint(prior.decision)
                         == _recovery_action_fingerprint(decision)
                         and prior.baseline_fingerprint
                         == _artifact_fingerprint(step_artifact)
-                        and prior.status in {"rejected", "exhausted"}
+                        and prior.status in {"rejected", "exhausted", "error"}
                         for prior in related_recovery_turns
                     )
                     recovery_turn = RecoveryTurnRecord(
@@ -23222,13 +23379,14 @@ class Pipeline:
                     pending.after_score = current_score
                     emit_replan(f"replan_{pending.status}", pending)
                 if recovery_turn is not None and recovery_turn.status == "planned":
-                    recovery_turn.status = "exhausted"
+                    needs_human = recovery_turn.decision.action == RecoveryAction.ASK_HUMAN
+                    recovery_turn.status = "awaiting_human" if needs_human else "exhausted"
                     recovery_turn.after_score = current_score
-                    recovery_turn.observation = (
+                    recovery_turn.observation = ("Human evidence or a decision is required; no gate was waived." if needs_human else
                         "The selected action could not be scheduled within the "
                         "validated target and recovery budgets."
                     )
-                    emit_recovery("recovery_exhausted", recovery_turn)
+                    emit_recovery("human_input_required" if needs_human else "recovery_exhausted", recovery_turn)
                 if active_replan is not None and active_replan.candidate_baseline is not None:
                     index = reject_replan(active_replan, result)
                     completed_set = set(state.completed)

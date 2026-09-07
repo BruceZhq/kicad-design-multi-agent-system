@@ -283,6 +283,9 @@ public class RunController {
     record StartRunRequest(
             @NotBlank @Size(max = 100_000) String message,
             @Size(max = 200) String model,
+            @Pattern(regexp = "none|low|medium|high|xhigh|max") String reasoningEffort,
+            @Pattern(regexp = "gpt-(?:5\\.5|5\\.6-(?:luna|terra|sol)|6-astra)") String visionModel,
+            @Pattern(regexp = "none|low|medium|high|xhigh|max") String visionReasoningEffort,
             @Pattern(regexp = "[A-Za-z0-9._:-]{1,200}") String threadId,
             @NotNull @Valid CapabilityProfileRequest capabilityProfile,
             @Size(max = 8) List<@Valid TeamMemberRequest> teamMembers,
@@ -297,6 +300,9 @@ public class RunController {
             return new StartRequest(
                     message.strip(),
                     model,
+                    reasoningEffort,
+                    visionModel,
+                    visionReasoningEffort,
                     threadId,
                     capabilityProfile.toService(),
                     members,
@@ -338,6 +344,9 @@ public class RunController {
             @NotNull ForkReplayMode replayMode,
             @Size(max = 100_000) @Pattern(regexp = "(?s).*\\S.*") String changeRequest,
             @Size(max = 200) String model,
+            @Pattern(regexp = "none|low|medium|high|xhigh|max") String reasoningEffort,
+            @Pattern(regexp = "gpt-(?:5\\.5|5\\.6-(?:luna|terra|sol)|6-astra)") String visionModel,
+            @Pattern(regexp = "none|low|medium|high|xhigh|max") String visionReasoningEffort,
             @Size(max = 8) List<@Valid TeamMemberRequest> teamMembers) {
 
         ForkRequest toServiceRequest() {
@@ -349,6 +358,9 @@ public class RunController {
                     replayMode,
                     changeRequest,
                     model,
+                    reasoningEffort,
+                    visionModel,
+                    visionReasoningEffort,
                     members);
         }
     }

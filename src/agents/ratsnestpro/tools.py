@@ -865,6 +865,12 @@ def _load_pipeline_state(
             "run_name already has a checkpoint for a different requirement or "
             "project_name; choose a new run_name"
         )
+    # Each Temporal Activity may run in a fresh process. Restore discovery of
+    # this run's evidenced local symbols before resolving checkpoint artifacts.
+    evidence_symbols = path.parent / "evidence-symbols"
+    if evidence_symbols.is_dir():
+        from ratsnestpro.eda.library_roots import register_generated_library_root
+        register_generated_library_root(evidence_symbols)
     artifacts = payload.get("intermediate_artifacts")
     steps = payload.get("steps")
     if not isinstance(artifacts, dict) or not isinstance(steps, list):
@@ -1227,6 +1233,9 @@ class _ToolkitLlmClient:
         self,
         model_name: str | None = None,
         model_type: str | None = None,
+        reasoning_effort: str | None = None,
+        vision_model_name: str | None = None,
+        vision_reasoning_effort: str | None = None,
         *,
         transcript_path: Path | None = None,
         phase: str = "hardware-engineer",
@@ -1256,9 +1265,36 @@ class _ToolkitLlmClient:
         self._model = get_model_for_purpose(
             selected_model,
             purpose=InferencePurpose.REASONING,
+            reasoning_effort=reasoning_effort,
         )
-        self._fallback_model = get_model(selected_model)
+        self._fallback_model = get_model(
+            selected_model,
+            reasoning_effort=reasoning_effort,
+        )
         self._model_name = getattr(selected_model, "value", str(selected_model))
+        vision_model = None
+        if vision_model_name:
+            vision_candidates = [
+                model
+                for model in settings.AVAILABLE_MODELS
+                if model.value == vision_model_name
+            ]
+            if len(vision_candidates) != 1:
+                raise ValueError(
+                    f"Vision model '{vision_model_name}' is unavailable or ambiguous."
+                )
+            vision_model = vision_candidates[0]
+        self._vision_model = (
+            get_model(vision_model, reasoning_effort=vision_reasoning_effort)
+            if vision_model is not None
+            else self._model
+        )
+        self._vision_fallback_model = self._vision_model
+        self._vision_model_name = (
+            getattr(vision_model, "value", str(vision_model))
+            if vision_model is not None
+            else self._model_name
+        )
         self._transcript_path = transcript_path
         self._phase = phase
         self._max_llm_tokens = max_llm_tokens
@@ -1283,7 +1319,14 @@ class _ToolkitLlmClient:
         if getattr(self, "_vision_unavailable", False):
             return self._complete(system, user + "\nVision unavailable: images were NOT inspected. Use geometric tools.")
         try:
-            return self._complete(system, user, images=images)
+            return self._complete(
+                system,
+                user,
+                images=images,
+                model=self._vision_model,
+                fallback_model=self._vision_fallback_model,
+                model_name=self._vision_model_name,
+            )
         except Exception as exc:
             detail = str(exc).casefold()
             if any(term in detail for term in ("image_url", "image input", "multimodal", "vision")) and any(
@@ -1293,7 +1336,16 @@ class _ToolkitLlmClient:
                 return self._complete(system, user + "\nProvider rejected vision input; images were NOT inspected. Use geometric tools.")
             raise
 
-    def _complete(self, system: str, user: str, *, images: list[str] | None = None) -> str:
+    def _complete(
+        self,
+        system: str,
+        user: str,
+        *,
+        images: list[str] | None = None,
+        model: Any | None = None,
+        fallback_model: Any | None = None,
+        model_name: str | None = None,
+    ) -> str:
         from langchain_core.messages import HumanMessage, SystemMessage
 
         content = ([{"type": "text", "text": user}, *[
@@ -1304,24 +1356,27 @@ class _ToolkitLlmClient:
         estimated_input = max(1, (len(system) + len(user)) // 4) + 4096 * len(images or [])
         if self._used_llm_tokens + estimated_input > self._max_llm_tokens:
             raise LlmError("LLM token budget exhausted before the next pipeline call")
+        active_model = model or self._model
+        active_fallback = fallback_model or self._fallback_model
+        active_model_name = model_name or self._model_name
         try:
-            response = self._model.invoke(messages)
+            response = active_model.invoke(messages)
         except Exception as exc:
             if _non_retryable_provider_failure(exc):
                 raise NonRetryableLlmError(
-                    _provider_failure_message(exc, self._model_name)
+                    _provider_failure_message(exc, active_model_name)
                 ) from exc
-            if self._model is self._fallback_model:
+            if active_model is active_fallback:
                 raise
             # A provider may not expose thinking on a particular endpoint or
             # model version. Preserve task completion with the established
             # non-thinking configuration instead of failing the pipeline.
             try:
-                response = self._fallback_model.invoke(messages)
+                response = active_fallback.invoke(messages)
             except Exception as fallback_exc:
                 if _non_retryable_provider_failure(fallback_exc):
                     raise NonRetryableLlmError(
-                        _provider_failure_message(fallback_exc, self._model_name)
+                        _provider_failure_message(fallback_exc, active_model_name)
                     ) from fallback_exc
                 raise
         usage = getattr(response, "usage_metadata", None)
@@ -1335,7 +1390,7 @@ class _ToolkitLlmClient:
             response,
             phase=self._phase,
             agent="Hardware Engineer" if "hardware" in self._phase else "Reviewer",
-            model=self._model_name,
+            model=active_model_name,
         )
         transcript_path = str(self._transcript_path) if self._transcript_path else None
         if self._transcript_path is not None:
@@ -2186,6 +2241,9 @@ def _run_pcb_pipeline_unlocked(
     llm_mode: LlmModeName = "auto",
     model_name: str | None = None,
     model_type: str | None = None,
+    reasoning_effort: str | None = None,
+    vision_model_name: str | None = None,
+    vision_reasoning_effort: str | None = None,
     *,
     until_step: str | None = None,
     external_retry_managed: bool = False,
@@ -2246,6 +2304,9 @@ def _run_pcb_pipeline_unlocked(
             else _ToolkitLlmClient(
                 model_name=model_name,
                 model_type=model_type,
+                reasoning_effort=reasoning_effort,
+                vision_model_name=vision_model_name,
+                vision_reasoning_effort=vision_reasoning_effort,
                 transcript_path=transcript_path,
                 phase=f"hardware-engineer:{pipeline_step or until_step or 'pipeline'}",
                 max_llm_tokens=max_llm_tokens,
@@ -2316,6 +2377,8 @@ def _run_pcb_pipeline_unlocked(
             "RATSNESTPRO_REPAIR_RELEASE_ISSUES",
             default=True,
         )
+        from agents.ratsnestpro.package_evidence import PackageEvidenceFetcher
+
         Pipeline().run(
             state,
             PipelineContext(
@@ -2324,6 +2387,9 @@ def _run_pcb_pipeline_unlocked(
                 out_dir=str(out),
                 approved_component_replacements=trusted_replacements,
                 internal_signing_secret=governance_secret,
+                package_evidence_fetcher=PackageEvidenceFetcher(
+                    out, visual_client=client if vision_model_name else None,
+                ),
                 # Release failures participate in the same bounded AHE ledger.
                 # Artifact-first still guarantees an editable draft, while
                 # deterministic ERC/DRC failures may now roll back to the
@@ -2827,6 +2893,9 @@ def ratsnest_run_pcb_pipeline(
     llm_mode: LlmModeName = "auto",
     model_name: str | None = None,
     model_type: str | None = None,
+    reasoning_effort: str | None = None,
+    vision_model_name: str | None = None,
+    vision_reasoning_effort: str | None = None,
     ahe_budget: dict[str, int] | None = None,
     approved_component_replacements: dict[str, Any] | None = None,
     resume_from_step: str | None = None,
@@ -2843,6 +2912,9 @@ def ratsnest_run_pcb_pipeline(
                 llm_mode=llm_mode,
                 model_name=model_name,
                 model_type=model_type,
+                reasoning_effort=reasoning_effort,
+                vision_model_name=vision_model_name,
+                vision_reasoning_effort=vision_reasoning_effort,
                 ahe_budget=ahe_budget,
                 approved_component_replacements=approved_component_replacements,
                 resume_from_step=resume_from_step,
@@ -2866,6 +2938,9 @@ def ratsnest_run_pcb_pipeline_until(
     llm_mode: LlmModeName = "auto",
     model_name: str | None = None,
     model_type: str | None = None,
+    reasoning_effort: str | None = None,
+    vision_model_name: str | None = None,
+    vision_reasoning_effort: str | None = None,
     ahe_budget: dict[str, int] | None = None,
     approved_component_replacements: dict[str, Any] | None = None,
     resume_from_step: str | None = None,
@@ -2889,6 +2964,9 @@ def ratsnest_run_pcb_pipeline_until(
                 llm_mode=llm_mode,
                 model_name=model_name,
                 model_type=model_type,
+                reasoning_effort=reasoning_effort,
+                vision_model_name=vision_model_name,
+                vision_reasoning_effort=vision_reasoning_effort,
                 until_step=until_step,
                 external_retry_managed=True,
                 ahe_budget=ahe_budget,
@@ -2913,6 +2991,9 @@ def ratsnest_review_kicad_project(
     llm_mode: LlmModeName = "offline",
     model_name: str | None = None,
     model_type: str | None = None,
+    reasoning_effort: str | None = None,
+    vision_model_name: str | None = None,
+    vision_reasoning_effort: str | None = None,
     upstream_release_ready: bool | None = None,
     upstream_release_blockers: list[str] | None = None,
     upstream_release_identity: dict[str, Any] | None = None,
@@ -3153,6 +3234,9 @@ def ratsnest_review_kicad_project(
                 client = _ToolkitLlmClient(
                     model_name=model_name,
                     model_type=model_type,
+                    reasoning_effort=reasoning_effort,
+                    vision_model_name=vision_model_name,
+                    vision_reasoning_effort=vision_reasoning_effort,
                     transcript_path=(project if project.is_dir() else project.parent)
                     / "llm_outputs-review.jsonl",
                     phase="reviewer",

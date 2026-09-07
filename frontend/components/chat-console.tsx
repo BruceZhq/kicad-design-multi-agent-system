@@ -8,6 +8,10 @@ import {
   requestedCapabilityProfile,
   runSubmissionMode,
 } from "@/lib/request-intent";
+import {
+  OPENAI_REASONING_EFFORTS,
+  OPENAI_VISION_MODELS,
+} from "@/lib/model-options";
 import { readSseStream } from "@/lib/sse";
 import {
   CapabilityProfileMetadata,
@@ -52,6 +56,9 @@ const THREAD_KEY = "ratsnest.thread-id";
 const ORGANIZATION_KEY = "ratsnest.organization-id";
 const PROJECT_KEY = "ratsnest.project-id";
 const MODEL_KEY = "ratsnest.model";
+const REASONING_EFFORT_KEY = "ratsnest.reasoning-effort";
+const VISION_MODEL_KEY = "ratsnest.vision-model";
+const VISION_REASONING_EFFORT_KEY = "ratsnest.vision-reasoning-effort";
 const PROFILE_KEY = "ratsnest.capability-profile";
 const MAX_RECONNECTS = 4;
 
@@ -289,6 +296,9 @@ function channelIncludes(message: DisplayMessage, channel: Channel): boolean {
 export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam: () => void }) {
   const [models, setModels] = useState<string[]>([]);
   const [model, setModel] = useState("");
+  const [reasoningEffort, setReasoningEffort] = useState("");
+  const [visionModel, setVisionModel] = useState("");
+  const [visionReasoningEffort, setVisionReasoningEffort] = useState("");
   const [profiles, setProfiles] = useState<CapabilityProfileMetadata[]>([]);
   const [profileReference, setProfileReference] = useState("");
   const [profileMigrationNotice, setProfileMigrationNotice] = useState<ProfileMigrationNotice | null>(null);
@@ -462,6 +472,21 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
         const available = Array.isArray(info.models) ? info.models : [];
         const stored = localStorage.getItem(MODEL_KEY);
         const selected = stored && available.includes(stored) ? stored : info.default_model;
+        const mainEfforts = OPENAI_REASONING_EFFORTS[selected] ?? [];
+        const storedEffort = localStorage.getItem(REASONING_EFFORT_KEY);
+        const selectedEffort = storedEffort && mainEfforts.includes(storedEffort)
+          ? storedEffort
+          : mainEfforts.includes("medium") ? "medium" : mainEfforts[0] ?? "";
+        const availableVision = OPENAI_VISION_MODELS.filter((item) => available.includes(item));
+        const storedVision = localStorage.getItem(VISION_MODEL_KEY);
+        const selectedVision = storedVision && availableVision.includes(storedVision)
+          ? storedVision
+          : "";
+        const visionEfforts = OPENAI_REASONING_EFFORTS[selectedVision] ?? [];
+        const storedVisionEffort = localStorage.getItem(VISION_REASONING_EFFORT_KEY);
+        const selectedVisionEffort = storedVisionEffort && visionEfforts.includes(storedVisionEffort)
+          ? storedVisionEffort
+          : visionEfforts.includes("medium") ? "medium" : visionEfforts[0] ?? "";
         const availableProfiles = Array.isArray(info.capability_profiles)
           ? info.capability_profiles
           : [];
@@ -471,6 +496,9 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
         );
         setModels(available);
         setModel(selected);
+        setReasoningEffort(selectedEffort);
+        setVisionModel(selectedVision);
+        setVisionReasoningEffort(selectedVisionEffort);
         setModelLoadState("ready");
         setProfiles(availableProfiles);
         setProfileReference(
@@ -884,6 +912,11 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
             body: JSON.stringify({
               message,
               model,
+              ...(!evaluationRun && reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+              ...(!evaluationRun && visionModel ? {
+                vision_model: visionModel,
+                vision_reasoning_effort: visionReasoningEffort,
+              } : {}),
               organization_id: workspace.organization.tenantId,
               project_id: workspace.project.projectId,
               thread_id: submissionThreadId,
@@ -1589,20 +1622,95 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
           <div className="sidebar-controls">
             <button className="new-conversation" type="button" onClick={createThread} disabled={!workspaceReady}><span>＋</span> 新建工程会话</button>
             <div className="model-control">
-              <div><label htmlFor="model-select">当前模型</label><span>LIVE</span></div>
+              <div><label htmlFor="model-select">完整模型</label><span>LIVE</span></div>
               <div className="select-shell">
                 <i aria-hidden="true">M</i>
                 <select
                   id="model-select"
                   value={model}
                   onChange={(event) => {
-                    setModel(event.target.value);
-                    localStorage.setItem(MODEL_KEY, event.target.value);
+                    const nextModel = event.target.value;
+                    const efforts = OPENAI_REASONING_EFFORTS[nextModel] ?? [];
+                    const nextEffort = efforts.includes("medium") ? "medium" : efforts[0] ?? "";
+                    setModel(nextModel);
+                    setReasoningEffort(nextEffort);
+                    localStorage.setItem(MODEL_KEY, nextModel);
+                    if (nextEffort) localStorage.setItem(REASONING_EFFORT_KEY, nextEffort);
+                    else localStorage.removeItem(REASONING_EFFORT_KEY);
                   }}
                   disabled={busy || models.length === 0 || Boolean(evaluationLaunch)}
                 >
                   {models.length === 0 && <option value="">{modelPlaceholder}</option>}
                   {models.map((item) => <option key={item} value={item}>{item}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="model-control">
+              <div><label htmlFor="reasoning-effort-select">完整模型推理强度</label><span>LLM</span></div>
+              <div className="select-shell">
+                <i aria-hidden="true">R</i>
+                <select
+                  id="reasoning-effort-select"
+                  value={reasoningEffort}
+                  onChange={(event) => {
+                    setReasoningEffort(event.target.value);
+                    localStorage.setItem(REASONING_EFFORT_KEY, event.target.value);
+                  }}
+                  disabled={busy || !(OPENAI_REASONING_EFFORTS[model]?.length) || Boolean(evaluationLaunch)}
+                >
+                  {!(OPENAI_REASONING_EFFORTS[model]?.length) && <option value="">提供方默认</option>}
+                  {(OPENAI_REASONING_EFFORTS[model] ?? []).map((item) => (
+                    <option key={item} value={item}>{item}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="model-control">
+              <div><label htmlFor="vision-model-select">视觉模型</label><span>CAD</span></div>
+              <div className="select-shell">
+                <i aria-hidden="true">V</i>
+                <select
+                  id="vision-model-select"
+                  value={visionModel}
+                  onChange={(event) => {
+                    const nextModel = event.target.value;
+                    const efforts = OPENAI_REASONING_EFFORTS[nextModel] ?? [];
+                    const nextEffort = efforts.includes("medium") ? "medium" : efforts[0] ?? "";
+                    setVisionModel(nextModel);
+                    setVisionReasoningEffort(nextEffort);
+                    if (nextModel) localStorage.setItem(VISION_MODEL_KEY, nextModel);
+                    else localStorage.removeItem(VISION_MODEL_KEY);
+                    if (nextEffort) localStorage.setItem(VISION_REASONING_EFFORT_KEY, nextEffort);
+                    else localStorage.removeItem(VISION_REASONING_EFFORT_KEY);
+                  }}
+                  disabled={busy || Boolean(evaluationLaunch)}
+                >
+                  <option value="">关闭（仅几何工具）</option>
+                  {OPENAI_VISION_MODELS.filter((item) => models.includes(item)).map((item) => (
+                    <option key={item} value={item}>
+                      {item}{item === "gpt-5.6-terra" ? "（推荐）" : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="model-control">
+              <div><label htmlFor="vision-effort-select">视觉推理强度</label><span>VISION</span></div>
+              <div className="select-shell">
+                <i aria-hidden="true">R</i>
+                <select
+                  id="vision-effort-select"
+                  value={visionReasoningEffort}
+                  onChange={(event) => {
+                    setVisionReasoningEffort(event.target.value);
+                    localStorage.setItem(VISION_REASONING_EFFORT_KEY, event.target.value);
+                  }}
+                  disabled={busy || !visionModel || Boolean(evaluationLaunch)}
+                >
+                  {!visionModel && <option value="">未启用视觉模型</option>}
+                  {(OPENAI_REASONING_EFFORTS[visionModel] ?? []).map((item) => (
+                    <option key={item} value={item}>{item}</option>
+                  ))}
                 </select>
               </div>
             </div>

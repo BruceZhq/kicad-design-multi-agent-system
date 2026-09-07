@@ -126,6 +126,11 @@ WorkflowMode = Literal[
     "unsupported",
 ]
 
+
+def _reasoning_effort(config: RunnableConfig) -> str | None:
+    value = config.get("configurable", {}).get("reasoning_effort")
+    return str(value) if value else None
+
 _MCU_RE = re.compile(
     r"\b(?:STM32[A-Z]{1,2}\d{3,4}[A-Z0-9]*(?![A-Z0-9-])|"
     r"RP\d{4}[A-Z0-9-]*|ESP32[A-Z0-9-]*|"
@@ -133,7 +138,7 @@ _MCU_RE = re.compile(
     r"SAMD\d+[A-Z0-9-]*|PIC\d+[A-Z0-9-]*|CH32[A-Z0-9-]*)\b",
     re.IGNORECASE,
 )
-_COMPONENT_RE = re.compile(r"\b(?=[A-Z0-9-]*[A-Z])(?=[A-Z0-9-]*\d)[A-Z][A-Z0-9-]{4,}\b")
+_COMPONENT_RE = re.compile(r"\b(?=[A-Z0-9.-]*[A-Z])(?=[A-Z0-9.-]*\d)[A-Z][A-Z0-9-]{4,}(?:\.[A-Z0-9-]+)*\b")
 _MCU_TOKEN_RE = re.compile(
     r"^(?:STM32|RP\d{4}|ESP32|ATMEGA|ATTINY|NRF|SAMD|PIC|CH32)",
     re.IGNORECASE,
@@ -462,7 +467,7 @@ async def _invoke_structured_with_json_fallback[SchemaT: BaseModel](
     timeout_seconds = settings.RATSNESTPRO_AGENT_CALL_TIMEOUT_SECONDS
     try:
         runnable = (
-            get_model(selected_model)
+            get_model(selected_model, reasoning_effort=_reasoning_effort(config))
             .with_structured_output(schema_type)
             .with_config(tags=["skip_stream"])
         )
@@ -494,6 +499,7 @@ async def _invoke_structured_with_json_fallback[SchemaT: BaseModel](
     plain_runnable = get_model_for_purpose(
         selected_model,
         purpose=InferencePurpose.REASONING,
+        reasoning_effort=_reasoning_effort(config),
     ).with_config(tags=["skip_stream"])
     plain_response = await await_with_deadline(
         plain_runnable.ainvoke([fallback_instruction, *messages], config),
@@ -754,7 +760,11 @@ async def _resolve_intent_impl(
 
     try:
         selected_model = configurable.get("model", settings.DEFAULT_MODEL)
-        model = get_model_for_purpose(selected_model, purpose=InferencePurpose.ROUTING)
+        model = get_model_for_purpose(
+            selected_model,
+            purpose=InferencePurpose.ROUTING,
+            reasoning_effort=_reasoning_effort(config),
+        )
         response = await await_with_deadline(
             asyncio.to_thread(
                 model.invoke,
@@ -2129,7 +2139,11 @@ async def _adaptive_conversation(
             )
         context_messages.append(HumanMessage(content=request[:20_000]))
         response = await await_with_deadline(
-            get_model_for_purpose(selected_model, purpose=InferencePurpose.CHAT)
+            get_model_for_purpose(
+                selected_model,
+                purpose=InferencePurpose.CHAT,
+                reasoning_effort=_reasoning_effort(config),
+            )
             .with_config(tags=["skip_stream"])
             .ainvoke(context_messages, config),
             timeout_seconds=settings.RATSNESTPRO_AGENT_CALL_TIMEOUT_SECONDS,
@@ -2895,6 +2909,7 @@ async def architect_phase(
                 get_model_for_purpose(
                     selected_model,
                     purpose=InferencePurpose.REASONING,
+                    reasoning_effort=_reasoning_effort(config),
                 )
                 .with_config(tags=["skip_stream"])
                 .ainvoke(
@@ -3088,6 +3103,7 @@ async def specialist_consultation_phase(
                 get_model_for_purpose(
                     selected_model,
                     purpose=InferencePurpose.REASONING,
+                    reasoning_effort=_reasoning_effort(config),
                 )
                 .with_config(tags=["skip_stream", "ratsnest-specialist-consultation"])
                 .ainvoke(
@@ -3241,7 +3257,14 @@ async def parts_phase(
             "evidence_sufficient": False,
             "procurement_claims_allowed": False,
         }
-        if knowledge.get("evidence_sufficient") is not True:
+        from agents.ratsnestpro.local_datasheets import find_document
+        local_datasheet = await asyncio.to_thread(find_document, query)
+        if local_datasheet is not None:
+            web_fallback.update(status="local_document", datasheet=local_datasheet,
+                                evidence_sufficient=True)
+            inner_messages.extend(_tool_messages("local_datasheet", {"identity": query},
+                                                json.dumps(local_datasheet)))
+        if local_datasheet is None and knowledge.get("evidence_sufficient") is not True:
             official_search_args = {
                 "query": (
                     f"{query} official manufacturer datasheet PDF pinout package "
@@ -3571,6 +3594,9 @@ def _parts_selection_evidence(parts: dict[str, Any]) -> dict[str, Any]:
                     "sources": official_sources,
                     "datasheet": {
                         "status": datasheet.get("status"),
+                        "source_sha256": datasheet.get("source_sha256"),
+                        "retrieval_method": datasheet.get("retrieval_method"),
+                        "provenance": datasheet.get("provenance"),
                         "source_url": str(datasheet.get("source_url", ""))[:1_000],
                         "authority": (
                             "official_manufacturer_datasheet"
@@ -3580,9 +3606,9 @@ def _parts_selection_evidence(parts: dict[str, Any]) -> dict[str, Any]:
                         "matched_pages": [
                             {
                                 "page": page.get("page"),
-                                "text": str(page.get("text", ""))[:1_000],
+                                "text": str(page.get("text", ""))[:12_000],
                             }
-                            for page in datasheet.get("matched_pages", [])[:2]
+                            for page in datasheet.get("matched_pages", [])[:8]
                             if isinstance(page, dict)
                         ],
                     },
@@ -4109,6 +4135,11 @@ async def hardware_dispatch_phase(
             else None
         ),
         "model_type": (type(selected_model).__name__ if selected_model is not None else None),
+        "reasoning_effort": _reasoning_effort(config),
+        "vision_model_name": config.get("configurable", {}).get("vision_model"),
+        "vision_reasoning_effort": config.get("configurable", {}).get(
+            "vision_reasoning_effort"
+        ),
         "attempt": _next_hardware_attempt_number(state.get("hardware_attempts", [])),
         "ahe_budget": _profile_ahe_budget(state),
         "approved_component_replacements": state.get(
@@ -4284,6 +4315,11 @@ async def reviewer_phase(
             else None
         ),
         "model_type": (type(selected_model).__name__ if selected_model is not None else None),
+        "reasoning_effort": _reasoning_effort(config),
+        "vision_model_name": config.get("configurable", {}).get("vision_model"),
+        "vision_reasoning_effort": config.get("configurable", {}).get(
+            "vision_reasoning_effort"
+        ),
     }
     if state.get("workflow_mode") == "build":
         hardware = state.get("hardware", {})
@@ -4795,6 +4831,10 @@ _REVIEWER_NODE = "sub-agent-ratsnest-reviewer"
 
 
 def _after_initialize(state: RatsNestWorkflowState) -> str:
+    if (state.get("workflow_mode") == "build" and state.get("incremental_resume")
+            and _release_repair_resume_step(state)):
+        # The durable engineering checkpoint outranks stale/absent role summaries.
+        return _HARDWARE_NODE
     if state.get("open_decisions"):
         return "intake_phase"
     if (
@@ -4893,6 +4933,8 @@ def _after_parts(state: RatsNestWorkflowState) -> str:
 
 
 def _after_hardware(state: RatsNestWorkflowState) -> str:
+    if _hardware_human_request(state):
+        return "hardware_evidence_input"
     target = (
         _REVIEWER_NODE
         if state.get("hardware", {}).get("review_candidate_ready")
@@ -4903,6 +4945,41 @@ def _after_hardware(state: RatsNestWorkflowState) -> str:
     else:
         _handoff_event("hardware-engineer", "supervisor", state.get("hardware", {}))
     return target
+
+
+def _hardware_human_request(state):
+    history = state.get("hardware", {}).get("ahe", {}).get("agentic_recovery", {}).get("history", [])
+    if history and history[-1].get("status") == "awaiting_human":
+        return history[-1]
+    return None
+
+
+async def hardware_evidence_input(state: RatsNestWorkflowState) -> dict[str, Any]:
+    request = _hardware_human_request(state)
+    if not request:
+        return {}
+    blockers = state.get("hardware", {}).get("release_blockers", [])
+    pin_details = []
+    evidence_root = _workspace_root() / "runs" / _workspace_run_name(state) / "technical-evidence"
+    for path in list(evidence_root.glob("local-*.json"))[:32]:
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+            for difference in document.get("pin_differences", [])[:20]:
+                pin_details.append(f"pin {difference['number']}: KiCad={difference['symbol_name']}; "
+                                   f"PDF={difference['observed_functions']}; page={difference.get('page')}")
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    identity = hashlib.sha256(json.dumps([_workspace_run_name(state), request.get("turn_id")]).encode()).hexdigest()[:32]
+    answer = interrupt({
+        "interactionId": identity, "kind": "clarification", "requestedBy": "hardware-engineer",
+        "stateVersion": int(request.get("revision", 0)) + 1,
+        "question": "工程证据仍未通过校验。请补充资料或完成资料登记后回复继续；回复不会跳过门禁。\n" +
+                    "\n".join(str(b) for b in blockers[:8]) + "\n" + "\n".join(pin_details[:20]),
+        "options": [], "allowFreeText": True,
+    })
+    # The response is not a replacement approval or evidence. The same
+    # checkpoint must revalidate actual registered documents after resumption.
+    return {"incremental_resume": True}
 
 
 def _after_review(state: RatsNestWorkflowState) -> str:
@@ -4973,6 +5050,8 @@ builder.add_node(_PARTS_NODE, ratsnestpro_parts_specialist)
 builder.add_node(_HARDWARE_NODE, ratsnestpro_hardware_engineer)
 builder.add_node(_REVIEWER_NODE, ratsnestpro_reviewer)
 builder.add_node("final_report", final_report)
+builder.add_node("hardware_evidence_input", hardware_evidence_input)
+builder.add_edge("hardware_evidence_input", _HARDWARE_NODE)
 
 builder.add_edge(START, _SUPERVISOR_NODE)
 builder.add_conditional_edges(_SUPERVISOR_NODE, _after_initialize)

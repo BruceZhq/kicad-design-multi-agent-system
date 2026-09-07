@@ -8,6 +8,9 @@ public record ForkRequest(
         ForkReplayMode replayMode,
         String changeRequest,
         String model,
+        String reasoningEffort,
+        String visionModel,
+        String visionReasoningEffort,
         List<TeamMember> teamMembers) {
 
     public ForkRequest {
@@ -17,5 +20,14 @@ public record ForkRequest(
                 ? null
                 : changeRequest.strip();
         teamMembers = teamMembers == null ? List.of() : List.copyOf(teamMembers);
+    }
+
+    public ForkRequest(
+            ProfileSelector capabilityProfile,
+            ForkReplayMode replayMode,
+            String changeRequest,
+            String model,
+            List<TeamMember> teamMembers) {
+        this(capabilityProfile, replayMode, changeRequest, model, null, null, null, teamMembers);
     }
 }

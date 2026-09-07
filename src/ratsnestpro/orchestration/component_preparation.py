@@ -760,6 +760,18 @@ _ACTIVE_ROLE_TOKENS = (
 
 def _controlled_generic_passive(part: SelectedPart) -> bool:
     library, _, name = part.symbol.partition(":")
+    # Generic indicators and dry contacts have intrinsic terminal semantics;
+    # a concrete MPN still requires independent package evidence.
+    if not _active_role_head(part.role):
+        if (library, name) in {("Device", "LED"), ("Switch", "SW_Push")}:
+            identities = {
+                part.value.casefold(), part.requested_identity.casefold(), part.mpn.casefold()
+            } - {""}
+            if identities and identities.issubset({
+                "led", "red", "green", "blue", "yellow", "white",
+                "sw_push", "push button", "button", "switch",
+            }):
+                return True
     # A functional owner is not a component type: mcu_decoupling and
     # ldo_output_capacitor are still capacitors. Match the physical primitive
     # and reference, then reject an explicitly active role head. Never infer
@@ -1213,6 +1225,21 @@ class ComponentPreparationService:
             for name, status in required_consistency
             if status not in {"verified", "not_applicable"}
         ]
+        if (
+            policy == "exact_component"
+            and library_pin_pad_ok
+            and not release_package_evidence
+            and resolution.release_ready
+        ):
+            # Missing independent evidence is not an observed pin mismatch.
+            # Preserve fail-closed readiness, but give recovery the right owner.
+            electrical_blockers = [
+                blocker for blocker in electrical_blockers
+                if blocker not in {
+                    "package_consistency_unverified", "pin_pad_consistency_failed"
+                }
+            ]
+            electrical_blockers.append("independent_package_evidence_missing")
         if mechanical_part:
             procurement_status: ReadinessStatus = "not_applicable"
             procurement_blockers: list[str] = []

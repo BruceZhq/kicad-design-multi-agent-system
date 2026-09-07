@@ -22,9 +22,41 @@ class OpenAIModelName(StrEnum):
     GPT_5_NANO = "gpt-5-nano"
     GPT_5_MINI = "gpt-5-mini"
     GPT_5_1 = "gpt-5.1"
+    GPT_5_5 = "gpt-5.5"
     GPT_56_LUNA = "gpt-5.6-luna"
     GPT_56_TERRA = "gpt-5.6-terra"
     GPT_56_SOL = "gpt-5.6-sol"
+    GPT_6_ASTRA = "gpt-6-astra"
+
+
+OPENAI_VISION_MODELS = frozenset(
+    {
+        OpenAIModelName.GPT_5_5,
+        OpenAIModelName.GPT_56_LUNA,
+        OpenAIModelName.GPT_56_TERRA,
+        OpenAIModelName.GPT_56_SOL,
+        OpenAIModelName.GPT_6_ASTRA,
+    }
+)
+
+OPENAI_REASONING_EFFORTS: dict[OpenAIModelName, tuple[str, ...]] = {
+    OpenAIModelName.GPT_5_5: ("none", "low", "medium", "high", "xhigh"),
+    OpenAIModelName.GPT_56_LUNA: ("none", "low", "medium", "high", "xhigh", "max"),
+    OpenAIModelName.GPT_56_TERRA: ("none", "low", "medium", "high", "xhigh", "max"),
+    OpenAIModelName.GPT_56_SOL: ("none", "low", "medium", "high", "xhigh", "max"),
+    OpenAIModelName.GPT_6_ASTRA: ("low", "medium", "high", "xhigh", "max"),
+}
+
+
+def validate_openai_reasoning_effort(
+    model: OpenAIModelName,
+    effort: str | None,
+) -> str | None:
+    if effort is None:
+        return None
+    if effort not in OPENAI_REASONING_EFFORTS.get(model, ()):
+        raise ValueError(f"reasoning effort '{effort}' is not supported by {model.value}")
+    return effort
 
 
 class AzureOpenAIModelName(StrEnum):

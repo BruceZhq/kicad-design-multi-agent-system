@@ -41,11 +41,13 @@ class EvolutionRolloutServiceTest {
         when(harness.require("new")).thenReturn(version);
         when(harness.rollout("production")).thenReturn(new HarnessRollout(
                 "production", "old", null, "new", 10, 3, "admin", Instant.now()));
-        when(trial.candidateImageDigest()).thenReturn(version.runtimeImageDigest());
+        var runtimeImageDigest = version.runtimeImageDigest();
+        var manifestDigest = version.manifestDigest();
+        when(trial.candidateImageDigest()).thenReturn(runtimeImageDigest);
         when(trial.guardrailResults()).thenReturn(Map.of(
                 "canaryArtifactsBound", true, "canaryHarnessVersionId", "new",
                 "canaryRolloutId", "production", "canaryStartedAt", "2026-09-05T00:00:00Z",
-                "artifactManifestDigest", version.manifestDigest()));
+                "artifactManifestDigest", manifestDigest));
         return new EvolutionRolloutService(harness, mock(HarnessVersionRepository.class), store, mapper,
                 new RuntimeVersionRoutes(mapper, "{}"), "production", 10, 5);
     }

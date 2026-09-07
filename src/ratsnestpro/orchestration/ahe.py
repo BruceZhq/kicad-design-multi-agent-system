@@ -218,6 +218,7 @@ class RecoveryTurnRecord(ContractModel):
         "error",
         "exhausted",
         "terminal",
+        "awaiting_human",
     ] = "planned"
     before_score: tuple[int, int, int] = (0, 0, 0)
     after_score: tuple[int, int, int] | None = None

@@ -49,6 +49,8 @@ dependencies = [
     "temporalio ~=1.30.0",
     "uvicorn ~=0.51.0",
     "ddgs>=9.14.4",
+    "pypdfium2>=4.30,<6",
+    "pillow>=11,<13",
 ]
 
 # Supply-chain cooldown: resolution only considers releases >=7 days old. Needs the

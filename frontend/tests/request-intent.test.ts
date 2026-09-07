@@ -9,6 +9,18 @@ const profile10 = {
   digest: "a".repeat(64),
 };
 
+test("negated new project preserves the current conversation and base run", () => {
+  for (const message of [
+    "继续原任务，从原检查点恢复，不新建工程，沿用原始需求和已确认参数。",
+    "继续原任务，不要新建一个 KiCad 工程。",
+    "Resume the PCB task. Do not start a new project.",
+    "Continue without a new project.",
+  ]) {
+    assert.equal(runSubmissionMode(message, profile10, profile10), "revision", message);
+  }
+  assert.equal(runSubmissionMode("不要继续旧任务。新建一个 KiCad 工程。", profile10, profile10), "explicit-new-project");
+});
+
 test("keeps a revision only on the exact immutable profile snapshot", () => {
   assert.equal(runSubmissionMode("重新执行布局步骤", profile10, profile10), "revision");
   assert.equal(runSubmissionMode("开始任务", profile10, undefined), "initial");

@@ -1,12 +1,14 @@
 """Failure-tolerant web research tools for the RatsNestPro agents."""
 
 import io
+import hashlib
 import ipaddress
 import json
 import logging
 import re
 import socket
 from typing import Any
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -422,22 +424,51 @@ def _read_datasheet_via_text_proxy(
     }
 
 
-def _read_datasheet(url: str, query: str, max_pages: int) -> dict[str, Any]:
+def _read_datasheet(
+    url: str, query: str, max_pages: int, *, document_store: Path | None = None,
+) -> dict[str, Any]:
     pdf_bytes, final_url = _download_pdf(url)
+    return _parse_datasheet_pdf(pdf_bytes, final_url, query, max_pages, document_store=document_store)
+
+
+def _parse_datasheet_pdf(pdf_bytes: bytes, final_url: str, query: str, max_pages: int,
+                         *, document_store: Path | None = None) -> dict[str, Any]:
+    if not pdf_bytes.startswith(b"%PDF-") or len(pdf_bytes) > _MAX_PDF_BYTES:
+        raise ValueError("Invalid or oversized PDF")
+    if document_store is not None:
+        document_store.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(pdf_bytes).hexdigest()
+        target = document_store / (digest + ".pdf")
+        if not target.exists():
+            temporary = target.with_suffix(".tmp")
+            temporary.write_bytes(pdf_bytes)
+            temporary.replace(target)
     reader = PdfReader(io.BytesIO(pdf_bytes))
     terms = _query_terms(query)
     ranked_pages: list[tuple[int, int, str]] = []
     for page_number, page in enumerate(reader.pages, start=1):
-        text = page.extract_text() or ""
+        # Preserve columns for package-specific pin tables. Ordinary text remains
+        # the fallback for PDFs whose layout extraction is unsupported.
+        try:
+            text = page.extract_text(extraction_mode="layout") or ""
+        except (TypeError, ValueError):
+            text = page.extract_text() or ""
         score = _page_score(text, terms)
         if score > 0:
             ranked_pages.append((score, page_number, text))
 
     ranked_pages.sort(key=lambda item: (-item[0], item[1]))
     selected = ranked_pages[:max_pages]
+    ordering = next((item for item in ranked_pages
+                     if "ordering information" in item[2][:700].casefold()
+                     and "contents" not in item[2][:700].casefold()), None)
+    if ordering is not None and ordering not in selected and selected:
+        selected[-1] = ordering
     return {
         "status": "ok" if selected else "no_matches",
         "source_url": final_url,
+        "source_sha256": hashlib.sha256(pdf_bytes).hexdigest(),
+        "retrieval_method": "direct_pdf",
         "document_pages": len(reader.pages),
         "query": query,
         "matched_pages": [

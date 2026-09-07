@@ -514,7 +514,14 @@ async def _single_agent_node(
     selected_model = config.get("configurable", {}).get("model", settings.DEFAULT_MODEL)
     # Keep provider-specific tool history out of the planning request. The real
     # transcript is still returned below for UI telemetry and paired metrics.
-    runnable = get_model(selected_model).with_structured_output(
+    runnable = get_model(
+        selected_model,
+        reasoning_effort=(
+            str(configurable["reasoning_effort"])
+            if configurable.get("reasoning_effort")
+            else None
+        ),
+    ).with_structured_output(
         _SingleAgentPlan,
         method="function_calling",
     )
@@ -569,6 +576,21 @@ async def _single_agent_node(
         llm_mode="required",
         model_name=getattr(selected_model, "value", str(selected_model)),
         model_type=type(selected_model).__name__,
+        reasoning_effort=(
+            str(configurable["reasoning_effort"])
+            if configurable.get("reasoning_effort")
+            else None
+        ),
+        vision_model_name=(
+            str(configurable["vision_model"])
+            if configurable.get("vision_model")
+            else None
+        ),
+        vision_reasoning_effort=(
+            str(configurable["vision_reasoning_effort"])
+            if configurable.get("vision_reasoning_effort")
+            else None
+        ),
         attempt=1,
         ahe_budget=_profile_budget(capability_profile),
         tenant_scope=str(configurable.get("tenant_scope", "")),

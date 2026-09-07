@@ -235,6 +235,21 @@ def _manifest(command: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
         "model_type": (
             str(command["model_type"]) if command.get("model_type") else None
         ),
+        "reasoning_effort": (
+            str(command["reasoning_effort"])
+            if command.get("reasoning_effort")
+            else None
+        ),
+        "vision_model_name": (
+            str(command["vision_model_name"])
+            if command.get("vision_model_name")
+            else None
+        ),
+        "vision_reasoning_effort": (
+            str(command["vision_reasoning_effort"])
+            if command.get("vision_reasoning_effort")
+            else None
+        ),
         "ahe_budget": (
             dict(command["ahe_budget"])
             if isinstance(command.get("ahe_budget"), dict)

@@ -215,7 +215,14 @@ def _post_actions(text: str, *, has_review: bool) -> list[PostAction]:
 def requests_new_context(text: str) -> bool:
     """Return whether the user explicitly requested a fresh workflow context."""
 
-    return bool(_EXPLICIT_NEW_CONTEXT_RE.search(text))
+    for match in _EXPLICIT_NEW_CONTEXT_RE.finditer(text):
+        prefix = text[max(0, match.start() - 45):match.start()]
+        if re.search(r"(?:不|不要|不得|禁止|无需|别)(?:再|重新|另外|另行)?\s*$|"
+                     r"\b(?:do\s+not|don't|must\s+not|without|never|no)\s+(?:start\s+(?:a\s+)?|create\s+(?:a\s+)?)?$",
+                     prefix, re.I):
+            continue
+        return True
+    return False
 
 
 def unwrap_revision_envelope(text: str) -> tuple[str, bool]:

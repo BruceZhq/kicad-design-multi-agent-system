@@ -23,6 +23,7 @@ from schema.models import (
     OllamaModelName,
     OpenAICompatibleName,
     OpenAIModelName,
+    validate_openai_reasoning_effort,
     OpenRouterModelName,
     VertexAIModelName,
 )
@@ -92,10 +93,11 @@ def get_model_for_purpose(
     /,
     *,
     purpose: InferencePurpose = InferencePurpose.REASONING,
+    reasoning_effort: str | None = None,
 ) -> ModelT:
     endpoint = _purpose_endpoint(purpose)
     if endpoint is None:
-        return get_model_for_plain_call(model_name)
+        return get_model_for_plain_call(model_name, reasoning_effort=reasoning_effort)
     base_url, model, api_key = endpoint
     return ChatOpenAI(
         model=model,
@@ -104,11 +106,17 @@ def get_model_for_purpose(
         api_key=api_key,
         timeout=60,
         max_retries=3,
+        **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),
     )
 
 
 @cache
-def get_model(model_name: AllModelEnum | None, /) -> ModelT:
+def get_model(
+    model_name: AllModelEnum | None,
+    /,
+    *,
+    reasoning_effort: str | None = None,
+) -> ModelT:
     # NOTE: models with streaming=True will send tokens as they are generated
     # if the /stream endpoint is called with stream_tokens=True (the default)
     if model_name is None:
@@ -121,7 +129,14 @@ def get_model(model_name: AllModelEnum | None, /) -> ModelT:
         raise ValueError(f"Unsupported model: {model_name}")
 
     if model_name in OpenAIModelName:
-        return ChatOpenAI(model=api_model_name, streaming=True)
+        effort = validate_openai_reasoning_effort(model_name, reasoning_effort)
+        return ChatOpenAI(
+            model=api_model_name,
+            streaming=True,
+            **({"reasoning_effort": effort} if effort else {}),
+        )
+    if reasoning_effort is not None:
+        raise ValueError("reasoning_effort is only supported for native OpenAI models")
     if model_name in OpenAICompatibleName:
         if not settings.COMPATIBLE_BASE_URL or not settings.COMPATIBLE_MODEL:
             raise ValueError("OpenAICompatible base url and endpoint must be configured")
@@ -210,7 +225,12 @@ def get_model(model_name: AllModelEnum | None, /) -> ModelT:
 
 
 @cache
-def get_model_for_plain_call(model_name: AllModelEnum | None, /) -> ModelT:
+def get_model_for_plain_call(
+    model_name: AllModelEnum | None,
+    /,
+    *,
+    reasoning_effort: str | None = None,
+) -> ModelT:
     """Return a reasoning-capable model for calls that never enter a tool loop.
 
     DeepSeek thinking responses must be replayed on later tool-call turns.  The
@@ -219,7 +239,9 @@ def get_model_for_plain_call(model_name: AllModelEnum | None, /) -> ModelT:
     """
 
     if not isinstance(model_name, DeepseekModelName):
-        return get_model(model_name)
+        return get_model(model_name, reasoning_effort=reasoning_effort)
+    if reasoning_effort is not None:
+        raise ValueError("reasoning_effort is only supported for native OpenAI models")
     if not settings.DEEPSEEK_API_KEY:
         raise ValueError("DeepSeek API key must be configured")
     api_model_name = _MODEL_TABLE[model_name]

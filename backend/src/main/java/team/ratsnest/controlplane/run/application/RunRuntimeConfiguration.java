@@ -29,6 +29,20 @@ class RunRuntimeConfiguration {
             String agentId,
             Map<String, String> evaluationContext) {
         return create(
+                teamMembers, profile, harness, agentId, evaluationContext,
+                null, null, null);
+    }
+
+    Map<String, Object> create(
+            List<TeamMember> teamMembers,
+            CapabilityProfile profile,
+            HarnessSelection harness,
+            String agentId,
+            Map<String, String> evaluationContext,
+            String reasoningEffort,
+            String visionModel,
+            String visionReasoningEffort) {
+        return create(
                 teamMembers,
                 profile.id(),
                 profile.version(),
@@ -36,7 +50,10 @@ class RunRuntimeConfiguration {
                 harness.version(),
                 harness.channel(),
                 agentId,
-                evaluationContext);
+                evaluationContext,
+                reasoningEffort,
+                visionModel,
+                visionReasoningEffort);
     }
 
     Map<String, Object> create(
@@ -54,7 +71,10 @@ class RunRuntimeConfiguration {
                 harness,
                 harnessChannel,
                 null,
-                Map.of());
+                Map.of(),
+                null,
+                null,
+                null);
     }
 
     Map<String, Object> create(
@@ -66,6 +86,23 @@ class RunRuntimeConfiguration {
             String harnessChannel,
             String agentId,
             Map<String, String> evaluationContext) {
+        return create(
+                teamMembers, profileId, profileVersion, profileDigest, harness,
+                harnessChannel, agentId, evaluationContext, null, null, null);
+    }
+
+    Map<String, Object> create(
+            List<TeamMember> teamMembers,
+            String profileId,
+            String profileVersion,
+            String profileDigest,
+            HarnessVersion harness,
+            String harnessChannel,
+            String agentId,
+            Map<String, String> evaluationContext,
+            String reasoningEffort,
+            String visionModel,
+            String visionReasoningEffort) {
         List<Map<String, Object>> members = teamMembers.stream()
                 .map(member -> Map.<String, Object>of(
                         "role_id", member.roleId(),
@@ -93,6 +130,15 @@ class RunRuntimeConfiguration {
         }
         if (evaluationContext != null && !evaluationContext.isEmpty()) {
             config.put("evaluation_context", Map.copyOf(evaluationContext));
+        }
+        if (reasoningEffort != null) {
+            config.put("reasoning_effort", reasoningEffort);
+        }
+        if (visionModel != null) {
+            config.put("vision_model", visionModel);
+        }
+        if (visionReasoningEffort != null) {
+            config.put("vision_reasoning_effort", visionReasoningEffort);
         }
         return Map.copyOf(config);
     }
