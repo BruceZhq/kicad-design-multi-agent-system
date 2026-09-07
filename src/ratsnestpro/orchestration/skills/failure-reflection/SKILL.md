@@ -39,6 +39,14 @@ Return an auditable summary containing failure origin, decisive evidence, status
 
 ## Rules
 
+### Congested PCB routing
+
+- Distinguish a search timeout from an endpoint with no legal escape. More retries cannot free a physically enclosed pad. Inspect exact pad corners, existing tracks/vias, both copper layers, and the connected copper island; a DRC endpoint is only an island representative.
+- For adjacent fine-pitch pins, plan their escapes together: stagger vias and reserve each neighbor's exit before routing trunks. A locally successful escape that traps its neighbor is not a complete solution. Use a fingerprint-bound CAD action batch and judge the complete candidate after zone refill and DRC.
+- If a passive component is trapped, request a bounded placement-owned patch for that component and reconnect its affected nets. Preserve unaffected copper and the verified schematic; do not restart selection or regenerate the entire placement to fix one endpoint.
+- If closing a signal disconnects a ground pour, inspect the actual filled islands and their functional pads. Repair the island as part of the same candidate. A via in the same disconnected island is not a bridge. Never delete a required ground pad or ignore the new ground gap.
+- Treat redundant vias and the dead stubs they leave behind as a compound cleanup. For same-net drill overlap, merge the drill and preserve its layer connections. Refill and verify zero new errors, preserved connectivity, and fewer warnings before accepting; do not waive a fabrication defect.
+
 - Never weaken, suppress, rename, or skip a requirement or gate to improve a score.
 - Never authorize a capability absent from this skill and the runtime permission set.
 - If the artifact fingerprint, failed-check signature, and convergence score are unchanged, the same action is exhausted. Select a different hypothesis or terminal direction.

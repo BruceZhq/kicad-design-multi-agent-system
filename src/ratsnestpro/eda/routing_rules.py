@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 
 try:
@@ -47,13 +48,19 @@ def persist_project_classes(pcb: Path, classes: list[dict]) -> None:
     path = pcb.with_suffix(".kicad_pro")
     project = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     settings = project.setdefault("net_settings", {})
+    if settings is None:
+        settings = project["net_settings"] = {}
     names = {"RN:" + c["name"] for c in classes}
-    rows = [row for row in settings.get("classes", []) if row.get("name") not in names]
+    rows = [row for row in (settings.get("classes") or []) if row.get("name") not in names]
     for item in classes:
         rows.append({"name": "RN:" + item["name"], "track_width": item["width"],
                      "clearance": item["clearance"], "via_diameter": item["via_diameter"],
                      "via_drill": item["via_drill"]})
     assignments = settings.setdefault("netclass_assignments", {})
+    # KiCad serializes an empty assignment map as JSON null. setdefault does
+    # not replace an existing null; normalize only that valid empty state.
+    if assignments is None:
+        assignments = settings["netclass_assignments"] = {}
     for item in classes:
         for net in item["nets"]:
             assignments[net] = ["RN:" + item["name"]]
@@ -62,13 +69,26 @@ def persist_project_classes(pcb: Path, classes: list[dict]) -> None:
 
 
 def apply_dsn_classes(path: Path, classes: list[dict], *, only_nets: set[str] | None = None) -> None:
-    root = loads(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    # Specctra declares the quote character as a bare token: (string_quote ").
+    # It is not an unterminated KiCad string. Normalize this declaration only,
+    # then restore its exact dialect when serializing the DSN.
+    text = re.sub(r'(?m)^(\s*)\(string_quote\s+"\s*\)',
+                  r'\1(string_quote __RNP_DSN_QUOTE__)', text)
+    root = loads(text)
+    parser = find_first(root, "parser")
+    quote = find_first(parser, "string_quote") if parser else None
+    if quote and str(quote[1]) == "__RNP_DSN_QUOTE__":
+        quote[1] = Atom('"')
     network, library = find_first(root, "network"), find_first(root, "library")
     resolution = find_first(root, "resolution")
     if network is None or library is None or resolution is None:
         raise ValueError("DSN lacks network, library or resolution")
     units = {"mm": 1.0, "um": 1000.0, "mil": 1000.0 / 25.4, "inch": 1.0 / 25.4}
-    scale = units[str(resolution[1])] * float(str(resolution[2]))
+    # The resolution number is precision within the declared unit, not a
+    # multiplier for coordinates/rules. KiCad exports a 70 mm edge as 70000
+    # with (resolution um 10), and a 0.4 mm track as width 400, not 4000.
+    scale = units[str(resolution[1])]
     available = {str(node[1]) for node in network[1:] if tag_of(node) == "net"}
     required = {name for c in classes for name in c["nets"]}
     if required - available:
@@ -101,4 +121,6 @@ def apply_dsn_classes(path: Path, classes: list[dict], *, only_nets: set[str] | 
                         [Atom("circuit"), [Atom("use_via"), via_name]],
                         [Atom("rule"), [Atom("width"), Atom(str(item["width"] * scale))],
                          [Atom("clearance"), Atom(str(item["clearance"] * scale))]]])
-    path.write_text(dumps(root), encoding="utf-8")
+    # Specctra readers expect scalar scope headers (e.g. layer F.Cu) together;
+    # the KiCad pretty printer puts each scalar on a separate line.
+    path.write_text(dumps(root, pretty=False), encoding="utf-8")

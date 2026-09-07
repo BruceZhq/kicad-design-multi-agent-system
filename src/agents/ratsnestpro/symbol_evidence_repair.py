@@ -6,11 +6,95 @@ can change a pin's name/type; all other pins retain their installed definition.
 import hashlib
 import json
 import re
+from functools import lru_cache
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse
 
+from pypdf.errors import PyPdfError
+
 from agents.ratsnestpro.pin_evidence import functions, pin_differences
 from ratsnestpro.eda import symbols
+
+
+@lru_cache(maxsize=32)
+def _repair_document_rows(path: str, digest: str, package: str, pages: tuple[int, ...]):
+    """Cache parsing, not trust: callers rehash the current document each time."""
+    from pypdf import PdfReader
+
+    content = Path(path).read_bytes()
+    if hashlib.sha256(content).hexdigest() != digest:
+        raise ValueError("repair document changed")
+    reader = PdfReader(BytesIO(content))
+    return {
+        number: table_pin_rows(
+            reader.pages[number - 1].extract_text(extraction_mode="layout") or "",
+            reader.pages[number - 1].extract_text() or "", package,
+        )
+        for number in pages
+    }
+
+
+def verified_repair_source(lib_id: str) -> str:
+    """Recover the installed family only from a revalidated pin-repair receipt.
+
+    A generated namespace or user-written Description alone grants no family.
+    The live pins must equal the original, except for uniquely PDF-proven rows.
+    This also supports existing receipts without rewriting locked libraries.
+    """
+    if not lib_id.startswith("RatsNestGenerated:"):
+        return ""
+    path = symbols.resolve_symbol(lib_id)
+    if path is None:
+        return ""
+    evidence_dir = path.parent.parent / "technical-evidence"
+    for receipt_path in evidence_dir.glob("*-symbol-repair.json"):
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            if receipt.get("replacement_symbol") != lib_id:
+                continue
+            source = receipt["original_symbol"]
+            if source.startswith("RatsNestGenerated:"):
+                continue
+            digest = receipt["document_sha256"]
+            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                continue
+            pdf = evidence_dir / (digest + ".pdf")
+            if hashlib.sha256(pdf.read_bytes()).hexdigest() != digest:
+                continue
+            old = symbols.symbol_pins(source) or []
+            live = symbols.symbol_pins(lib_id) or []
+            expected = {r["number"]: (r["name"], r["type"]) for r in old}
+            actual = {r["number"]: (r["name"], r["type"]) for r in live}
+            if not expected or len(expected) != len(old) or len(actual) != len(live):
+                continue
+            footprint = symbols.symbol_properties(lib_id).get("Footprint", "")
+            match = re.search(r"(?:LQFP|TQFP|QFN|TSSOP|SOIC)[-_]?\d+", footprint, re.I)
+            if not match:
+                continue
+            package = re.sub(r"\W", "", match.group()).lower()
+            changes = receipt["pin_changes"]
+            if not changes:
+                continue
+            pages = tuple(sorted({change["page"] for change in changes.values()}))
+            if not pages or pages[0] < 1:
+                continue
+            evidence_rows = _repair_document_rows(str(pdf), digest, package, pages)
+            for number, change in changes.items():
+                if number not in expected or change["page"] < 1:
+                    raise ValueError("invalid repair row")
+                rows = evidence_rows[change["page"]]
+                matched = [r for r in rows if r["number"] == number]
+                if len(matched) != 1 or any(
+                    matched[0][key] != change[key] for key in ("name", "type")
+                ) or change["type"] == "no_connect":
+                    raise ValueError("repair row lacks unique document evidence")
+                expected[number] = (change["name"], change["type"])
+            if expected == actual:
+                return source
+        except (OSError, ValueError, KeyError, TypeError, IndexError, PyPdfError):
+            continue
+    return ""
 
 
 def table_pin_rows(layout: str, plain: str, package: str):
@@ -37,6 +121,7 @@ def table_pin_rows(layout: str, plain: str, package: str):
 
 def repair_symbol(part, document: dict, workspace: Path):
     from pypdf import PdfReader
+
     from ratsnestpro.eda.local_library import generate_local_symbol_library
     table = document.get("visual_pin_table")
     rows = symbols.symbol_pins(part.symbol) or []

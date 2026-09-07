@@ -1,0 +1,561 @@
+(kicad_symbol_lib
+	(version 20231120)
+	(generator "kicad-mcp-py")
+	(symbol
+		"STM32G070RBT6_4f576ebdf1"
+		(in_bom yes)
+		(on_board yes)
+		(property
+			"Reference"
+			"U"
+			(at 0 0 0)
+		)
+		(property
+			"Value"
+			"STM32G070RBT6"
+			(at 0 0 0)
+		)
+		(property
+			"Footprint"
+			"Package_QFP:LQFP-64_10x10mm_P0.5mm"
+			(at 0 0 0)
+		)
+		(property
+			"Datasheet"
+			"https://www.st.com/resource/en/datasheet/stm32g070rb.pdf"
+			(at 0 0 0)
+		)
+		(property
+			"Description"
+			"STM32G070RBT6; official source 9b3d197e88347be96d55a07dfca6f7802a85a5de68d94d4821c62404445a5222 pages 9,29,30,33,84,87,91,94,96; reuses Package_QFP:LQFP-64_10x10mm_P0.5mm"
+			(at 0 0 0)
+		)
+		(symbol
+			"STM32G070RBT6_4f576ebdf1_1_1"
+			(rectangle
+				(start -3.81 40.64)
+				(end 3.81 -40.64)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type background)
+				)
+			)
+			(pin
+				input
+				line
+				(at -5.08 39.37 0)
+				(length 2.54)
+				(name "NRST")
+				(number "12")
+			)
+			(pin
+				input
+				line
+				(at -5.08 36.83 0)
+				(length 2.54)
+				(name "VREF+")
+				(number "7")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 34.29 0)
+				(length 2.54)
+				(name "PF0")
+				(number "10")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 31.75 0)
+				(length 2.54)
+				(name "PF1")
+				(number "11")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 29.21 0)
+				(length 2.54)
+				(name "PD0")
+				(number "50")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 26.67 0)
+				(length 2.54)
+				(name "PD1")
+				(number "51")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 24.13 0)
+				(length 2.54)
+				(name "PD2")
+				(number "52")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 21.59 0)
+				(length 2.54)
+				(name "PD3")
+				(number "53")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 19.05 0)
+				(length 2.54)
+				(name "PD4")
+				(number "54")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 16.51 0)
+				(length 2.54)
+				(name "PD5")
+				(number "55")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 13.97 0)
+				(length 2.54)
+				(name "PD6")
+				(number "56")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 11.43 0)
+				(length 2.54)
+				(name "PD8")
+				(number "40")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 8.89 0)
+				(length 2.54)
+				(name "PD9")
+				(number "41")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 6.35 0)
+				(length 2.54)
+				(name "PC0")
+				(number "13")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 3.81 0)
+				(length 2.54)
+				(name "PC1")
+				(number "14")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 1.27 0)
+				(length 2.54)
+				(name "PC2")
+				(number "15")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 -1.27 0)
+				(length 2.54)
+				(name "PC3")
+				(number "16")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 -3.81 0)
+				(length 2.54)
+				(name "PC4")
+				(number "25")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 -6.35 0)
+				(length 2.54)
+				(name "PC5")
+				(number "26")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 -8.89 0)
+				(length 2.54)
+				(name "PC6")
+				(number "38")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 -11.43 0)
+				(length 2.54)
+				(name "PC7")
+				(number "39")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 -13.97 0)
+				(length 2.54)
+				(name "PC8")
+				(number "48")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 -16.51 0)
+				(length 2.54)
+				(name "PC9")
+				(number "49")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 -19.05 0)
+				(length 2.54)
+				(name "PC10")
+				(number "64")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 -21.59 0)
+				(length 2.54)
+				(name "PC11")
+				(number "1")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 -24.13 0)
+				(length 2.54)
+				(name "PC12")
+				(number "2")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 -26.67 0)
+				(length 2.54)
+				(name "PC13")
+				(number "3")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 -29.21 0)
+				(length 2.54)
+				(name "PC14")
+				(number "4")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 -31.75 0)
+				(length 2.54)
+				(name "PC15")
+				(number "5")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 -34.29 0)
+				(length 2.54)
+				(name "PA10")
+				(number "42")
+			)
+			(pin
+				bidirectional
+				line
+				(at -5.08 -36.83 0)
+				(length 2.54)
+				(name "PA9")
+				(number "37")
+			)
+			(pin
+				power_in
+				line
+				(at -5.08 -39.37 0)
+				(length 2.54)
+				(name "VBAT")
+				(number "6")
+			)
+			(pin
+				power_in
+				line
+				(at 5.08 39.37 180)
+				(length 2.54)
+				(name "VSS")
+				(number "9")
+			)
+			(pin
+				power_in
+				line
+				(at 5.08 36.83 180)
+				(length 2.54)
+				(name "VDD")
+				(number "8")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 34.29 180)
+				(length 2.54)
+				(name "PA0")
+				(number "17")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 31.75 180)
+				(length 2.54)
+				(name "PA1")
+				(number "18")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 29.21 180)
+				(length 2.54)
+				(name "PA2")
+				(number "19")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 26.67 180)
+				(length 2.54)
+				(name "PA3")
+				(number "20")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 24.13 180)
+				(length 2.54)
+				(name "PA4")
+				(number "21")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 21.59 180)
+				(length 2.54)
+				(name "PA5")
+				(number "22")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 19.05 180)
+				(length 2.54)
+				(name "PA6")
+				(number "23")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 16.51 180)
+				(length 2.54)
+				(name "PA7")
+				(number "24")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 13.97 180)
+				(length 2.54)
+				(name "PA8")
+				(number "36")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 11.43 180)
+				(length 2.54)
+				(name "PA9/PA11")
+				(number "43")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 8.89 180)
+				(length 2.54)
+				(name "PA10/PA12")
+				(number "44")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 6.35 180)
+				(length 2.54)
+				(name "PA13")
+				(number "45")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 3.81 180)
+				(length 2.54)
+				(name "PA14")
+				(number "46")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 1.27 180)
+				(length 2.54)
+				(name "PA15")
+				(number "47")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 -1.27 180)
+				(length 2.54)
+				(name "PB0")
+				(number "27")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 -3.81 180)
+				(length 2.54)
+				(name "PB1")
+				(number "28")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 -6.35 180)
+				(length 2.54)
+				(name "PB2")
+				(number "29")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 -8.89 180)
+				(length 2.54)
+				(name "PB3")
+				(number "57")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 -11.43 180)
+				(length 2.54)
+				(name "PB4")
+				(number "58")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 -13.97 180)
+				(length 2.54)
+				(name "PB5")
+				(number "59")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 -16.51 180)
+				(length 2.54)
+				(name "PB6")
+				(number "60")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 -19.05 180)
+				(length 2.54)
+				(name "PB7")
+				(number "61")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 -21.59 180)
+				(length 2.54)
+				(name "PB8")
+				(number "62")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 -24.13 180)
+				(length 2.54)
+				(name "PB9")
+				(number "63")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 -26.67 180)
+				(length 2.54)
+				(name "PB10")
+				(number "30")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 -29.21 180)
+				(length 2.54)
+				(name "PB11")
+				(number "31")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 -31.75 180)
+				(length 2.54)
+				(name "PB12")
+				(number "32")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 -34.29 180)
+				(length 2.54)
+				(name "PB13")
+				(number "33")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 -36.83 180)
+				(length 2.54)
+				(name "PB14")
+				(number "34")
+			)
+			(pin
+				bidirectional
+				line
+				(at 5.08 -39.37 180)
+				(length 2.54)
+				(name "PB15")
+				(number "35")
+			)
+		)
+	)
+)
+

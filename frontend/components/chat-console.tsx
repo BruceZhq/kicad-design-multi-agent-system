@@ -3,6 +3,7 @@
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 
 import { AccountMenu } from "@/components/account-menu";
+import { StrongRepairControls, type StrongRepairSelection } from "@/components/strong-repair-controls";
 import { MarkdownContent } from "@/components/markdown-content";
 import {
   requestedCapabilityProfile,
@@ -294,6 +295,7 @@ function channelIncludes(message: DisplayMessage, channel: Channel): boolean {
 }
 
 export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam: () => void }) {
+  const [strongRepair, setStrongRepair] = useState<StrongRepairSelection>({ model: "", effort: "" });
   const [models, setModels] = useState<string[]>([]);
   const [model, setModel] = useState("");
   const [reasoningEffort, setReasoningEffort] = useState("");
@@ -913,6 +915,10 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
               message,
               model,
               ...(!evaluationRun && reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+              ...(!evaluationRun && strongRepair.model ? {
+                strong_model: strongRepair.model,
+                strong_reasoning_effort: strongRepair.effort,
+              } : {}),
               ...(!evaluationRun && visionModel ? {
                 vision_model: visionModel,
                 vision_reasoning_effort: visionReasoningEffort,
@@ -1714,6 +1720,8 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
                 </select>
               </div>
             </div>
+            <StrongRepairControls models={models} disabled={busy || Boolean(evaluationLaunch)}
+              value={strongRepair} onChange={setStrongRepair} />
             <div className="model-control">
               <div><label htmlFor="profile-select">能力范围</label><span>V1</span></div>
               <div className="select-shell">

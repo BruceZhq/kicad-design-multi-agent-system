@@ -22,15 +22,30 @@ def has_checkpoint(values):
         return False
 
 
+def _false_procedural_amendment(values):
+    intent = values.get("intent") or {}
+    request = str(values.get("latest_request") or "")
+    return (isinstance(intent, dict) and intent.get("context_relation") == "amend"
+            and bool(request) and classify_intent(
+                request, prior_intent=str(values.get("workflow_mode", "build")),
+                has_active_context=True,
+            ).context_relation == "resume")
+
+
 async def recover_context(agent, config, current, message):
     decision = classify_intent(message, prior_intent="build", has_active_context=bool(current))
-    if decision.context_relation != "resume" or has_checkpoint(current):
+    if decision.context_relation != "resume" or (
+        has_checkpoint(current) and not _false_procedural_amendment(current)
+    ):
         return {}
     # Never cross a genuine new-project request. All snapshots come from the
     # already authorized checkpoint thread, not a filesystem-wide search.
     async for snapshot in agent.aget_state_history(config, limit=100):
         values = snapshot.values
-        if has_checkpoint(values):
+        # A false amendment may retain the original workspace but overwrite its
+        # requirement and role evidence in graph state. File existence alone
+        # must not make that damaged head a valid continuation source.
+        if has_checkpoint(values) and not _false_procedural_amendment(values):
             return {k: v for k, v in values.items() if k not in {
                 "messages", "runtime_scope", "scope", "request_id", "user_id",
             }}

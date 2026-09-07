@@ -65,17 +65,37 @@ def test_dsn_receives_per_net_rules_and_real_critical_subset(tmp_path, subset):
     root = loads(dsn.read_text())
     network = find_first(root, "network")
     classes = {str(node[1]): node for node in network if tag_of(node) == "class"}
-    assert str(find_first(find_first(classes["RN:power"], "rule"), "width")[1]) == "5000.0"
+    assert str(find_first(find_first(classes["RN:power"], "rule"), "width")[1]) == "500.0"
     assert ("RN:signal" in classes) == (subset is None)
     names = [str(node[1]) for node in find_first(root, "library") if tag_of(node) == "padstack"]
     assert len(names) == len(set(names))
 
 
-def test_project_netclasses_preserve_unrelated_and_strict_project_rules(tmp_path):
+def test_real_specctra_quote_declaration_roundtrips(tmp_path):
+    dsn = tmp_path / "board.dsn"
+    dsn.write_text('''(pcb board
+      (parser
+        (string_quote ")
+        (space_in_quoted_tokens on))
+      (resolution um 10)
+      (structure (via "via0"))
+      (library (padstack "via0" (shape (circle F.Cu 600))))
+      (network (net "VIN" (pins J1-1 R1-1)) (net "DATA" (pins J1-2 R1-2))))''')
+    apply_dsn_classes(dsn, _classes())
+    result = dsn.read_text()
+    assert '(string_quote ")' in result
+    assert '(width 500.0)' in result
+    assert '(clearance 300.0)' in result
+    assert '__RNP_DSN_QUOTE__' not in result
+
+
+@pytest.mark.parametrize("assignments", [None, {}])
+def test_project_netclasses_preserve_unrelated_and_strict_project_rules(tmp_path, assignments):
     pcb = tmp_path / "board.kicad_pcb"
     pro = pcb.with_suffix(".kicad_pro")
     pro.write_text(json.dumps({"board": {"design_settings": {"rules": {"min_clearance": .3}}},
-                               "net_settings": {"classes": [{"name": "Default", "clearance": .3}]}}))
+                               "net_settings": {"classes": [{"name": "Default", "clearance": .3}],
+                                                "netclass_assignments": assignments}}))
     persist_project_classes(pcb, _classes())
     result = json.loads(pro.read_text())
     assert result["board"]["design_settings"]["rules"]["min_clearance"] == .3
@@ -89,6 +109,49 @@ def _review(root: Path):
     report.write_text(json.dumps({"violations": [{"type": "solder_mask_bridge", "items": [{"uuid": "pad-1", "description": "U1 pin 3"}]}]}))
     return {"status": "blocked", "pcb_path": str(root / "board.kicad_pcb"), "verification": {
         "drc": {"ran": True, "errors": 1, "report_path": str(report), "by_type": {"solder_mask_bridge": 1}}}}
+
+
+def test_width_repair_uses_the_final_net_class_floor(monkeypatch):
+    from ratsnestpro.orchestration import pipeline as p
+
+    class Board:
+        def list_tracks(self):
+            return [{"uuid": "rail", "net_name": "3V3", "width": .45}]
+
+    monkeypatch.setattr(p, "_physical_net_class_rules", lambda _: {"3V3": {"width": .6}})
+    targets = p._undersized_physical_tracks(p.PipelineState("power tracks >=0.4 mm"), Board())
+    assert targets[0]["required_width"] == .6
+
+
+def test_illegal_width_is_repaired_before_connectivity_search(monkeypatch):
+    from types import SimpleNamespace
+    from ratsnestpro.orchestration import pipeline as p
+
+    artifact = p.RouteResult(method="freerouting", required=True, unconnected=10)
+    monkeypatch.setattr(p, "_repair_undersized_physical_tracks", lambda *a: artifact)
+    def forbidden(*args):
+        raise AssertionError("must not search connectivity on illegal-width copper")
+    monkeypatch.setattr(p, "_repair_drc_connectivity_gaps", forbidden)
+    result, _ = p.RouteSignalsStep().repair(
+        p.PipelineState("board"), SimpleNamespace(active_recovery_tool=None), "", artifact,
+        [p.CheckResult(name="net_class_geometry", ok=False, message="width mismatch")],
+    )
+    assert result is artifact
+
+
+def test_router_crash_is_not_an_unrouted_design_or_layout_rollback():
+    from ratsnestpro.orchestration.pipeline import (
+        FailureOrigin, PipelineState, RouteResult, RouteSignalsStep,
+    )
+    state = PipelineState(requirement_text="two-layer board")
+    artifact = RouteResult(method="error", required=True, unconnected=86,
+                           note="TypeError: null assignment map")
+    step = RouteSignalsStep()
+    checks = step.check(state, artifact)
+    assert len(checks) == 1 and checks[0].origin == FailureOrigin.HARNESS
+    assert checks[0].name == "routing_tool_execution"
+    assert not step.repair_applicable(state, artifact, checks)
+    assert step.rollback_target(state, artifact, checks) is None
 
 
 def test_review_handoff_binds_actual_pins_and_original_checkpoint(tmp_path):

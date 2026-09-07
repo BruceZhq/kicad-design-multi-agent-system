@@ -67,6 +67,7 @@ class CircuitModuleCandidate(ContractModel):
     source_pcb_sha256: str = Field(pattern=_DIGEST)
     components: list[ModuleComponent] = Field(min_length=1, max_length=100)
     nets: list[ModuleNet] = Field(default_factory=list, max_length=500)
+    physical_layout: dict[str, Any] | None = None
     module_digest: str = Field(pattern=_DIGEST)
 
     @model_validator(mode="after")
@@ -77,7 +78,7 @@ class CircuitModuleCandidate(ContractModel):
         allowed = set(references)
         if any(pin.ref not in allowed for net in self.nets for pin in net.pins):
             raise ValueError("module nets may contain only module-owned pins")
-        expected = _digest(self.model_dump(mode="json", exclude={"module_digest"}))
+        expected = _digest(self.model_dump(mode="json", exclude={"module_digest"}, exclude_none=True))
         if self.module_digest != expected:
             raise ValueError("circuit module digest is invalid")
         return self
@@ -110,6 +111,7 @@ def build_circuit_module_candidates(
     selection: SelectionPlan,
     netlist: NetlistIntent,
     release_identity: ReleaseIdentity,
+    pcb_path: str | None = None,
 ) -> list[dict[str, Any]]:
     """Extract reusable blocks without guessing ownership or connectivity."""
 
@@ -151,12 +153,16 @@ def build_circuit_module_candidates(
             ],
             "nets": [net.model_dump(mode="json") for net in module_nets],
         }
+        if pcb_path:
+            from ratsnestpro.knowledge.layout_modules import extract_layout
+            payload["physical_layout"] = extract_layout(pcb_path,
+                pcb_sha256=release_identity.pcb_sha256, components=payload["components"], nets=payload["nets"])
         candidates.append(
             CircuitModuleCandidate.model_validate(
                 {**payload, "module_digest": _digest(payload)}
             )
         )
-    return [candidate.model_dump(mode="json") for candidate in candidates]
+    return [candidate.model_dump(mode="json", exclude_none=True) for candidate in candidates]
 
 
 def validate_circuit_module_candidates(
@@ -166,6 +172,7 @@ def validate_circuit_module_candidates(
     topology: TopologyPlan | dict[str, Any] | None = None,
     selection: SelectionPlan | dict[str, Any] | None = None,
     netlist: NetlistIntent | dict[str, Any] | None = None,
+    pcb_path: str | None = None,
 ) -> list[dict[str, Any]]:
     """Validate and deduplicate candidates at the Reviewer trust boundary."""
 
@@ -195,6 +202,7 @@ def validate_circuit_module_candidates(
                 selection=reviewed_selection,
                 netlist=reviewed_netlist,
                 release_identity=identity,
+                pcb_path=pcb_path if any(value.get("physical_layout") for value in values) else None,
             )
         }
     validated: list[CircuitModuleCandidate] = []
@@ -210,7 +218,7 @@ def validate_circuit_module_candidates(
             raise ValueError("circuit module PCB identity is stale")
         if source_validation_requested:
             expected = expected_modules.get(candidate.module_digest)
-            if expected is None or candidate.model_dump(mode="json") != expected:
+            if expected is None or candidate.model_dump(mode="json", exclude_none=True) != expected:
                 raise ValueError(
                     "circuit module does not match the reviewed pipeline source"
                 )
@@ -218,7 +226,7 @@ def validate_circuit_module_candidates(
             continue
         seen.add(candidate.module_digest)
         validated.append(candidate)
-    return [candidate.model_dump(mode="json") for candidate in validated]
+    return [candidate.model_dump(mode="json", exclude_none=True) for candidate in validated]
 
 
 def circuit_module_search_text(values: list[dict[str, Any]]) -> str:

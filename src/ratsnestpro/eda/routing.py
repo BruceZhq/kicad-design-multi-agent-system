@@ -481,6 +481,7 @@ def autoroute(
     net_classes: list[dict] | None = None,
     power_nets: list[str] | None = None,
     critical_nets: list[str] | None = None,
+    requirement_digest: str = "",
 ) -> RouteOutcome:
     """Assign nets from ``netmap`` onto the board and autoroute it in place."""
     nets = len(netmap)
@@ -501,6 +502,8 @@ def autoroute(
         bound_classes = bind_net_classes(net_classes, list(netmap), power_nets or []) if net_classes else []
         rule_path = Path(temp_dir) / "routing-rules.json"
         rule_path.write_text(json.dumps({"classes": bound_classes,
+                                        "requirement_digest": requirement_digest,
+                                        "power_nets": power_nets or [],
                                         "critical_nets": [n for n in (critical_nets or []) if n in netmap]}),
                              encoding="utf-8")
         try:

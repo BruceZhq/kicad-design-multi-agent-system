@@ -178,11 +178,27 @@ def test_out_of_scope_netlist_edit_is_rejected_not_silently_applied() -> None:
         _validate_netlist_patch_scope(patch, plan, {"U2"}, {"LOCAL"})
 
 
-def test_pcb_query_returns_real_absolute_pad_coordinates(tmp_path: Path) -> None:
+def test_supply_patch_may_restate_unchanged_endpoints_not_rewire_them() -> None:
+    plan = NetlistIntent(supply_nets=["3V3"], nets=[
+        NetIntent(name="3V3", kind="power", pins=[LogicalPin(ref="U1", pin="1")]),
+        NetIntent(name="OTHER", pins=[LogicalPin(ref="U1", pin="2")]),
+    ])
+    patch = NetlistPatch(upsert_nets=[NetIntent(name="3V3", kind="power", pins=[
+        LogicalPin(ref="U1", pin="1"), LogicalPin(ref="J1", pin="1"),
+    ])])
+    assert _validate_netlist_patch_scope(patch, plan, {"J1"}, {"3V3"}) == patch
+    patch.upsert_nets[0].pins.append(LogicalPin(ref="U1", pin="2"))
+    with pytest.raises(ValueError, match="nothing was applied"):
+        _validate_netlist_patch_scope(patch, plan, {"J1"}, {"3V3"})
+
+
+@pytest.mark.parametrize("rotation,expected", [(0, (11, 22)), (90, (12, 19)),
+                                               (180, (9, 18)), (270, (8, 21))])
+def test_pcb_query_returns_real_absolute_pad_coordinates(tmp_path: Path, rotation, expected) -> None:
     pcb = tmp_path / "board.kicad_pcb"
-    pcb.write_text('''(kicad_pcb (version 20241229) (generator test)
+    pcb.write_text(f'''(kicad_pcb (version 20241229) (generator test)
       (net 0 "") (net 1 "VCC")
-      (footprint "Test:C" (layer "F.Cu") (at 10 20 0)
+      (footprint "Test:C" (layer "F.Cu") (at 10 20 {rotation})
         (property "Reference" "C5")
         (pad "1" smd rect (at 1 2) (size 1 1) (layers "F.Cu") (net 1 "VCC"))))''',
                    encoding="utf-8")
@@ -192,8 +208,53 @@ def test_pcb_query_returns_real_absolute_pad_coordinates(tmp_path: Path) -> None
     receipt = workspace.observe(EngineeringQuery(tool="pcb", section="pads", reference="C5"))
     assert receipt["ok"]
     pad = receipt["result"]["observation"]["data"][0]
-    assert (pad["x"], pad["y"], pad["net"]) == (11, 22, "VCC")
+    assert (pad["x"], pad["y"]) == expected
+    assert pad["net"] == "VCC"
     assert len(receipt["result"]["pcb_sha256"]) == 64
+
+
+def test_nested_inspection_is_executed_before_a_new_decision():
+    workspace = EngineeringWorkspace(out_dir=None, artifacts=lambda: {
+        "selection": {"parts": [{"ref": "C7", "role": "decoupler"}]},
+    })
+    client = _Client([
+        json.dumps({"action": "local_repair", "tool_args": {"engineering_queries": [
+            {"tool": "artifact", "step": "selection", "pointer": "/parts"},
+        ]}}),
+        '{"value":"observed"}',
+    ])
+    result = complete_with_observations(client, "inspect", "repair", workspace=workspace,
+                                        extract_json=lambda value: value)
+    assert json.loads(result) == {"value": "observed"}
+    assert '"ref": "C7"' in client.prompts[1]
+
+
+def test_routing_reflection_delivers_both_real_layer_views(tmp_path, monkeypatch):
+    from ratsnestpro.eda import engineering_render
+
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text("test source")
+    png = tmp_path / "view.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+    rendered = []
+    def render(source, *, layers):
+        assert source == pcb
+        rendered.append(layers)
+        return {"image_path": str(png), "source_sha256": "bound", "layers": layers,
+                "image_sha256": layers}
+    monkeypatch.setattr(engineering_render, "render_cad", render)
+    workspace = EngineeringWorkspace(out_dir=str(tmp_path), step="route_signals", artifacts=lambda: {
+        "layout_write": {"pcb_path": str(pcb)}, "failed_checks": [{"name": "unconnected"}],
+    })
+    class Vision:
+        def complete_with_images(self, system, user, *, images):
+            assert len(images) == 2
+            assert all(uri.startswith("data:image/png;base64,") for uri in images)
+            return '{"observed":true}'
+    result = complete_with_observations(Vision(), "observe", "repair", workspace=workspace,
+                                        extract_json=lambda value: value)
+    assert json.loads(result)["observed"]
+    assert rendered == ["F.Cu,F.Silkscreen,Edge.Cuts", "B.Cu,B.Silkscreen,Edge.Cuts"]
 
 
 def test_upstream_candidate_can_repair_an_intermediate_failure_before_commit() -> None:

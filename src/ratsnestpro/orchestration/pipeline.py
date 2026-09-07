@@ -173,7 +173,9 @@ from ratsnestpro.orchestration.release_invariants import (
     audit_pcb_invariants,
     build_release_invariant_manifest,
     extract_requirement_invariants,
+    fanout_exemptions,
     is_mounting_hole_part,
+    required_track_width,
     sha256_file,
     validate_release_invariant_manifest,
 )
@@ -418,7 +420,7 @@ class PipelineContext:
     repair_release_issues: bool = False
     execution_retry_attempts: int = 1
     design_repair_attempts: int = 0  # consecutive stagnation allowed per step
-    max_design_repair_attempts_per_step: int = 2  # total attempts in one step
+    max_design_repair_attempts_per_step: int = 2  # per registered step strategy; run cap remains absolute
     max_total_design_repair_attempts: int = 8  # final run-wide safety cap
     connection_completion_limit: int = 8192
     connection_direct_pin_limit: int = 180
@@ -452,6 +454,9 @@ class PipelineContext:
     active_cad_action_observation: CadActionObservation | None = None
     engineering_workspace: EngineeringWorkspace | None = None
     engineering_step_instructions: str = ""
+    # Optional, independently configured project-local programming executor.
+    strong_repair: object | None = None
+    verified_layout_modules: list[dict[str, Any]] = field(default_factory=list)
 
 
 _MAX_REPAIR_ARTIFACT_CHARS = 80_000
@@ -460,6 +465,7 @@ _DIRECT_LOCAL_REPAIR_TOOLS = frozenset({
     "apply_cad_action_batch",
     "repair_route_connectivity",
     "repair_physical_track_width",
+    "repair_route_endpoint_placement",
 })
 _LOCAL_REPAIR_TOOL_WHITELIST = frozenset({
     *_DIRECT_LOCAL_REPAIR_TOOLS,
@@ -501,6 +507,7 @@ def _recovery_action_fingerprint(decision: RecoveryDecision) -> str:
         "action": decision.action.value,
         "target_step": decision.target_step,
         "tool_name": decision.tool_name,
+        "implementation": decision.tool_args.get("implementation", ""),
         "strategy": " ".join(decision.strategy.casefold().split()),
         "repair_instructions": " ".join(instructions.casefold().split()),
         "cad_action_batch": (
@@ -532,7 +539,7 @@ def _bind_local_repair_tool(
         )
         if reason
     }
-    width_owned = "routing_physical_invariants" in failed_checks and bool(
+    width_owned = bool(failed_checks & {"routing_physical_invariants", "net_class_geometry"}) and bool(
         re.search(
             r"\b(?:width|widen|minimum.track|undersized|track.size|线宽|加宽)\b",
             instructions
@@ -1502,9 +1509,19 @@ def _plan_agentic_recovery(
             suggested_target.value if suggested_target is not None else None
         ),
         "local_repair_available": local_repair_available,
+        "local_repair_tools": (sorted(_LOCAL_REPAIR_TOOL_WHITELIST)
+                               if result.step == PipelineStep.ROUTE_SIGNALS
+                               else ["repair_current_step", "apply_cad_action_batch"]),
         "cad_action_context": cad_context,
         "prior_recovery_turns": prior_turns,
     }
+    write = state.artifact(PipelineStep.LAYOUT_WRITE)
+    if isinstance(write, PcbWriteResult):
+        from ratsnestpro.eda.fanout_policy import load_fanout_approval
+
+        observation["verified_fanout_approval"] = load_fanout_approval(
+            Path(write.pcb_path), extract_requirement_invariants(state.requirement_text).source_digest,
+        )
     system = (
         "You are the recovery planner inside a governed PCB engineering agent. "
         "You have diagnosis, planning, tool-choice, candidate-repair and rollback "
@@ -1518,22 +1535,52 @@ def _plan_agentic_recovery(
         "owner_step and base_artifact_fingerprint, use only listed operations, add "
         "preconditions, and name the deterministic checks that must pass. Never "
         "invent coordinates absent from observations; use engineering_queries to "
-        "inspect the actual source, pins, pads or net before deciding. A suggested "
+        "inspect the actual source, pins, pads or net before deciding. "
+        "An add_track action writes one literal straight segment; instructions "
+        "such as 'obstacle-aware' do not invoke a router. Inspect both copper "
+        "layers and each obstructing item's geometry before selecting a complete "
+        "segment/via path or a bounded rip-up batch. Never interpret a DRC "
+        "ratsnest endpoint pair as a safe straight-line route. A suggested "
         "owner is a diagnosis hypothesis, not proof of causation. Return the "
         "RecoveryDecision JSON contract after gathering sufficient evidence; "
         "do not expose hidden chain-of-thought.\n\n"
         + skill_instructions[:16_000]
     )
+    # Supply the actual executable contract on the first call, not only after
+    # validation fails. Skill prose describes reasoning, not alternate fields.
+    system += (
+        "\n\nThe following JSON schema is the authoritative output contract. "
+        "Use target_step (not target); cad_action_batch belongs at the top level, "
+        "with actions (not operations). Each track uses target.kind=net, "
+        "target.net, start/end objects with x/y, and width_mm. Do not invent "
+        "executor, failure_reflection or deterministic_checks fields. Express "
+        "the concise reflection in hypothesis and success_checks.\n"
+        + json.dumps(RecoveryDecision.model_json_schema(), ensure_ascii=False,
+                     separators=(",", ":"))
+    )
+
+    def reflection_unavailable() -> RecoveryDecision:
+        # An invalid/unavailable planner is not evidence against the layout.
+        # Preserve the candidate instead of converting a protocol failure into
+        # an upstream redesign. Normal bounded JSON retries happen above this.
+        return RecoveryDecision(
+            action=RecoveryAction.STOP,
+            origin=FailureOrigin.HARNESS,
+            target_step=result.step.value,
+            strategy="recovery_output_unavailable_preserve_checkpoint",
+            hypothesis="No validated recovery decision was obtained; no upstream fault is proven.",
+            expected_observation="Resume this checkpoint after recovery output is available.",
+        )
     try:
         decision, used_llm = propose_structured(
             ctx,
             model=RecoveryDecision,
             system=system,
             user=json.dumps(observation, ensure_ascii=False, default=str),
-            fallback=fallback,
+            fallback=reflection_unavailable,
         )
     except LlmError:
-        decision, used_llm = fallback(), False
+        decision, used_llm = reflection_unavailable(), False
     return decision, used_llm, skill_name, skill_digest
 
 
@@ -1724,6 +1771,14 @@ class PipelineStepBase(ABC):
             hits = ctx.kb.retrieve(query, top_k=3, role=self.knowledge_role)
             knowledge = "\n\n".join(f"[{h.doc.id}]\n{h.doc.text.strip()}" for h in hits)
             knowledge_ids = [h.doc.id for h in hits]
+        if ctx.verified_layout_modules and self.step in {
+            PipelineStep.LAYOUT_PARTITION, PipelineStep.LAYOUT_CRITICAL,
+            PipelineStep.LAYOUT_GENERAL, PipelineStep.ROUTE_PLAN,
+        }:
+            from ratsnestpro.knowledge.circuit_modules import circuit_module_search_text
+            knowledge += "\nVerified module seeds (rebind exact assets; preserve current hard constraints):\n"
+            knowledge += circuit_module_search_text(ctx.verified_layout_modules)
+            knowledge_ids.extend(str(item["module_digest"]) for item in ctx.verified_layout_modules)
         resumed = state.resume_candidates.pop(self.step, None)
         if resumed is None:
             artifact, used_llm = self.propose(state, ctx, knowledge)
@@ -1902,6 +1957,7 @@ class PipelineStepBase(ABC):
                 prior_step_design_attempts = sum(
                     record.kind == "design"
                     and record.step == self.step.value
+                    and record.strategy == strategy
                     for record in state.repair_history
                 )
                 remaining_run_budget = max(
@@ -1996,6 +2052,17 @@ class PipelineStepBase(ABC):
                     f"{failure_text}"
                 )
                 before_score = self.convergence_score(best_artifact, best_checks)
+                if ctx.on_progress_checkpoint is not None and isinstance(
+                    best_artifact, (TopologyPlan, SelectionPlan, NetlistIntent)
+                ):
+                    # A long repair call must not make a completed proposal
+                    # disappear on Worker restart. Persist as UNCOMMITTED input;
+                    # normal resume revalidates it and no completed step is added.
+                    state.resume_candidates[self.step] = (best_artifact, used_llm)
+                    try:
+                        ctx.on_progress_checkpoint(state)
+                    finally:
+                        state.resume_candidates.pop(self.step, None)
                 attempt_file_snapshot = _snapshot_candidate_files(
                     ctx,
                     f"repair-{self.step.value}-{state.revision}-{attempt}",
@@ -3565,6 +3632,10 @@ def _footprint_matches_symbol_family(lib_id: str, footprint: str) -> bool:
 
     symbol_library = lib_id.partition(":")[0].lower()
     footprint_library = footprint.partition(":")[0].lower()
+    if symbol_library == "connector" and lib_id.partition(":")[2].lower().startswith("testpoint"):
+        # KiCad stores electrical test points under Connector, but their pads
+        # live in TestPoint. Pin/pad compatibility remains checked separately.
+        return footprint_library == "testpoint" or footprint_library.startswith("connector_")
     if symbol_library in {"connector", "connector_generic"}:
         return footprint_library.startswith(("connector_", "terminalblock"))
     if symbol_library == "jumper":
@@ -5478,8 +5549,11 @@ def _role_symbol_family_error(part: SelectedPart) -> str | None:
     """Reject only high-confidence role/symbol-family contradictions."""
 
     role = part.role.lower()
-    symbol = part.symbol.lower()
-    description = symbols.symbol_properties(part.symbol).get(
+    from agents.ratsnestpro.symbol_evidence_repair import verified_repair_source
+
+    family_symbol = verified_repair_source(part.symbol) or part.symbol
+    symbol = family_symbol.lower()
+    description = symbols.symbol_properties(family_symbol).get(
         "Description",
         "",
     ).lower()
@@ -7196,6 +7270,10 @@ class SelectionStep(PipelineStepBase):
                         checks.append(CheckResult(
                             name=f"package_role_semantics:{p.ref}",
                             ok=package_error is None,
+                            origin=FailureOrigin.DESIGN,
+                            reason_code="component_role_mismatch" if package_error else "",
+                            affected_refs=[p.ref] if package_error else [],
+                            evidence={"owner_step": "selection", "symbol": p.symbol, "role": p.role},
                             message=package_error or (
                                 f"{p.ref} package family matches role {p.role!r}"
                             ),
@@ -8348,6 +8426,10 @@ def _limit_netlist_patch_to_scope(
         *relevant_nets,
         *protected_names,
     }
+    pin_memberships: dict[str, list[str]] = {}
+    for net in plan.nets:
+        for pin in net.pins:
+            pin_memberships.setdefault(pin.key().lower(), []).append(net.name.lower())
     upserts: list[NetIntent] = []
     for update in patch.upsert_nets:
         if (
@@ -8358,6 +8440,10 @@ def _limit_netlist_patch_to_scope(
         pins = [
             pin for pin in update.pins
             if pin.ref in allowed_refs
+            # A model may restate a rail's existing endpoints with its delta.
+            # Keeping an unchanged endpoint grants no authority to move it;
+            # reject ambiguous/duplicate membership and all unrelated rewires.
+            or pin_memberships.get(pin.key().lower()) == [update.name.lower()]
         ]
         if pins:
             upserts.append(update.model_copy(update={"pins": pins}, deep=True))
@@ -10849,6 +10935,15 @@ def _verified_function_pin_candidates(
 ) -> set[str]:
     """Return unique installed physical pins backed by Architect evidence."""
 
+    from agents.ratsnestpro.symbol_evidence_repair import verified_repair_source
+
+    # A pin repair changes the library ID, not every unaffected pin's meaning.
+    # Carry aliases across only a revalidated lineage, and still require the
+    # exact physical number/name below (changed pins cannot inherit blindly).
+    compatible_symbols = {part.symbol.casefold()}
+    source = verified_repair_source(part.symbol)
+    if source:
+        compatible_symbols.add(source.casefold())
     wanted = {_normalized_function_name(item) for item in functions}
     installed = {
         (
@@ -10860,7 +10955,7 @@ def _verified_function_pin_candidates(
     return {
         alias.pin_number
         for alias in aliases
-        if alias.symbol_lib_id.casefold() == part.symbol.casefold()
+        if alias.symbol_lib_id.casefold() in compatible_symbols
         and wanted.intersection(
             _normalized_function_name(item) for item in alias.aliases
         )
@@ -14426,6 +14521,14 @@ def _is_local_support_role(role: str) -> bool:
     """Return whether placement near a functional anchor materially matters."""
 
     text = role.lower()
+    tokens = set(re.findall(r"[a-z0-9]+", text))
+    # Filter passives serve the connected signal owner even when their role
+    # names use a domain prefix (analog/audio/etc.) instead of input/output.
+    # Require a passive kind so a filter IC or connector remains an anchor.
+    if "filter" in tokens and tokens & {
+        "resistor", "capacitor", "inductor", "choke",
+    }:
+        return True
     return any(
         token in text
         for token in (
@@ -14439,6 +14542,7 @@ def _is_local_support_role(role: str) -> bool:
             "line_filter",
             "input_filter",
             "output_filter",
+            "reset_filter",
             "bias",
             "bootstrap",
             "feedback",
@@ -15211,7 +15315,7 @@ def _resolved_zone_targets(
         if len(exact) > 1:
             ambiguities[ref] = [zone.name for zone in exact]
             continue
-        if _is_local_support_role(role):
+        if _is_proximity_sensitive_role(role):
             owner_ref = _functional_anchor_ref(
                 ref,
                 role,
@@ -17557,7 +17661,7 @@ def _read_drc_snapshot(report_path: Path) -> _DrcSnapshot:
             elif left.layer is None and right.layer is None:
                 left = replace(left, layer="F.Cu")
                 right = replace(right, layer="F.Cu")
-            if left.layer == right.layer:
+            if left.layer in {"F.Cu", "B.Cu"} and right.layer in {"F.Cu", "B.Cu"}:
                 gaps.append(_DrcGap(left=left, right=right))
     return _DrcSnapshot(
         findings=tuple(findings),
@@ -17576,6 +17680,7 @@ def _run_kicad_drc_snapshot(
 
     import subprocess
 
+    pcb_digest = hashlib.sha256(pcb_path.read_bytes()).hexdigest()
     report_path.unlink(missing_ok=True)
     try:
         subprocess.run(
@@ -17605,6 +17710,13 @@ def _run_kicad_drc_snapshot(
             gaps=(),
             parse_error=True,
         )
+    if report_path.is_file() and hashlib.sha256(pcb_path.read_bytes()).hexdigest() == pcb_digest:
+        try:
+            evidence = json.loads(report_path.read_text(encoding="utf-8"))
+            evidence["ratsnest_artifact_sha256"] = pcb_digest
+            report_path.write_text(json.dumps(evidence, ensure_ascii=False), encoding="utf-8")
+        except (OSError, ValueError, TypeError):
+            pass
     return _read_drc_snapshot(report_path)
 
 
@@ -17744,26 +17856,39 @@ def _frozen_gap_route_width(state: PipelineState, net_name: str) -> float:
     """Freeze the narrowest legal width before generating a repair candidate."""
 
     cap = config.process_capability()
-    route_plan = state.artifact(PipelineStep.ROUTE_PLAN)
-    route_width = min(
-        (
-            net_class.width
-            for net_class in route_plan.net_classes
-        ),
-        default=cap.min_track_width,
-    ) if isinstance(route_plan, RoutePlan) else cap.min_track_width
-    width = max(cap.min_track_width, route_width)
     invariants = extract_requirement_invariants(state.requirement_text)
-    explicit_nets = {
-        name.upper().lstrip("+")
-        for name in invariants.minimum_track_width_nets
-    }
-    normalized_net = net_name.upper().lstrip("+")
-    if (
-        invariants.minimum_track_width_mm is not None
-        and (not explicit_nets or normalized_net in explicit_nets)
-    ):
-        width = max(width, invariants.minimum_track_width_mm)
+    class_floor = _physical_net_class_rules(state).get(net_name, {}).get("width", 0.0)
+    return max(cap.min_track_width, class_floor, required_track_width(invariants, net_name))
+
+
+def _gap_candidate_width(state: PipelineState, board: Any, gap: _DrcGap) -> float:
+    """Allow a candidate short pad bridge only under an external approval.
+
+    This selects a search width, not an exemption. The full candidate still
+    needs the pad-to-trunk graph proof and authoritative DRC before commit.
+    """
+    from ratsnestpro.eda.fanout_policy import load_fanout_approval
+
+    width = _frozen_gap_route_width(state, gap.left.net)
+    write = state.artifact(PipelineStep.LAYOUT_WRITE)
+    if (not isinstance(write, PcbWriteResult) or gap.left.net != gap.right.net
+            or gap.left.net not in RoutePlanStep._routing_nets(state)[1]
+            or gap.left.layer != gap.right.layer):
+        return width
+    approval = load_fanout_approval(Path(write.pcb_path),
+                                   extract_requirement_invariants(state.requirement_text).source_digest)
+    if approval.get("length_basis") != "pad_to_trunk_path":
+        return width
+    endpoints = [(gap.left.x, gap.left.y), (gap.right.x, gap.right.y)]
+    if math.dist(*endpoints) > float(approval["max_chain_length_mm"]):
+        return width
+    pads = [pad for fp in board.list_footprints() for pad in board.footprint_pads(fp["reference"])
+            if pad["type"] == "smd" and pad["net"] == gap.left.net
+            and gap.left.layer in pad["layers"]]
+    if all(any(math.dist(point, (pad["x"], pad["y"])) <= 1e-4 for pad in pads)
+           for point in endpoints):
+        return min(width, max(config.process_capability().min_track_width,
+                              float(approval["minimum_width_mm"])))
     return width
 
 
@@ -17859,6 +17984,20 @@ def _copper_obstacles(
                 (center[0] + half_axis[0], center[1] + half_axis[1]),
                 min(size_x, size_y) / 2,
             ))
+            # A capsule omits rectangular pad corners. Include the actual
+            # rounded-rectangle boundary so routes cannot cut those corners.
+            shape = str(pad[3]) if len(pad) > 3 else ""
+            if shape in {"rect", "roundrect"}:
+                ratio = find_first(pad, "roundrect_rratio")
+                corner = (min(size_x, size_y) * float(str(ratio[1]))
+                          if shape == "roundrect" and ratio is not None else 0.0)
+                hx, hy = size_x / 2 - corner, size_y / 2 - corner
+                vertices = []
+                for x, y in ((-hx,-hy),(hx,-hy),(hx,hy),(-hx,hy)):
+                    dx, dy = rotate_offset(x, y, -pad_rotation)
+                    vertices.append((center[0]+dx, center[1]+dy))
+                obstacles.extend(_CopperObstacle(a, b, corner)
+                                 for a, b in zip(vertices, vertices[1:]+vertices[:1]))
 
     for via in find_all(board.root, "via"):
         via_layers = find_first(via, "layers")
@@ -17951,18 +18090,44 @@ def _obstacle_aware_copper_paths(
         layer=layer,
     )
     required_distance = width / 2 + clearance
-    step = max(0.35, min(0.6, width + clearance))
+    # Fine local escape search must not expand a whole board on a 0.1 mm
+    # lattice: long trunks exhaust the same bounded search before connecting.
+    # Both resolutions use identical exact copper clearance checks.
+    step = (max(0.35, min(0.6, width + clearance)) if math.dist(start, goal) > 10
+            else max(0.10, min(0.20, (width + clearance) / 4)))
+    search_deadline = time.monotonic() + 5.0
+    cell_size = 2.0
+    spatial: dict[tuple[int, int], list[int]] = {}
+    for index, obstacle in enumerate(obstacles):
+        margin = obstacle.radius + required_distance + 1e-9
+        x0, x1 = sorted((obstacle.start[0], obstacle.end[0]))
+        y0, y1 = sorted((obstacle.start[1], obstacle.end[1]))
+        for x in range(math.floor((x0 - margin) / cell_size), math.floor((x1 + margin) / cell_size) + 1):
+            for y in range(math.floor((y0 - margin) / cell_size), math.floor((y1 + margin) / cell_size) + 1):
+                spatial.setdefault((x, y), []).append(index)
+    segment_cache: dict[tuple, bool] = {}
 
     def clear_segment(
         left: tuple[float, float],
         right: tuple[float, float],
     ) -> bool:
-        return all(
+        key = tuple(sorted((left, right)))
+        if key in segment_cache:
+            return segment_cache[key]
+        nearby: set[int] = set()
+        for x in range(math.floor(min(left[0], right[0]) / cell_size), math.floor(max(left[0], right[0]) / cell_size) + 1):
+            for y in range(math.floor(min(left[1], right[1]) / cell_size), math.floor(max(left[1], right[1]) / cell_size) + 1):
+                nearby.update(spatial.get((x, y), ()))
+        clear = all(
             _segment_distance(left, right, obstacle.start, obstacle.end)
             + 1e-9
             >= obstacle.radius + required_distance
-            for obstacle in obstacles
+            for index in nearby
+            for obstacle in (obstacles[index],)
         )
+        if len(segment_cache) < 100_000:
+            segment_cache[key] = clear
+        return clear
 
     anchor = (
         goal
@@ -18012,6 +18177,8 @@ def _obstacle_aware_copper_paths(
     routes: list[list[tuple[tuple[float, float], tuple[float, float]]]] = []
     seen: set[tuple[tuple[float, float], ...]] = set()
     for _ in range(max(1, budget)):
+        if time.monotonic() >= search_deadline:
+            break
         queue: list[tuple[float, float, tuple[int, int]]] = []
         cost: dict[tuple[int, int], float] = {}
         previous: dict[tuple[int, int], tuple[int, int]] = {}
@@ -18021,7 +18188,7 @@ def _obstacle_aware_copper_paths(
             heapq.heappush(queue, (initial, initial, index))
         reached: tuple[int, int] | None = None
         expansions = 0
-        while queue and expansions < 80_000:
+        while queue and expansions < 80_000 and time.monotonic() < search_deadline:
             _, current_cost, current = heapq.heappop(queue)
             if current_cost > cost.get(current, math.inf) + 1e-9:
                 continue
@@ -18134,11 +18301,15 @@ def _micro_jump_copper_patches(
     clearance: float,
     via_diameter: float,
     budget: int,
+    deadline: float | None = None,
 ) -> list[_CopperPatch]:
-    """Bridge an F.Cu-only dead end with a bounded B.Cu via-pair jump."""
+    """Bridge a dead end using endpoint-owned layers and a via-pair jump."""
 
-    if gap.left.layer != "F.Cu" or gap.right.layer != "F.Cu":
+    deadline = min(deadline if deadline is not None else math.inf, time.monotonic() + 15.0)
+
+    if gap.left.layer not in {"F.Cu", "B.Cu"} or gap.right.layer not in {"F.Cu", "B.Cu"}:
         return []
+    bridge_layer = "B.Cu" if gap.left.layer == "F.Cu" else "F.Cu"
     net_name = gap.left.net
     front_obstacles = _copper_obstacles(
         board,
@@ -18178,12 +18349,30 @@ def _micro_jump_copper_patches(
             for obstacle in (*front_obstacles, *back_obstacles)
         )
 
+    def already_on_bridge(endpoint: _DrcEndpoint) -> bool:
+        if endpoint.layer == bridge_layer or bridge_layer in _existing_via_layers(board, endpoint):
+            return True
+        if endpoint.ref and endpoint.pad_number:
+            pad = board.pad_position(endpoint.ref, endpoint.pad_number)
+            return bool(pad and pad["net"] == net_name
+                        and math.dist((pad["x"], pad["y"]), (endpoint.x, endpoint.y)) < 1e-4
+                        and pad["type"] == "thru_hole"
+                        and ("*.Cu" in pad["layers"] or bridge_layer in pad["layers"]))
+        return False
+
     def escape_sites(endpoint: _DrcEndpoint) -> list[tuple[float, float]]:
         origin = (endpoint.x, endpoint.y)
+        # Plated connector pads already connect both copper layers. Requiring
+        # another via beside one can falsely make an accessible endpoint fail.
+        if already_on_bridge(endpoint):
+            return [origin]
         sites: list[tuple[float, tuple[float, float]]] = []
-        minimum_escape = max(1.0, via_diameter + clearance)
+        # A fixed 1 mm escape skips legal nearby sites in dense pad fields.
+        # Exact copper clearance below, then KiCad DRC, remain authoritative.
+        minimum_escape = max(0.5, via_diameter / 2 + clearance)
         for distance in (
             minimum_escape,
+            minimum_escape + 0.25,
             minimum_escape + 0.5,
             minimum_escape + 1.0,
             minimum_escape + 1.5,
@@ -18199,7 +18388,7 @@ def _micro_jump_copper_patches(
                     bounds[0] <= site[0] <= bounds[2]
                     and bounds[1] <= site[1] <= bounds[3]
                     and clear_via(site)
-                    and clear_track(origin, site, front_obstacles)
+                    and clear_track(origin, site, front_obstacles if endpoint.layer == "F.Cu" else back_obstacles)
                 ):
                     continue
                 sites.append((distance, site))
@@ -18222,6 +18411,8 @@ def _micro_jump_copper_patches(
         tuple[tuple[float, float], tuple[float, float]]
     ] = set()
     for _, left_site, right_site in site_pairs:
+        if time.monotonic() >= deadline:
+            break
         pair = (left_site, right_site)
         if pair in seen:
             continue
@@ -18231,13 +18422,13 @@ def _micro_jump_copper_patches(
                 left_site[0],
                 left_site[1],
                 net_name,
-                "B.Cu",
+                bridge_layer,
             ),
             right=_DrcEndpoint(
                 right_site[0],
                 right_site[1],
                 net_name,
-                "B.Cu",
+                bridge_layer,
             ),
         )
         back_paths = _obstacle_aware_copper_paths(
@@ -18250,20 +18441,183 @@ def _micro_jump_copper_patches(
         if not back_paths:
             continue
         back_tracks = tuple(
-            (start, end, "B.Cu")
+            (start, end, bridge_layer)
             for start, end in back_paths[0]
         )
-        patches.append(_CopperPatch(
-            tracks=(
-                ((gap.left.x, gap.left.y), left_site, "F.Cu"),
-                *back_tracks,
-                (right_site, (gap.right.x, gap.right.y), "F.Cu"),
-            ),
-            vias=(left_site, right_site),
-        ))
+        tracks = list(back_tracks)
+        vias = []
+        for endpoint, site in ((gap.left, left_site), (gap.right, right_site)):
+            if not already_on_bridge(endpoint):
+                tracks.append(((endpoint.x, endpoint.y), site, endpoint.layer))
+                vias.append(site)
+        patches.append(_CopperPatch(tracks=tuple(tracks), vias=tuple(vias)))
         if len(patches) >= budget:
             break
     return patches
+
+
+def _existing_via_layers(board: Any, endpoint: _DrcEndpoint) -> set[str]:
+    from ratsnestpro.eda.vendor.sexpr import find_all, find_first
+    nets = {n['index']: n['name'] for n in board.list_nets()}
+    for via in find_all(board.root, 'via'):
+        at, net, layers = (find_first(via, key) for key in ('at', 'net', 'layers'))
+        if (at and net and layers and nets.get(int(str(net[1]))) == endpoint.net
+                and math.dist((float(str(at[1])), float(str(at[2]))), (endpoint.x, endpoint.y)) < 1e-4):
+            return {str(layer) for layer in layers[1:]}.intersection({'F.Cu', 'B.Cu'})
+    return set()
+
+
+def _multilayer_gap_patch(board: Any, gap: _DrcGap, *, width: float,
+                          clearance: float, via_diameter: float,
+                          deadline: float) -> _CopperPatch | None:
+    """Bounded two-layer A*: a blocked trunk may change layers mid-route."""
+    import heapq
+
+    deadline = min(deadline, time.monotonic() + 20)
+    # Leave room for KiCad's exact pad shape and coordinate quantization.
+    clearance += 0.04
+    layers = ("F.Cu", "B.Cu")
+    if gap.left.layer not in layers or gap.right.layer not in layers:
+        return None
+    start, goal = (gap.left.x, gap.left.y), (gap.right.x, gap.right.y)
+    bounds = _route_bounds(board, (start, goal), via_diameter)
+    step = .25
+    anchor = start
+    if gap.right.ref and gap.right.pad_number:
+        pad = board.pad_position(gap.right.ref, gap.right.pad_number)
+        if pad and pad['type'] == 'smd':
+            anchor = goal
+    spatial = {}
+    obstacles = {layer: _copper_obstacles(board, net_name=gap.left.net, layer=layer)
+                 for layer in layers}
+    margin = max(width, via_diameter) / 2 + clearance
+    for layer, items in obstacles.items():
+        for index, obstacle in enumerate(items):
+            radius = obstacle.radius + margin
+            for x in range(math.floor((min(obstacle.start[0], obstacle.end[0])-radius)/2),
+                           math.floor((max(obstacle.start[0], obstacle.end[0])+radius)/2)+1):
+                for y in range(math.floor((min(obstacle.start[1], obstacle.end[1])-radius)/2),
+                               math.floor((max(obstacle.start[1], obstacle.end[1])+radius)/2)+1):
+                    spatial.setdefault((layer, x, y), set()).add(index)
+    cache = {}
+
+    def clear(a, b, layer, radius):
+        key = (a, b, layer, radius)
+        if key not in cache:
+            indices = set()
+            for x in range(math.floor(min(a[0], b[0])/2), math.floor(max(a[0], b[0])/2)+1):
+                for y in range(math.floor(min(a[1], b[1])/2), math.floor(max(a[1], b[1])/2)+1):
+                    indices.update(spatial.get((layer, x, y), ()))
+            cache[key] = all(_segment_distance(a, b, obstacles[layer][i].start,
+                                               obstacles[layer][i].end) + 1e-9
+                             >= obstacles[layer][i].radius + radius + clearance
+                             for i in indices)
+        return cache[key]
+
+    def point(node):
+        return (anchor[0] + node[0]*step, anchor[1] + node[1]*step)
+
+    def endpoint_layers(endpoint):
+        connected = _existing_via_layers(board, endpoint)
+        if connected:
+            return tuple(sorted(connected))
+        if endpoint.ref and endpoint.pad_number:
+            pad = board.pad_position(endpoint.ref, endpoint.pad_number)
+            if (pad and pad['type'] == 'thru_hole' and pad['net'] == gap.left.net
+                    and math.dist((pad['x'], pad['y']), (endpoint.x, endpoint.y)) < 1e-4
+                    and '*.Cu' in pad['layers']):
+                return layers
+        return (endpoint.layer,)
+
+    # DRC picks an arbitrary representative of each disconnected island.
+    # Follow existing same-net copper rather than forcing that representative
+    # pad to acquire another escape via through already congested geometry.
+    graph = {}
+    def copper_node(pos, layer):
+        return (round(pos[0],4), round(pos[1],4), layer)
+    def join(a, b):
+        graph.setdefault(a,set()).add(b)
+        graph.setdefault(b,set()).add(a)
+    for track in board.list_tracks(net=gap.left.net):
+        if track.get('start') and track.get('end') and track.get('layer') in layers:
+            join(copper_node(track['start'],track['layer']), copper_node(track['end'],track['layer']))
+    for node in list(graph):
+        endpoint = _DrcEndpoint(node[0],node[1],gap.left.net,node[2])
+        for layer in _existing_via_layers(board, endpoint):
+            join(node, (node[0],node[1],layer))
+
+    def seeds(endpoint, opposite):
+        initial = [copper_node((endpoint.x,endpoint.y),layer) for layer in endpoint_layers(endpoint)]
+        reachable, pending = set(initial), list(initial)
+        while pending:
+            for node in graph.get(pending.pop(), ()):
+                if node not in reachable:
+                    reachable.add(node)
+                    pending.append(node)
+        ports = sorted(reachable,key=lambda node:math.dist(node[:2],opposite))[:16]
+        result, connectors = {}, {}
+        for px, py, layer in ports:
+            origin = (px,py)
+            cx, cy = round((px-anchor[0])/step), round((py-anchor[1])/step)
+            for x in range(cx-3, cx+4):
+                for y in range(cy-3, cy+4):
+                    node, pos = (x,y,layer), point((x,y,layer))
+                    distance = math.dist(origin,pos)
+                    if (bounds[0] <= pos[0] <= bounds[2] and bounds[1] <= pos[1] <= bounds[3]
+                            and distance < result.get(node,math.inf)
+                            and clear(origin,pos,layer,width/2)):
+                        result[node], connectors[node] = distance, origin
+        return result, connectors
+
+    (starts,start_ports), (ends,end_ports) = seeds(gap.left,goal), seeds(gap.right,start)
+    if not starts or not ends:
+        return None
+    if len(starts) > len(ends):
+        starts, ends = ends, starts
+        start_ports, end_ports = end_ports, start_ports
+        start, goal = goal, start
+    costs, parents, queue = dict(starts), {}, []
+    for node, cost in starts.items():
+        heapq.heappush(queue, (cost + math.dist(point(node), goal), cost, node))
+    end = None
+    while queue and len(parents) < 80000 and time.monotonic() < deadline:
+        _, cost, node = heapq.heappop(queue)
+        if cost > costs[node] + 1e-9:
+            continue
+        if node in ends:
+            end = node
+            break
+        pos = point(node)
+        neighbors = []
+        for dx, dy in ((1,0),(-1,0),(0,1),(0,-1),(1,1),(1,-1),(-1,1),(-1,-1)):
+            neighbor = (node[0]+dx, node[1]+dy, node[2])
+            dest = point(neighbor)
+            if (bounds[0] <= dest[0] <= bounds[2] and bounds[1] <= dest[1] <= bounds[3]
+                    and clear(pos, dest, node[2], width/2)):
+                neighbors.append((neighbor, math.hypot(dx,dy)*step))
+        if all(clear(pos, pos, layer, via_diameter/2) for layer in layers):
+            neighbors.append(((node[0], node[1], layers[1-layers.index(node[2])]), 3.0))
+        for neighbor, distance in neighbors:
+            next_cost = cost + distance
+            if next_cost + 1e-9 < costs.get(neighbor, math.inf):
+                costs[neighbor], parents[neighbor] = next_cost, node
+                heapq.heappush(queue, (next_cost + 2.5 * math.dist(point(neighbor), goal), next_cost, neighbor))
+    if end is None:
+        return None
+    nodes = [end]
+    while nodes[-1] in parents:
+        nodes.append(parents[nodes[-1]])
+    nodes.reverse()
+    tracks = [(start_ports[nodes[0]], point(nodes[0]), nodes[0][2])]
+    vias = []
+    for a, b in zip(nodes, nodes[1:]):
+        if a[2] != b[2]:
+            vias.append(point(a))
+        else:
+            tracks.append((point(a), point(b), a[2]))
+    tracks.append((point(nodes[-1]), end_ports[nodes[-1]], nodes[-1][2]))
+    return _CopperPatch(tracks=tuple((a,b,layer) for a,b,layer in tracks if math.dist(a,b)>1e-6),
+                        vias=tuple(vias))
 
 
 def _refill_copper_zones(pcb_path: Path) -> bool:
@@ -18374,13 +18728,27 @@ def _route_gap_check_evidence(
         return [], {}
     pcb_path = Path(write.pcb_path)
     report_candidates = (
+        pcb_path.with_suffix(".route-observation.drc.json"),
+        pcb_path.with_suffix(".recovered.drc.json"),
         pcb_path.with_suffix(".route-final.drc.json"),
         pcb_path.with_suffix(".ahe-route.drc.json"),
         pcb_path.with_suffix(".drc.json"),
     )
-    report_path = next((path for path in report_candidates if path.is_file()), None)
+    pcb_digest = hashlib.sha256(pcb_path.read_bytes()).hexdigest()
+    report_path = None
+    for candidate in report_candidates:
+        try:
+            if json.loads(candidate.read_text(encoding="utf-8")).get("ratsnest_artifact_sha256") == pcb_digest:
+                report_path = candidate
+                break
+        except (OSError, ValueError, TypeError):
+            continue
     if report_path is None:
-        return [], {}
+        cli = kicad_cli_available()
+        if not cli:
+            return [], {"error": "current-copper DRC evidence unavailable"}
+        report_path = pcb_path.with_suffix(".route-observation.drc.json")
+        _run_kicad_drc_snapshot(cli, pcb_path, report_path)
     snapshot = _read_drc_snapshot(report_path)
     if snapshot.parse_error or not snapshot.gaps:
         return [], {}
@@ -18415,7 +18783,7 @@ def _repair_drc_connectivity_gaps(
     """Greedily close DRC gaps, accepting only monotonic, DRC-safe patches."""
 
     from ratsnestpro.eda.vendor.pcb import PcbBoard
-    from ratsnestpro.eda.vendor.sexpr import find_all
+    from ratsnestpro.eda.vendor.sexpr import find_all, find_first
 
     write = state.artifact(PipelineStep.LAYOUT_WRITE)
     if not isinstance(write, PcbWriteResult):
@@ -18451,9 +18819,34 @@ def _repair_drc_connectivity_gaps(
         backup_path.unlink(missing_ok=True)
         return _synchronize_route_result_with_drc(artifact, baseline)
 
+    # A planned pour can already own these connections. Keeping its redundant
+    # same-net segments as fixed router obstacles creates artificial mazes.
+    # Removal is provisional and must preserve actual KiCad connectivity.
+    assignments = {(a['net'], a['layer']) for a in _resolved_plane_assignments(state, artifact.layers)}
+    if has_copper_zones and assignments:
+        board = PcbBoard.load(pcb_path)
+        names = {n['index']:n['name'] for n in board.list_nets()}
+        removed = False
+        for segment in list(find_all(board.root, 'segment')):
+            net, layer = find_first(segment,'net'), find_first(segment,'layer')
+            if net and layer and (names.get(int(str(net[1]))),str(layer[1])) in assignments:
+                board.root.remove(segment)
+                removed = True
+        if removed:
+            board.save(pcb_path)
+            normalized = (_run_kicad_drc_snapshot(cli, pcb_path, report_path)
+                          if _refill_copper_zones(pcb_path) else None)
+            if (normalized is not None and not normalized.parse_error
+                    and normalized.unconnected <= baseline.unconnected
+                    and set(normalized.non_connectivity_errors).issubset(baseline.non_connectivity_errors)):
+                baseline = normalized
+            else:
+                shutil.copy2(backup_path, pcb_path)
+
     added_tracks = 0
     added_vias = 0
     closed_gaps = 0
+    search_trace: list[dict[str, Any]] = []
     try:
         cap = config.process_capability()
         route_plan = state.artifact(PipelineStep.ROUTE_PLAN)
@@ -18470,18 +18863,22 @@ def _repair_drc_connectivity_gaps(
         candidates_per_gap = 6
         via_diameter, via_drill = _frozen_gap_via_rules(state)
         baseline_invariants = set(_routing_physical_invariant_blockers(state))
-        while baseline.gaps:
+        plane_nets = {a["net"] for a in _resolved_plane_assignments(state, artifact.layers)}
+        repair_deadline = min(ctx.ahe_deadline_monotonic or math.inf, time.monotonic() + 120.0)
+        while baseline.gaps and time.monotonic() < repair_deadline:
             improved = False
             ordered_gaps = sorted(
                 baseline.gaps,
-                key=lambda gap: math.hypot(
+                key=lambda gap: (gap.left.net in plane_nets, math.hypot(
                     gap.left.x - gap.right.x,
                     gap.left.y - gap.right.y,
-                ),
+                )),
             )
             for gap in ordered_gaps:
+                if time.monotonic() >= repair_deadline:
+                    break
                 board = PcbBoard.load(pcb_path)
-                width = _frozen_gap_route_width(state, gap.left.net)
+                width = _gap_candidate_width(state, board, gap)
                 front_paths = _obstacle_aware_copper_paths(
                     board,
                     gap,
@@ -18489,23 +18886,35 @@ def _repair_drc_connectivity_gaps(
                     clearance=clearance,
                     budget=candidates_per_gap,
                 )
+                trace = {"net": gap.left.net, "width": width, "same_layer_paths": len(front_paths), "candidates": 0}
+                search_trace.append(trace)
                 patches = [
                     _CopperPatch(tracks=tuple(
-                        (start, end, "F.Cu")
+                        (start, end, gap.left.layer)
                         for start, end in path
                     ))
                     for path in front_paths
                 ]
-                if not patches:
-                    patches = _micro_jump_copper_patches(
-                        board,
-                        gap,
-                        width=width,
-                        clearance=clearance,
-                        via_diameter=via_diameter,
-                        budget=candidates_per_gap,
-                    )
-                for patch in patches[:candidates_per_gap]:
+                def candidate_patches():
+                    yield from patches[:candidates_per_gap]
+                    # A geometric seed can fail real DRC. Try a layer jump
+                    # after rejected seeds too, not only when no seed exists.
+                    if time.monotonic() < repair_deadline:
+                        yield from _micro_jump_copper_patches(
+                            board, gap, width=width, clearance=clearance,
+                            via_diameter=via_diameter, budget=candidates_per_gap,
+                            deadline=repair_deadline,
+                        )
+                    if time.monotonic() < repair_deadline:
+                        layered = _multilayer_gap_patch(
+                            board, gap, width=width, clearance=clearance,
+                            via_diameter=via_diameter, deadline=repair_deadline)
+                        if layered is not None:
+                            yield layered
+                for patch in candidate_patches():
+                    trace["candidates"] += 1
+                    if time.monotonic() >= repair_deadline:
+                        break
                     candidate_backup = pcb_path.with_suffix(
                         ".ahe-route-candidate.kicad_pcb"
                     )
@@ -18531,7 +18940,7 @@ def _repair_drc_connectivity_gaps(
                         )
                     candidate_board.save(pcb_path)
                     refill_ok = (
-                        not patch.vias
+                        not has_copper_zones
                         or _refill_copper_zones(pcb_path)
                     )
                     after = (
@@ -18549,6 +18958,24 @@ def _repair_drc_connectivity_gaps(
                         if refill_ok
                         else {"zone refill failed"}
                     )
+                    # A signal path may split a poured ground island. Finish
+                    # its owned plane repair inside this uncommitted candidate
+                    # before judging whole-board monotonicity.
+                    plane_nets = {a["net"] for a in _resolved_plane_assignments(state, artifact.layers)}
+                    signal_gain = (sum(g.left.net not in plane_nets for g in after.gaps)
+                                   < sum(g.left.net not in plane_nets for g in baseline.gaps))
+                    if (has_copper_zones and signal_gain and not after.parse_error
+                            and after.unconnected >= baseline.unconnected
+                            and set(after.non_connectivity_errors).issubset(baseline.non_connectivity_errors)
+                            and time.monotonic() + 5 < repair_deadline):
+                        prior_deadline = ctx.ahe_deadline_monotonic
+                        ctx.ahe_deadline_monotonic = min(repair_deadline, time.monotonic() + 60)
+                        try:
+                            _repair_power_plane_gaps(state, ctx, _synchronize_route_result_with_drc(artifact, after))
+                            after = _run_kicad_drc_snapshot(cli, pcb_path, report_path)
+                            after_invariants = set(_routing_physical_invariant_blockers(state))
+                        finally:
+                            ctx.ahe_deadline_monotonic = prior_deadline
                     safe = (
                         not after.parse_error
                         and after.unconnected < baseline.unconnected
@@ -18557,6 +18984,9 @@ def _repair_drc_connectivity_gaps(
                         )
                         and after_invariants.issubset(baseline_invariants)
                     )
+                    trace.update({"remaining": after.unconnected, "accepted": safe,
+                                  "errors": list(after.non_connectivity_errors)[:3],
+                                  "new_invariants": sorted(after_invariants-baseline_invariants)[:3]})
                     if safe:
                         closed_gaps += baseline.unconnected - after.unconnected
                         added_tracks += len(patch.tracks)
@@ -18604,9 +19034,15 @@ def _repair_drc_connectivity_gaps(
                 ),
             }
         )
-    except Exception:  # noqa: BLE001 - the rejected repair is rolled back below
+    except Exception as exc:  # noqa: BLE001 - retain evidence before rollback
+        search_trace.append({"error_type": type(exc).__name__, "error": str(exc)[:1000]})
         return artifact
     finally:
+        try:
+            pcb_path.with_suffix(".copper-repair-trace.json").write_text(
+                json.dumps(search_trace[-50:], ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
         if backup_path.is_file():
             shutil.copy2(backup_path, pcb_path)
             backup_path.unlink(missing_ok=True)
@@ -18793,19 +19229,16 @@ def _repair_power_plane_gaps(
             default=cap.min_clearance,
         ),
     )
-    explicit_track_width = (
-        extract_requirement_invariants(
-            state.requirement_text
-        ).minimum_track_width_mm
-        or 0.0
+    width_invariants = extract_requirement_invariants(state.requirement_text)
+    plane_nets = {assignment["net"] for assignment in assignments}
+    explicit_track_width = max(
+        [required_track_width(width_invariants, net) for net in plane_nets]
+        + [float(c.minimum_width or 0.0) for c in net_classes if plane_nets.intersection(c.nets)],
+        default=0.0,
     )
     track_width = max(
         cap.min_track_width,
         explicit_track_width,
-        min(
-            (net_class.width for net_class in net_classes),
-            default=cap.min_track_width,
-        ),
     )
     via_diameter = max(
         cap.min_via_diameter,
@@ -18827,6 +19260,8 @@ def _repair_power_plane_gaps(
         / "_plane_stitch_worker.py"
     )
     report_path = pcb_path.with_suffix(".ahe-plane.drc.json")
+    from ratsnestpro.eda.fanout_policy import load_fanout_approval
+    fanout_approval = load_fanout_approval(pcb_path, width_invariants.source_digest)
     backup_path = pcb_path.with_suffix(".ahe-plane-backup.kicad_pcb")
     shutil.copy2(pcb_path, backup_path)
     try:
@@ -18844,6 +19279,8 @@ def _repair_power_plane_gaps(
                 str(via_diameter),
                 str(via_drill),
                 str(report_path),
+                json.dumps(fanout_approval),
+                str(max(0.0, min(120.0, (ctx.ahe_deadline_monotonic or math.inf) - time.monotonic()))),
             ],
             capture_output=True,
             text=True,
@@ -19318,38 +19755,48 @@ def _physical_plane_mismatches(
     ]
 
 
+def _physical_net_class_rules(state: PipelineState) -> dict[str, dict[str, Any]]:
+    from ratsnestpro.eda.routing_rules import bind_net_classes
+
+    plan = state.artifact(PipelineStep.ROUTE_PLAN)
+    if not isinstance(plan, RoutePlan):
+        return {}
+    names, power = RoutePlanStep._routing_nets(state)
+    classes = bind_net_classes([c.model_dump() for c in plan.net_classes], names, power)
+    invariants = extract_requirement_invariants(state.requirement_text)
+    process_minimum = config.process_capability().min_track_width
+    # KiCad netclass width is a preferred routing value. Only explicit minima
+    # are release constraints; a model's conservative default is not one.
+    return {name: {**rule, "width": max(
+        process_minimum, float(rule.get("minimum_width") or 0.0),
+        required_track_width(invariants, name),
+    )} for rule in classes for name in rule["nets"]}
+
+
 def _undersized_physical_tracks(
     state: PipelineState,
     board: Any,
 ) -> list[dict[str, Any]]:
-    """Return real segments below their process or explicit width floor."""
+    """Use the same class/process/requirement floors as the final copper audit."""
 
     cap = config.process_capability()
     invariants = extract_requirement_invariants(state.requirement_text)
-    explicit_floor = invariants.minimum_track_width_mm or 0.0
-    explicit_nets = {
-        name.upper().lstrip("+")
-        for name in invariants.minimum_track_width_nets
-    }
     undersized: list[dict[str, Any]] = []
+    class_widths = {name: rule["width"] for name, rule in _physical_net_class_rules(state).items()}
+    neckdowns = fanout_exemptions(board, invariants, class_widths)
     for track in board.list_tracks():
         width = track.get("width")
         if width is None:
             continue
         net_name = str(track.get("net_name", ""))
-        normalized_net = net_name.upper().lstrip("+")
-        explicit_applies = (
-            explicit_floor > 0
-            and (
-                not explicit_nets
-                or normalized_net in explicit_nets
-            )
-        )
         required_width = max(
             cap.min_track_width,
-            explicit_floor if explicit_applies else 0.0,
+            required_track_width(invariants, net_name),
+            class_widths.get(net_name, 0.0),
         )
-        if float(width) + 1e-9 < required_width:
+        if (float(width) + 1e-9 < required_width
+                and (float(width) + 1e-9 < cap.min_track_width
+                     or track.get("uuid") not in neckdowns)):
             undersized.append({
                 "uuid": str(track.get("uuid") or ""),
                 "net_name": net_name,
@@ -19819,7 +20266,6 @@ def _routing_physical_invariant_blockers(state: PipelineState) -> list[str]:
 
 def _net_class_geometry_blockers(state: PipelineState) -> list[str]:
     """Independently measure final copper; a preferred KiCad netclass is not a DRC minimum."""
-    from ratsnestpro.eda.routing_rules import bind_net_classes
     from ratsnestpro.eda.vendor.pcb import PcbBoard
     from ratsnestpro.eda.vendor.sexpr import find_all, find_first
 
@@ -19827,14 +20273,17 @@ def _net_class_geometry_blockers(state: PipelineState) -> list[str]:
     if not isinstance(plan, RoutePlan) or not isinstance(write, PcbWriteResult):
         return []
     try:
-        names, power = RoutePlanStep._routing_nets(state)
-        classes = bind_net_classes([c.model_dump() for c in plan.net_classes], names, power)
-        rules = {name: c for c in classes for name in c["nets"]}
+        rules = _physical_net_class_rules(state)
         board = PcbBoard.load(Path(write.pcb_path))
         failures = []
+        neckdowns = fanout_exemptions(
+            board, extract_requirement_invariants(state.requirement_text),
+            {name: rule["width"] for name, rule in rules.items()},
+        )
         for track in board.list_tracks():
             rule = rules.get(track["net_name"])
-            if rule and (track["width"] is None or track["width"] + 1e-6 < rule["width"]):
+            if (rule and track.get("uuid") not in neckdowns
+                    and (track["width"] is None or track["width"] + 1e-6 < rule["width"])):
                 failures.append(f"track {track['uuid']} net {track['net_name']}: width {track['width']} < {rule['width']}")
         net_names = {n["index"]: n["name"] for n in board.list_nets()}
         for via in find_all(board.root, "via"):
@@ -19859,7 +20308,18 @@ class RouteSignalsStep(PipelineStepBase):
     allow_artifact_first_design_repair = True
     repair_is_deterministic = True
     knowledge_role = "routing"
-    repair_strategy_id = "route_plane_stitch_and_local_search_v2"
+    repair_strategy_id = "route_pad_boundary_coupled_escape_v9"
+
+    def replan(
+        self, state: PipelineState, ctx: PipelineContext, knowledge: str,
+        artifact: BaseModel, feedback: str,
+    ) -> tuple[BaseModel, bool]:
+        # Downstream DRC findings reopen the existing copper candidate. The
+        # inherited full proposer would erase local repairs and rerun identical
+        # Freerouting inputs without implementing the model's repair guidance.
+        if isinstance(artifact, RouteResult):
+            return self.repair(state, ctx, knowledge, artifact, self.check(state, artifact))
+        return self.propose(state, ctx, knowledge)
 
     def propose(
         self, state: PipelineState, ctx: PipelineContext, knowledge: str
@@ -19890,24 +20350,26 @@ class RouteSignalsStep(PipelineStepBase):
             route_plan.net_classes if isinstance(route_plan, RoutePlan) else []
         )
         cap = config.process_capability()
-        explicit_track_width = (
-            extract_requirement_invariants(
-                state.requirement_text
-            ).minimum_track_width_mm
-            or 0.0
-        )
+        width_invariants = extract_requirement_invariants(state.requirement_text)
+        from ratsnestpro.eda.routing_rules import bind_net_classes
+        bound_classes = bind_net_classes(
+            [c.model_dump() for c in net_classes], *RoutePlanStep._routing_nets(state),
+        ) if net_classes else []
+        executed_classes = [
+            {**c, "width": max(
+                c["width"], float(c.get("minimum_width") or 0.0), max((required_track_width(width_invariants, net)
+                                 for net in c["nets"]), default=0.0),
+            )} for c in bound_classes
+        ]
         route_rules = {
             "clearance_mm": min(
                 (net_class.clearance for net_class in net_classes),
                 default=cap.min_clearance,
             ),
             # Default geometry only; every actual net gets its own DSN class below.
-            "track_width_mm": max(
-                explicit_track_width,
-                min(
-                    (net_class.width for net_class in net_classes),
-                    default=cap.min_track_width,
-                ),
+            "track_width_mm": min(
+                (c["width"] for c in executed_classes),
+                default=cap.min_track_width,
             ),
             "via_diameter_mm": min(
                 (net_class.via_diameter for net_class in net_classes),
@@ -19918,6 +20380,13 @@ class RouteSignalsStep(PipelineStepBase):
                 default=cap.min_via_drill,
             ),
         }
+        from ratsnestpro.repair.routability import write_preflight
+        congestion = write_preflight(pcb_path, clearance=route_rules["clearance_mm"],
+                                     width=route_rules["track_width_mm"])
+        if ctx.on_ahe_event and congestion["enclosed_pads"]:
+            ctx.on_ahe_event({"event":"routability.preflight", "step":"route_signals",
+                              "enclosed_pad_count":len(congestion["enclosed_pads"]),
+                              "joint_group_count":len(congestion["joint_groups"])})
         layers = max(
             planned_layers,
             _requested_layer_count(state.requirement_text),
@@ -19974,8 +20443,8 @@ class RouteSignalsStep(PipelineStepBase):
                 max_passes=max_passes,
                 layer_count=attempt_layers,
                 random_seed=seed,
-                net_classes=[{**c.model_dump(), "width": max(c.width, explicit_track_width)}
-                             for c in net_classes],
+                net_classes=executed_classes,
+                requirement_digest=width_invariants.source_digest,
                 power_nets=RoutePlanStep._routing_nets(state)[1],
                 critical_nets=(state.artifact(PipelineStep.ROUTE_PLANES).critical_nets
                                if isinstance(state.artifact(PipelineStep.ROUTE_PLANES), PlanePlan)
@@ -19983,7 +20452,7 @@ class RouteSignalsStep(PipelineStepBase):
                 **rules,
             )
             current.note = (
-                f"routing_profile={profile}; deterministic_seed={seed}; "
+                f"routing_profile={profile}; requested_seed={seed}; seed_applied=False; "
                 f"{current.note}"
             )
             current_score = (
@@ -20042,7 +20511,10 @@ class RouteSignalsStep(PipelineStepBase):
                 outcome = candidate
         adaptive_rules = {
             "clearance_mm": cap.min_clearance,
-            "track_width_mm": max(cap.min_track_width, explicit_track_width),
+            "track_width_mm": max(
+                cap.min_track_width,
+                min((required_track_width(width_invariants, net) for net in netmap), default=0.0),
+            ),
             "via_diameter_mm": cap.min_via_diameter,
             "via_drill_mm": cap.min_via_drill,
         }
@@ -20071,7 +20543,6 @@ class RouteSignalsStep(PipelineStepBase):
             )
             if candidate is not None:
                 outcome = candidate
-        active_rules = route_rules
         if outcome.ok and outcome.unconnected > 0 and adaptive_allowed:
             candidate = route_once(
                 attempt_layers=outcome.layers,
@@ -20081,24 +20552,9 @@ class RouteSignalsStep(PipelineStepBase):
             )
             if candidate is not None:
                 outcome = candidate
-                active_rules = adaptive_rules
-        # Freerouting is heuristic: the same legal geometry can leave one
-        # connection on one seed and finish on another.  Run a bounded,
-        # reproducible seed portfolio before escalating to an upstream layout
-        # replan.  Geometry and release gates remain unchanged.
-        if outcome.ok and outcome.unconnected > 0:
-            for _ in range(3):
-                if outcome.unconnected == 0:
-                    break
-                candidate = route_once(
-                    attempt_layers=outcome.layers,
-                    max_passes=100,
-                    rules=active_rules,
-                    profile="seed_portfolio",
-                )
-                if candidate is None:
-                    break
-                outcome = candidate
+        # The installed Freerouting API has no seed option. Repeating identical
+        # input under a different reported seed is not a new search strategy.
+        # Keep genuine layer/pass/rule alternatives above; then use CAD repair.
         if best_outcome is not None:
             outcome = best_outcome
             if best_pcb_path.is_file():
@@ -20169,6 +20625,23 @@ class RouteSignalsStep(PipelineStepBase):
 
     def check(self, state: PipelineState, artifact: BaseModel) -> list[CheckResult]:
         assert isinstance(artifact, RouteResult)
+        if artifact.method != "freerouting":
+            # No successful router result exists. A subsequent DRC snapshot
+            # of the unrouted board cannot turn a tool crash into a design gap.
+            programming_error = bool(re.search(
+                r"\b(?:TypeError|AttributeError|KeyError|NameError|ImportError|SexprError):",
+                artifact.note,
+            ))
+            return [CheckResult(
+                name="routing_tool_execution", ok=False,
+                severity=Severity.ERROR if artifact.required else Severity.WARNING,
+                blocks_execution=artifact.required,
+                origin=FailureOrigin.HARNESS if programming_error else FailureOrigin.INFRASTRUCTURE,
+                reason_code="routing_tool_failed",
+                message=f"router did not complete: {artifact.note}",
+                evidence={"owner_step": "route_signals", "method": artifact.method,
+                          "dsn_path": artifact.dsn_path, "ses_path": artifact.ses_path},
+            )]
         complete = (
             artifact.method == "freerouting"
             and artifact.total_nets > 0
@@ -20241,6 +20714,12 @@ class RouteSignalsStep(PipelineStepBase):
         checks: list[CheckResult],
     ) -> tuple[BaseModel, bool]:
         assert isinstance(artifact, RouteResult)
+        if ctx.strong_repair is not None and any(not check.ok for check in checks):
+            from ratsnestpro.repair.pipeline_adapter import try_strong_repair
+
+            escalated = try_strong_repair(state, ctx, artifact)
+            if escalated is not None:
+                return escalated, False
         if ctx.active_recovery_tool == "apply_cad_action_batch":
             batch = ctx.active_cad_action_batch
             write = state.artifact(PipelineStep.LAYOUT_WRITE)
@@ -20301,10 +20780,19 @@ class RouteSignalsStep(PipelineStepBase):
         if ctx.active_recovery_tool == "repair_physical_track_width":
             repaired = _repair_undersized_physical_tracks(state, artifact)
             return (repaired if repaired != artifact else artifact), False
+        if ctx.active_recovery_tool == "repair_route_endpoint_placement":
+            return _repair_route_endpoint_placement(self, state, ctx, knowledge, artifact), False
         if ctx.active_recovery_tool:
             # An unsupported local capability must return to reflection. It
             # cannot silently become a full-board Freerouting invocation.
             return artifact, False
+        if any(not check.ok and check.name in {"net_class_geometry", "routing_physical_invariants"}
+               and "width" in check.message.casefold() for check in checks):
+            # Connectivity search on illegal narrow copper spends its budget
+            # optimizing a candidate the release audit must reject afterwards.
+            # Repair owned geometry first, or return to model reflection.
+            repaired = _repair_undersized_physical_tracks(state, artifact)
+            return (repaired if repaired != artifact else artifact), False
         repaired = _repair_drc_connectivity_gaps(state, ctx, artifact)
         if repaired.unconnected < artifact.unconnected:
             return repaired, False
@@ -20323,16 +20811,10 @@ class RouteSignalsStep(PipelineStepBase):
         repaired = _repair_power_plane_gaps(state, ctx, artifact)
         if repaired != artifact:
             return repaired, False
-        return (
-            _repair_route_endpoint_placement(
-                self,
-                state,
-                ctx,
-                knowledge,
-                artifact,
-            ),
-            False,
-        )
+        # Relocating an endpoint rebuilds the board and runs a full routing
+        # portfolio. Keep that capability explicit and model-selectable, not
+        # an invisible escalation after a bounded copper search stagnates.
+        return artifact, False
 
     def repair_applicable(
         self,
@@ -20343,6 +20825,7 @@ class RouteSignalsStep(PipelineStepBase):
         write = state.artifact(PipelineStep.LAYOUT_WRITE)
         return (
             isinstance(artifact, RouteResult)
+            and artifact.method == "freerouting"
             and (
                 artifact.unconnected > 0
                 or any(
@@ -20386,6 +20869,7 @@ class RouteSignalsStep(PipelineStepBase):
         if (
             isinstance(artifact, RouteResult)
             and artifact.required
+            and artifact.method == "freerouting"
             and artifact.unconnected > 0
         ):
             return PipelineStep.LAYOUT_PARTITION
@@ -20807,6 +21291,97 @@ def _repair_silkscreen_entities(
     return repaired
 
 
+def _repair_redundant_copper_entities(state: PipelineState, cli: str,
+                                     pcb_path: Path, report_path: Path) -> bool:
+    """Remove proven dead copper / merge same-net redundant drills transactionally.
+
+    A dangling via may leave a dangling stub when removed; treat both edits
+    as one candidate, not two separately rejected repair iterations.
+    """
+    from ratsnestpro.eda.vendor.pcb import PcbBoard
+    from ratsnestpro.eda.vendor.sexpr import find_first, tag_of
+
+    kinds = {"via_dangling", "track_dangling", "hole_to_hole"}
+    deadline, changed = time.monotonic() + 120, False
+    candidate_report = pcb_path.with_suffix(".copper-cleanup.drc.json")
+    for _ in range(12):
+        baseline = _read_drc_snapshot(report_path)
+        if baseline.parse_error or baseline.unconnected or baseline.non_connectivity_errors:
+            break
+        counts = _warning_type_counts(report_path)
+        findings = [v for v in _kicad_warning_findings(report_path) if v.get("type") in kinds]
+        accepted = False
+        for finding in findings:
+            for item in finding.get("items", []):
+                if time.monotonic() >= deadline:
+                    return changed
+                original = pcb_path.read_bytes()
+                try:
+                    board = PcbBoard.load(pcb_path)
+                    entities = {str(u[1]): n for n in board.root
+                                if tag_of(n) in {"via", "segment"}
+                                and (u := find_first(n, "uuid")) is not None}
+                    victim = entities.get(str(item.get("uuid", "")))
+                    if victim is None:
+                        continue
+                    net = int(str(find_first(victim, "net")[1]))
+                    board.root.remove(victim)
+                    if finding.get("type") == "hole_to_hole":
+                        partner = next((entities.get(str(i.get("uuid", "")))
+                                        for i in finding["items"] if i != item), None)
+                        if (tag_of(victim) != "via" or partner is None or tag_of(partner) != "via"
+                                or int(str(find_first(partner, "net")[1])) != net):
+                            continue
+                        a, b = find_first(victim, "at"), find_first(partner, "at")
+                        name = next(n["name"] for n in board.list_nets() if n["index"] == net)
+                        width = _physical_net_class_rules(state).get(name, {}).get("width", .2)
+                        for layer in ("F.Cu", "B.Cu"):
+                            board.add_track(float(str(a[1])), float(str(a[2])),
+                                            float(str(b[1])), float(str(b[2])),
+                                            width=width, layer=layer, net=name)
+                    board.save(pcb_path)
+                    for prune in range(3):
+                        if not _refill_copper_zones(pcb_path):
+                            break
+                        after = _run_kicad_drc_snapshot(cli, pcb_path, candidate_report)
+                        after_counts = _warning_type_counts(candidate_report)
+                        if after.parse_error or after.unconnected or after.non_connectivity_errors:
+                            break
+                        if sum(after_counts[k] for k in kinds) < sum(counts[k] for k in kinds) and not (after_counts-counts):
+                            accepted = True
+                            break
+                        # Prune only newly exposed same-net dead stubs, not
+                        # arbitrary routing or a pre-existing unrelated warning.
+                        old_ids = {i.get("uuid") for f in findings for i in f.get("items", [])}
+                        stubs = {i.get("uuid") for f in _kicad_warning_findings(candidate_report)
+                                 if f.get("type") == "track_dangling" for i in f.get("items", [])}
+                        board = PcbBoard.load(pcb_path)
+                        dead = [n for n in board.root if tag_of(n) == "segment"
+                                and (u := find_first(n,"uuid")) is not None
+                                and str(u[1]) in stubs-old_ids
+                                and int(str(find_first(n,"net")[1])) == net]
+                        if not dead or prune == 2:
+                            break
+                        for node in dead:
+                            board.root.remove(node)
+                        board.save(pcb_path)
+                    if accepted:
+                        shutil.copy2(candidate_report, report_path)
+                        changed = True
+                except (OSError, ValueError, KeyError, TypeError):
+                    accepted = False
+                finally:
+                    if not accepted:
+                        pcb_path.write_bytes(original)
+                if accepted:
+                    break
+            if accepted:
+                break
+        if not accepted:
+            break
+    return changed
+
+
 def _worker_result(
     command: list[str],
     *,
@@ -21154,6 +21729,8 @@ class ManufactureStep(PipelineStepBase):
                 pcb_path,
                 drc_report_path,
             )
+            if not drc and _repair_redundant_copper_entities(state, cli, pcb_path, drc_report_path):
+                drc = list(_read_drc_snapshot(drc_report_path).findings)
             if not drc and _repair_silkscreen_entities(
                 cli,
                 pcb_path,
@@ -21896,6 +22473,7 @@ def _candidate_managed_file(relative: Path) -> bool:
     return (
         relative.parts
         and relative.parts[0] != _CANDIDATE_FILE_SNAPSHOT_DIR
+        and relative.parts[0] != ".strong-repair"  # budgets/journals are not rollback-able CAD
         and not relative.parts[0].startswith(_CANDIDATE_FILE_RESTORE_PREFIX)
         and name not in _CANDIDATE_FILE_EXCLUDES
         and not name.startswith("temporal_input")
@@ -22956,6 +23534,24 @@ class Pipeline:
                     < max(0, ctx.max_replan_attempts)
                 ]
                 evidence_owner = _evidence_owned_rollback(result)
+                if step.step == PipelineStep.ROUTE_SIGNALS and any(
+                    check.name == "routing_tool_execution"
+                    for check in result.error_checks
+                ):
+                    # The router never returned usable execution evidence.
+                    # A different engineering plan cannot repair its adapter.
+                    allowed_targets = []
+                    suggested_rollback = None
+                if step.step == PipelineStep.SELECTION and result.error_checks and all(
+                    check.name == "footprints_bound_after_selection"
+                    or check.name.startswith("package_role_semantics:")
+                    for check in result.error_checks
+                ):
+                    # Asset binding/family validation is owned by Selection.
+                    # A different topology cannot fix a resolver or verifier;
+                    # keep local repair/investigation available, not blind replan.
+                    allowed_targets = []
+                    suggested_rollback = None
                 if evidence_owner is not None:
                     # Prefer the verifier's owner hypothesis, but permit the
                     # model to inspect and disprove it. Location is not cause.
@@ -23096,6 +23692,11 @@ class Pipeline:
                         or (
                             decision.action == RecoveryAction.STOP
                             and not hard_conflict
+                            and not (
+                                not decision_used_llm
+                                and decision.strategy == "recovery_output_unavailable_preserve_checkpoint"
+                                and decision.origin == FailureOrigin.HARNESS
+                            )
                             and bool(allowed_targets or local_repair_available)
                         )
                     )
@@ -23141,6 +23742,7 @@ class Pipeline:
                             }[decision.action],
                             "tool_args": {
                                 "repair_instructions": repair_instructions,
+                                "implementation": step.repair_strategy_id or step.step.value,
                             },
                             "cad_action_batch": (
                                 validated_batch

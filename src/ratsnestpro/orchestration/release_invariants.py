@@ -17,6 +17,7 @@ from typing import Any, Literal
 from pydantic import Field, model_validator
 
 from ratsnestpro.domain.contracts import ContractModel
+from ratsnestpro.eda.fanout_policy import approved_fanout_tracks, load_fanout_approval
 
 _EVIDENCE_MARKERS = (
     "GROUNDED ARCHITECT EVIDENCE",
@@ -25,6 +26,12 @@ _EVIDENCE_MARKERS = (
 _GROUND_NAMES = {"GND", "AGND", "DGND", "PGND", "VSS"}
 _DIGEST_PATTERN = r"^[0-9a-f]{64}$"
 _CONTINUOUS_ZONE_MIN_COVERAGE = 0.80
+
+
+class TrackWidthRule(ContractModel):
+    width_mm: float = Field(gt=0)
+    scope: Literal["all", "power", "signal", "nets"] = "all"
+    nets: list[str] = Field(default_factory=list)
 
 
 class RequirementInvariants(ContractModel):
@@ -42,6 +49,7 @@ class RequirementInvariants(ContractModel):
     continuous_ground_required: bool = False
     minimum_track_width_mm: float | None = Field(default=None, gt=0)
     minimum_track_width_nets: list[str] = Field(default_factory=list)
+    track_width_rules: list[TrackWidthRule] = Field(default_factory=list)
     decoupling_max_distance_mm: float | None = Field(default=None, gt=0)
     mounting_hole_count: int | None = Field(default=None, ge=0, le=100)
     mounting_holes_non_plated: bool = False
@@ -86,6 +94,7 @@ class ReleaseInvariantManifest(ContractModel):
     requirement_release_blockers: list[str] = Field(default_factory=list)
     invariants: RequirementInvariants
     findings: list[InvariantFinding] = Field(default_factory=list)
+    fanout_approval_digest: str = ""
 
     @model_validator(mode="after")
     def _internally_consistent(self) -> ReleaseInvariantManifest:
@@ -146,13 +155,13 @@ def _explicit_layer_count(text: str) -> int | None:
     lower = text.lower()
     mentions: list[tuple[int, int]] = []
     for match in re.finditer(
-        r"\b(1[0-6]|[2-9])\s*(?:copper\s+)?layers?\b",
+        r"\b(1[0-6]|[2-9])[\s-]*(?:copper[\s-]+)?layers?\b",
         lower,
     ):
         mentions.append((match.start(), int(match.group(1))))
     for word, count in {"two": 2, "four": 4, "six": 6, "eight": 8}.items():
         for match in re.finditer(
-            rf"\b{word}\s+(?:copper\s+)?layers?\b",
+            rf"\b{word}[\s-]+(?:copper[\s-]+)?layers?\b",
             lower,
         ):
             mentions.append((match.start(), count))
@@ -305,6 +314,54 @@ def _decoupling_distance(text: str) -> float | None:
     return min(values) if values else None
 
 
+def _scoped_track_widths(text: str) -> list[TrackWidthRule]:
+    rules = []
+    for clause in re.split(r"[,，;；。\n]|\.(?=\s+[A-Za-z])", text):
+        width, nets = _minimum_track_width(clause)
+        if width is None:
+            continue
+        scope = ("nets" if nets else "power" if re.search(
+            r"\b(?:power|supply)\b|电源", clause, re.I,
+        ) else "signal" if re.search(r"\bsignal\b|信号", clause, re.I) else "all")
+        rule = TrackWidthRule(width_mm=width, scope=scope, nets=nets)
+        if rule not in rules:
+            rules.append(rule)
+    return rules
+
+
+def required_track_width(invariants: RequirementInvariants, net: str) -> float:
+    """One per-net width contract shared by routing, repair, and release."""
+    normalized = net.upper().lstrip("+")
+    power = _is_power_net(normalized) or _is_ground_net(normalized)
+    if invariants.track_width_rules:
+        return max((rule.width_mm for rule in invariants.track_width_rules if
+                    rule.scope == "all"
+                    or (rule.scope == "power" and power)
+                    or (rule.scope == "signal" and not power)
+                    or (rule.scope == "nets" and normalized in {
+                        name.upper().lstrip("+") for name in rule.nets
+                    })), default=0.0)
+    # Backward compatibility for stored v1 objects predating scoped rules.
+    names = {name.upper().lstrip("+") for name in invariants.minimum_track_width_nets}
+    return (invariants.minimum_track_width_mm or 0.0) if (
+        normalized in names if names else power
+    ) else 0.0
+
+
+def fanout_exemptions(board: Any, invariants: RequirementInvariants,
+                      class_widths: dict[str, float] | None = None) -> set[str]:
+    if not getattr(board, "path", None):
+        return set()
+    approval = load_fanout_approval(board.path, invariants.source_digest)
+
+    def power_floor(net: str) -> float:
+        if not (_is_power_net(net) or _is_ground_net(net)):
+            return 0.0
+        return max(required_track_width(invariants, net), (class_widths or {}).get(net, 0.0))
+
+    return approved_fanout_tracks(board, approval, power_floor)
+
+
 def _mounting_holes(text: str) -> tuple[int | None, bool]:
     lower = text.lower()
     non_plated = any(
@@ -399,6 +456,7 @@ def extract_requirement_invariants(requirement: str) -> RequirementInvariants:
         continuous_ground_required=continuous,
         minimum_track_width_mm=track_width,
         minimum_track_width_nets=track_nets,
+        track_width_rules=_scoped_track_widths(original),
         decoupling_max_distance_mm=_decoupling_distance(original),
         mounting_hole_count=hole_count,
         mounting_holes_non_plated=non_plated,
@@ -645,26 +703,21 @@ def audit_pcb_invariants(
                     affected_refs=plated,
                 ))
 
-    if invariants.minimum_track_width_mm is not None:
-        wanted_nets = {
-            name.upper().lstrip("+")
-            for name in invariants.minimum_track_width_nets
-        }
+    if invariants.minimum_track_width_mm is not None or invariants.track_width_rules:
         thin: list[str] = []
+        neckdowns = fanout_exemptions(board, invariants)
         for track in board.list_tracks():
             net = str(track.get("net_name", "")).upper().lstrip("+")
-            if wanted_nets and net not in wanted_nets:
-                continue
-            if not wanted_nets and not (_is_power_net(net) or _is_ground_net(net)):
-                continue
+            floor = required_track_width(invariants, net)
             width = track.get("width")
-            if width is not None and float(width) + 1e-9 < invariants.minimum_track_width_mm:
-                thin.append(f"{net or '<unnamed>'}:{float(width):.3f}mm")
+            if (width is not None and float(width) + 1e-9 < floor
+                    and track.get("uuid") not in neckdowns):
+                thin.append(f"{net or '<unnamed>'}:{float(width):.3f}mm < {floor:.3f}mm")
         if thin:
             findings.append(InvariantFinding(
                 invariant_id="minimum_track_width",
                 message=(
-                    f"tracks below {invariants.minimum_track_width_mm:.3f} mm: "
+                    "tracks below their scoped minimum width: "
                     f"{sorted(set(thin))}"
                 ),
             ))
@@ -754,6 +807,8 @@ def build_release_invariant_manifest(
         requirement_release_blockers=list(dict.fromkeys(blockers)),
         invariants=invariants,
         findings=findings,
+        fanout_approval_digest=load_fanout_approval(
+            pcb_path, invariants.source_digest).get("receipt_digest", ""),
     )
 
 
@@ -781,6 +836,9 @@ def validate_release_invariant_manifest(
         raise ValueError("release-invariant requirement source digest is stale")
     if manifest.invariants != expected_invariants:
         raise ValueError("release-invariant requirement contract is stale")
+    if manifest.fanout_approval_digest != load_fanout_approval(
+            pcb_path, expected_invariants.source_digest).get("receipt_digest", ""):
+        raise ValueError("release-invariant fanout approval is stale")
     expected_board = pcb_path.resolve()
     receipt_board = (manifest_path.parent / identity.pcb_relpath).resolve()
     if receipt_board.parent != manifest_path.parent.resolve():

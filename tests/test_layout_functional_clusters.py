@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 import ratsnestpro.orchestration.pipeline as pipeline
 from ratsnestpro.orchestration.pipeline import (
     CheckResult,
@@ -61,7 +63,11 @@ def test_local_support_prefers_functional_ic_over_button_or_connector() -> None:
     assert anchor == "U1"
 
 
-def test_local_support_inherits_functional_owner_zone(monkeypatch) -> None:
+@pytest.mark.parametrize("role", [
+    "boot0_pulldown", "mcu_vdd_decoupling", "mcu_bulk_capacitor",
+    "reset_filter_capacitor",
+])
+def test_local_support_inherits_functional_owner_zone(monkeypatch, role) -> None:
     state = PipelineState(requirement_text="board", project_name="board")
     state.artifacts[PipelineStep.LAYOUT_PARTITION] = pipeline.BoardPartition(
         board_width=70.0,
@@ -93,7 +99,7 @@ def test_local_support_inherits_functional_owner_zone(monkeypatch) -> None:
         lambda _state: {
             "U1": "mcu",
             "J2": "debug_connector",
-            "R2": "boot0_pulldown",
+            "R2": role,
         },
     )
     monkeypatch.setattr(
@@ -111,6 +117,95 @@ def test_local_support_inherits_functional_owner_zone(monkeypatch) -> None:
 
     assert targets["R2"] == (38.0, 22.5)
     assert "R2" not in ambiguities
+
+
+@pytest.mark.parametrize("role", [
+    "analog_filter_resistor_1", "analog_filter_capacitor_2",
+    "user_button_filter_capacitor", "audio_filter_inductor", "rf_filter_choke",
+])
+def test_filter_passives_are_proximity_sensitive_local_support(role) -> None:
+    assert pipeline._is_local_support_role(role)
+    assert pipeline._is_proximity_sensitive_role(role)
+
+
+@pytest.mark.parametrize("role", [
+    "analog_filter_controller", "analog_filter_connector", "filterbank",
+])
+def test_filter_active_parts_are_not_classified_as_passive_support(role) -> None:
+    assert not pipeline._is_local_support_role(role)
+
+
+@pytest.mark.parametrize("explicit_filter_zone", [False, True])
+def test_analog_rc_filters_use_signal_owner_unless_explicitly_zoned(
+    explicit_filter_zone,
+) -> None:
+    state = PipelineState(requirement_text="board", project_name="board")
+    parts = [
+        ("U1", "mcu", "MCU:Controller"),
+        ("U2", "ldo_regulator", "Regulator_Linear:LDO"),
+        ("J1", "analog_input_connector", "Connector_Generic:Conn_01x03"),
+        ("J2", "analog_input_connector", "Connector_Generic:Conn_01x03"),
+        ("R1", "analog_filter_resistor_1", "Device:R"),
+        ("R2", "analog_filter_resistor_2", "Device:R"),
+        ("C1", "analog_filter_capacitor_1", "Device:C"),
+        ("C2", "analog_filter_capacitor_2", "Device:C"),
+    ]
+    state.artifacts[PipelineStep.SELECTION] = pipeline.SelectionPlan(parts=[
+        pipeline.SelectedPart(ref=ref, role=role, symbol=symbol, value=role)
+        for ref, role, symbol in parts
+    ])
+    net_pins = [
+        ("AIN1_RAW", "signal", [("J1", "3"), ("R1", "1")]),
+        ("AIN2_RAW", "signal", [("J2", "3"), ("R2", "1")]),
+        ("MCU_AIN1", "signal", [("R1", "2"), ("U1", "17"), ("C1", "1")]),
+        ("MCU_AIN2", "signal", [("R2", "2"), ("U1", "18"), ("C2", "1")]),
+        ("GND", "ground", [
+            ("U1", "9"), ("U2", "2"), ("J1", "2"), ("J2", "2"),
+            ("C1", "2"), ("C2", "2"),
+        ]),
+    ]
+    state.artifacts[PipelineStep.SCH_PINMAP] = pipeline.PinMapPlan(nets=[
+        pipeline.MappedNet(name=name, kind=kind, pins=[
+            pipeline.MappedPin(ref=ref, logical=number, number=number)
+            for ref, number in pins
+        ])
+        for name, kind, pins in net_pins
+    ])
+    zones = [
+        pipeline.BoardZone(
+            name="mcu", kind="processor", target_ref="U1",
+            x1=16.0, y1=8.0, x2=38.0, y2=28.0,
+        ),
+        pipeline.BoardZone(
+            name="power_regulation", kind="power", target_ref="U2",
+            x1=6.0, y1=28.0, x2=20.0, y2=40.0,
+        ),
+        pipeline.BoardZone(
+            name="analog_input_1", kind="analog_input", target_ref="J1",
+            x1=0.0, y1=8.0, x2=12.0, y2=18.0,
+        ),
+        pipeline.BoardZone(
+            name="analog_input_2", kind="analog_input", target_ref="J2",
+            x1=0.0, y1=18.0, x2=12.0, y2=28.0,
+        ),
+    ]
+    if explicit_filter_zone:
+        zones.append(pipeline.BoardZone(
+            name="required_filter_position", kind="analog", target_ref="R1",
+            x1=4.0, y1=8.0, x2=12.0, y2=18.0,
+        ))
+    state.artifacts[PipelineStep.LAYOUT_PARTITION] = pipeline.BoardPartition(
+        board_width=70.0, board_height=45.0, zones=zones,
+    )
+
+    targets, ambiguities = pipeline._resolved_zone_targets(state)
+
+    assert not ambiguities
+    assert targets["R1"] == ((8.0, 13.0) if explicit_filter_zone else targets["U1"])
+    for ref in ("R2", "C1", "C2"):
+        assert targets[ref] == targets["U1"] == (27.0, 18.0)
+    assert targets["J1"] == (6.0, 13.0)
+    assert targets["J2"] == (6.0, 23.0)
 
 
 def test_layout_general_repairs_local_support_before_repacking(monkeypatch) -> None:

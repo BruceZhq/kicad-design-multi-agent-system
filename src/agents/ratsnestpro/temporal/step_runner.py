@@ -99,9 +99,19 @@ def main() -> int:
                 if command.get("vision_model_name")
                 else None
             ),
+            strong_model_name=(
+                str(command["strong_model_name"])
+                if command.get("strong_model_name")
+                else None
+            ),
             vision_reasoning_effort=(
                 str(command["vision_reasoning_effort"])
                 if command.get("vision_reasoning_effort")
+                else None
+            ),
+            strong_reasoning_effort=(
+                str(command["strong_reasoning_effort"])
+                if command.get("strong_reasoning_effort")
                 else None
             ),
             ahe_budget=(

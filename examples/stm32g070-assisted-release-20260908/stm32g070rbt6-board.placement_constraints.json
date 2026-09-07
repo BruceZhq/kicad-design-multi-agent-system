@@ -1,0 +1,366 @@
+{
+  "schema_version": "ratsnestpro.placement-constraints.v1",
+  "constraints": [
+    {
+      "constraint_id": "zone:H1",
+      "kind": "in_zone",
+      "refs": [
+        "H1"
+      ],
+      "region": [
+        0.0,
+        0.0,
+        6.0,
+        6.0
+      ],
+      "edge": "",
+      "max_distance_mm": 0.0,
+      "axis": "",
+      "hard": true,
+      "source": "partition",
+      "evidence": "exact partition zone mount_H1"
+    },
+    {
+      "constraint_id": "zone:H2",
+      "kind": "in_zone",
+      "refs": [
+        "H2"
+      ],
+      "region": [
+        64.0,
+        0.0,
+        70.0,
+        6.0
+      ],
+      "edge": "",
+      "max_distance_mm": 0.0,
+      "axis": "",
+      "hard": true,
+      "source": "partition",
+      "evidence": "exact partition zone mount_H2"
+    },
+    {
+      "constraint_id": "zone:H3",
+      "kind": "in_zone",
+      "refs": [
+        "H3"
+      ],
+      "region": [
+        0.0,
+        39.0,
+        6.0,
+        45.0
+      ],
+      "edge": "",
+      "max_distance_mm": 0.0,
+      "axis": "",
+      "hard": true,
+      "source": "partition",
+      "evidence": "exact partition zone mount_H3"
+    },
+    {
+      "constraint_id": "zone:H4",
+      "kind": "in_zone",
+      "refs": [
+        "H4"
+      ],
+      "region": [
+        64.0,
+        39.0,
+        70.0,
+        45.0
+      ],
+      "edge": "",
+      "max_distance_mm": 0.0,
+      "axis": "",
+      "hard": true,
+      "source": "partition",
+      "evidence": "exact partition zone mount_H4"
+    },
+    {
+      "constraint_id": "zone:J1",
+      "kind": "in_zone",
+      "refs": [
+        "J1"
+      ],
+      "region": [
+        0.0,
+        28.0,
+        6.0,
+        38.0
+      ],
+      "edge": "",
+      "max_distance_mm": 0.0,
+      "axis": "",
+      "hard": true,
+      "source": "partition",
+      "evidence": "exact partition zone power_input"
+    },
+    {
+      "constraint_id": "edge:J1:left",
+      "kind": "edge",
+      "refs": [
+        "J1"
+      ],
+      "region": null,
+      "edge": "left",
+      "max_distance_mm": 6.0,
+      "axis": "",
+      "hard": true,
+      "source": "derived",
+      "evidence": "connector zone power_input touches left edge"
+    },
+    {
+      "constraint_id": "zone:J2",
+      "kind": "in_zone",
+      "refs": [
+        "J2"
+      ],
+      "region": [
+        20.0,
+        34.0,
+        36.0,
+        45.0
+      ],
+      "edge": "",
+      "max_distance_mm": 0.0,
+      "axis": "",
+      "hard": true,
+      "source": "partition",
+      "evidence": "exact partition zone swd"
+    },
+    {
+      "constraint_id": "edge:J2:bottom",
+      "kind": "edge",
+      "refs": [
+        "J2"
+      ],
+      "region": null,
+      "edge": "bottom",
+      "max_distance_mm": 11.0,
+      "axis": "",
+      "hard": true,
+      "source": "derived",
+      "evidence": "connector zone swd touches bottom edge"
+    },
+    {
+      "constraint_id": "zone:J3",
+      "kind": "in_zone",
+      "refs": [
+        "J3"
+      ],
+      "region": [
+        36.0,
+        34.0,
+        56.0,
+        45.0
+      ],
+      "edge": "",
+      "max_distance_mm": 0.0,
+      "axis": "",
+      "hard": true,
+      "source": "partition",
+      "evidence": "exact partition zone i2c"
+    },
+    {
+      "constraint_id": "edge:J3:bottom",
+      "kind": "edge",
+      "refs": [
+        "J3"
+      ],
+      "region": null,
+      "edge": "bottom",
+      "max_distance_mm": 11.0,
+      "axis": "",
+      "hard": true,
+      "source": "derived",
+      "evidence": "connector zone i2c touches bottom edge"
+    },
+    {
+      "constraint_id": "zone:J4",
+      "kind": "in_zone",
+      "refs": [
+        "J4"
+      ],
+      "region": [
+        56.0,
+        12.0,
+        70.0,
+        31.0
+      ],
+      "edge": "",
+      "max_distance_mm": 0.0,
+      "axis": "",
+      "hard": true,
+      "source": "partition",
+      "evidence": "exact partition zone uart"
+    },
+    {
+      "constraint_id": "edge:J4:right",
+      "kind": "edge",
+      "refs": [
+        "J4"
+      ],
+      "region": null,
+      "edge": "right",
+      "max_distance_mm": 14.0,
+      "axis": "",
+      "hard": true,
+      "source": "derived",
+      "evidence": "connector zone uart touches right edge"
+    },
+    {
+      "constraint_id": "zone:J5",
+      "kind": "in_zone",
+      "refs": [
+        "J5"
+      ],
+      "region": [
+        0.0,
+        8.0,
+        12.0,
+        18.0
+      ],
+      "edge": "",
+      "max_distance_mm": 0.0,
+      "axis": "",
+      "hard": true,
+      "source": "partition",
+      "evidence": "exact partition zone analog_input_1"
+    },
+    {
+      "constraint_id": "edge:J5:left",
+      "kind": "edge",
+      "refs": [
+        "J5"
+      ],
+      "region": null,
+      "edge": "left",
+      "max_distance_mm": 12.0,
+      "axis": "",
+      "hard": true,
+      "source": "derived",
+      "evidence": "connector zone analog_input_1 touches left edge"
+    },
+    {
+      "constraint_id": "zone:J6",
+      "kind": "in_zone",
+      "refs": [
+        "J6"
+      ],
+      "region": [
+        0.0,
+        18.0,
+        12.0,
+        28.0
+      ],
+      "edge": "",
+      "max_distance_mm": 0.0,
+      "axis": "",
+      "hard": true,
+      "source": "partition",
+      "evidence": "exact partition zone analog_input_2"
+    },
+    {
+      "constraint_id": "edge:J6:left",
+      "kind": "edge",
+      "refs": [
+        "J6"
+      ],
+      "region": null,
+      "edge": "left",
+      "max_distance_mm": 12.0,
+      "axis": "",
+      "hard": true,
+      "source": "derived",
+      "evidence": "connector zone analog_input_2 touches left edge"
+    },
+    {
+      "constraint_id": "zone:U1",
+      "kind": "in_zone",
+      "refs": [
+        "U1"
+      ],
+      "region": [
+        16.0,
+        8.0,
+        38.0,
+        28.0
+      ],
+      "edge": "",
+      "max_distance_mm": 0.0,
+      "axis": "",
+      "hard": true,
+      "source": "partition",
+      "evidence": "exact partition zone mcu"
+    },
+    {
+      "constraint_id": "zone:U2",
+      "kind": "in_zone",
+      "refs": [
+        "U2"
+      ],
+      "region": [
+        6.0,
+        28.0,
+        20.0,
+        40.0
+      ],
+      "edge": "",
+      "max_distance_mm": 0.0,
+      "axis": "",
+      "hard": true,
+      "source": "partition",
+      "evidence": "exact partition zone power_regulation"
+    },
+    {
+      "constraint_id": "opposite:J1:J4",
+      "kind": "opposite_edges",
+      "refs": [
+        "J1",
+        "J4"
+      ],
+      "region": null,
+      "edge": "",
+      "max_distance_mm": 0.0,
+      "axis": "x",
+      "hard": true,
+      "source": "derived",
+      "evidence": "exact connector zones touch opposite board edges"
+    },
+    {
+      "constraint_id": "opposite:J4:J5",
+      "kind": "opposite_edges",
+      "refs": [
+        "J4",
+        "J5"
+      ],
+      "region": null,
+      "edge": "",
+      "max_distance_mm": 0.0,
+      "axis": "x",
+      "hard": true,
+      "source": "derived",
+      "evidence": "exact connector zones touch opposite board edges"
+    },
+    {
+      "constraint_id": "opposite:J4:J6",
+      "kind": "opposite_edges",
+      "refs": [
+        "J4",
+        "J6"
+      ],
+      "region": null,
+      "edge": "",
+      "max_distance_mm": 0.0,
+      "axis": "x",
+      "hard": true,
+      "source": "derived",
+      "evidence": "exact connector zones touch opposite board edges"
+    }
+  ],
+  "board_width": 70.0,
+  "board_height": 45.0,
+  "constraint_digest": "18c9a83cd5685e99d9dc00c900f4683bec8a267db11fa7cfa200a70bda192605",
+  "source_requirement_digest": "0bc94b8099ec51238689dd670d11ee4c4946daddc01dfd83e33f530c195eb310"
+}

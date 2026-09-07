@@ -1,2 +1,3 @@
 evals/**/*.json text eol=lf
 backend/mvnw text eol=lf
+examples/stm32g070-assisted-release-20260908/** -text

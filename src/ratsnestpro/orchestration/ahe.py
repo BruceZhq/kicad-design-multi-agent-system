@@ -12,7 +12,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from ratsnestpro.domain.contracts import ContractModel
 from ratsnestpro.orchestration.entity_repairs import CadActionBatch
@@ -187,6 +187,14 @@ class RecoveryDecision(ContractModel):
     expected_observation: str = Field(default="", max_length=4_000)
     success_checks: list[str] = Field(default_factory=list, max_length=64)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    @field_validator("strategy", mode="before")
+    @classmethod
+    def _normalize_strategy_label(cls, value: Any) -> Any:
+        # This is an audit label, not an executable instruction or entity ID.
+        # A verbose label must not discard an otherwise valid CAD decision.
+        # The complete original response remains in the model transcript.
+        return " ".join(value.split())[:240] if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def _bind_cad_batch_to_owned_local_repair(self) -> RecoveryDecision:

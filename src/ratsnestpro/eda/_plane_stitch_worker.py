@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import itertools
 import json
+import math
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -29,7 +31,7 @@ _NET_RE = re.compile(r"\[([^\]]+)\]")
 _LAYER_RE = re.compile(r"\bon\s+((?:F|B|In\d+)\.Cu)\b")
 
 
-def _run_drc(cli: str, pcb_path: Path, report_path: Path) -> dict:
+def _run_drc(cli: str, pcb_path: Path, report_path: Path, *, timeout: float = 120) -> dict:
     report_path.unlink(missing_ok=True)
     subprocess.run(
         [
@@ -46,7 +48,7 @@ def _run_drc(cli: str, pcb_path: Path, report_path: Path) -> dict:
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=max(0.1, timeout),
         check=False,
     )
     with report_path.open(encoding="utf-8") as handle:
@@ -121,8 +123,6 @@ def _gaps(report: dict) -> list[dict]:
             elif left_layer is None and right_layer is None:
                 endpoints[0]["layer"] = "F.Cu"
                 endpoints[1]["layer"] = "F.Cu"
-            if endpoints[0]["layer"] != endpoints[1]["layer"]:
-                continue
             result.append({"net": net_name, "endpoints": endpoints})
     return result
 
@@ -235,6 +235,8 @@ def _add_fanout(
     track_width_mm: float,
     via_diameter_mm: float,
     via_drill_mm: float,
+    fanout_approval: dict | None = None,
+    bend_offset: tuple[float, float] | None = None,
 ) -> None:
     net = board.FindNet(net_name)
     layer_id = _layer_id(board, str(endpoint["layer"]))
@@ -255,7 +257,50 @@ def _add_fanout(
     track.SetLayer(layer_id)
     track.SetNet(net)
     if start != end:
-        board.Add(track)
+        approval = fanout_approval or {}
+        bend_offset = bend_offset or (0.0, 0.0)
+        last_length = math.dist(bend_offset, offset)
+        length = math.hypot(*bend_offset) + last_length
+        pad_owned = any(
+            pad.GetNetname() == net_name
+            and pad.GetAttribute() == pcbnew.PAD_ATTRIB_SMD
+            and pad.IsOnLayer(layer_id)
+            and pad.GetPosition() == start
+            for footprint in board.GetFootprints() for pad in footprint.Pads()
+        )
+        if (approval and pad_owned and last_length > 0.25
+                and 0.25 < length - 0.25 <= float(approval["max_chain_length_mm"])
+                and float(approval["minimum_width_mm"]) < track_width_mm):
+            # Keep a full-width landing before the via. The release auditor
+            # independently verifies the thin chain reaches this real trunk.
+            bend = pcbnew.VECTOR2I(start.x + pcbnew.FromMM(bend_offset[0]),
+                                   start.y + pcbnew.FromMM(bend_offset[1]))
+            fraction = (last_length - 0.25) / last_length
+            landing = pcbnew.VECTOR2I(
+                bend.x + round((end.x - bend.x) * fraction),
+                bend.y + round((end.y - bend.y) * fraction),
+            )
+            if bend != start:
+                head = pcbnew.PCB_TRACK(board)
+                head.SetStart(start)
+                head.SetEnd(bend)
+                head.SetWidth(pcbnew.FromMM(float(approval["minimum_width_mm"])))
+                head.SetLayer(layer_id)
+                head.SetNet(net)
+                board.Add(head)
+            track.SetStart(bend)
+            track.SetEnd(landing)
+            track.SetWidth(pcbnew.FromMM(float(approval["minimum_width_mm"])))
+            board.Add(track)
+            trunk = pcbnew.PCB_TRACK(board)
+            trunk.SetStart(landing)
+            trunk.SetEnd(end)
+            trunk.SetWidth(pcbnew.FromMM(track_width_mm))
+            trunk.SetLayer(layer_id)
+            trunk.SetNet(net)
+            board.Add(trunk)
+        else:
+            board.Add(track)
 
     via = pcbnew.PCB_VIA(board)
     via.SetPosition(end)
@@ -276,7 +321,7 @@ def _offsets(
     via_diameter_mm: float,
     clearance_mm: float,
 ) -> list[tuple[float, float]]:
-    step = max(1.0, via_diameter_mm + clearance_mm)
+    step = max(0.5, via_diameter_mm / 2 + clearance_mm)
     unit = (
         (0.0, -step),
         (step, 0.0),
@@ -289,9 +334,103 @@ def _offsets(
     )
     return [(0.0, 0.0), *[
         (round(dx * scale, 3), round(dy * scale, 3))
-        for scale in (1.0, 1.5, 2.0)
+        for scale in (1.0, 1.5, 2.0, 3.0)
         for dx, dy in unit
     ]]
+
+
+def prepare_power_fanouts(pcb_path: Path, classes: list[dict], power_nets: list[str],
+                         approval: dict, *, deadline: float) -> dict:
+    """DRC-checked fine-pitch escapes before the router reserves other channels.
+
+    Only pads narrower than their power trunk are candidates. No component
+    names, pin numbers, or board families are special-cased. Failed candidates
+    never change the input PCB; the subsequent router must connect the via.
+    """
+    import time
+    from fanout_policy import pad_escape_axis
+
+    receipt = {"accepted": [], "rejections": [], "attempts": 0,
+               "approval_digest": approval.get("receipt_digest", "")}
+    cli = shutil.which("kicad-cli")
+    if not approval or not cli:
+        return receipt
+    rules = {n: c for c in classes for n in c["nets"] if n in power_nets}
+    with tempfile.TemporaryDirectory(prefix="rnp_escape_") as temp:
+        candidate = Path(temp) / pcb_path.name
+        project = pcb_path.with_suffix(".kicad_pro")
+        if project.is_file():
+            shutil.copy2(project, candidate.with_suffix(".kicad_pro"))
+        if time.monotonic() >= deadline:
+            return receipt
+        try:
+            baseline = _error_counts(_run_drc(cli, pcb_path, Path(temp) / "baseline.json",
+                                             timeout=deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            receipt["deadline_reached"] = True
+            return receipt
+        board = pcbnew.LoadBoard(str(pcb_path))
+        targets = []
+        for fp in board.GetFootprints():
+            center = fp.GetPosition()
+            for pad in fp.Pads():
+                rule = rules.get(pad.GetNetname())
+                size = pad.GetSize()
+                if (not rule or pad.GetAttribute() != pcbnew.PAD_ATTRIB_SMD
+                        or pcbnew.ToMM(min(size.x, size.y)) >= rule["width"] - 1e-6
+                        or not pad.IsOnLayer(pcbnew.F_Cu)):
+                    continue
+                pos = pad.GetPosition()
+                axis = pad_escape_axis((size.x, size.y), pad.GetOrientationDegrees(),
+                                       (pos.x - center.x, pos.y - center.y))
+                targets.append((fp.GetReference(), pad.GetNumber(), pad.GetNetname(),
+                                {"x": pcbnew.ToMM(pos.x), "y": pcbnew.ToMM(pos.y), "layer": "F.Cu"},
+                                axis, rule, pcbnew.ToMM(max(size.x, size.y)) / 2
+                                + rule["clearance"] + float(approval["minimum_width_mm"]) / 2))
+        for ref, number, net, endpoint, axis, rule, straight_exit in targets:
+            candidates = [(length, 0.0) for length in (1.2, 2.0, 1.6)]
+            # Some dense power-pin rows have decouplers outside the package.
+            # The opposite pad-axis escape is a legitimate alternative when
+            # no physical copper/keepout blocks it; KiCad DRC must prove this.
+            candidates.extend((length, 0.0) for length in (-1.2, -2.0))
+            candidates.extend((straight_exit + 0.75, side * (rule["via_diameter"] / 2 + rule["clearance"] + 0.1))
+                              for side in (-1, 1))
+            for length, lateral in candidates:
+                if time.monotonic() >= deadline:
+                    receipt["deadline_reached"] = True
+                    return receipt
+                offset = (axis[0] * length - axis[1] * lateral,
+                          axis[1] * length + axis[0] * lateral)
+                bend = (axis[0] * straight_exit, axis[1] * straight_exit) if lateral else (0.0, 0.0)
+                chain_length = math.hypot(*bend) + math.dist(bend, offset) - 0.25
+                if chain_length > float(approval["max_chain_length_mm"]):
+                    continue
+                shutil.copy2(pcb_path, candidate)
+                proposal = pcbnew.LoadBoard(str(candidate))
+                _add_fanout(proposal, net_name=net, endpoint=endpoint,
+                            offset=offset, bend_offset=bend,
+                            track_width_mm=rule["width"], via_diameter_mm=rule["via_diameter"],
+                            via_drill_mm=rule["via_drill"], fanout_approval=approval)
+                pcbnew.SaveBoard(str(candidate), proposal)
+                try:
+                    errors = _error_counts(_run_drc(cli, candidate, Path(temp) / "candidate.json",
+                                                   timeout=deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    receipt["deadline_reached"] = True
+                    return receipt
+                receipt["attempts"] += 1
+                if _no_new_errors(errors, baseline):
+                    shutil.copy2(candidate, pcb_path)
+                    baseline = errors
+                    receipt["accepted"].append({"ref": ref, "pad": number, "net": net,
+                                                "thin_chain_length_mm": round(chain_length, 4),
+                                                "lateral_offset_mm": lateral})
+                    break
+                receipt["rejections"].append({"ref": ref, "pad": number, "net": net,
+                                              "offset_mm": offset,
+                                              "new_errors": [[*key, count] for key, count in (errors - baseline).most_common(3)]})
+                receipt["rejections"] = receipt["rejections"][-8:]
+    return receipt
 
 
 def main() -> None:
@@ -303,6 +442,8 @@ def main() -> None:
     via_diameter_mm = float(sys.argv[6])
     via_drill_mm = float(sys.argv[7])
     report_path = Path(sys.argv[8]).resolve()
+    fanout_approval = json.loads(sys.argv[9]) if len(sys.argv) > 9 else {}
+    repair_seconds = max(0.0, min(120.0, float(sys.argv[10]))) if len(sys.argv) > 10 else 120.0
 
     result = {
         "ok": False,
@@ -366,29 +507,60 @@ def main() -> None:
             # checkpoints that monotonic gain and can re-evaluate the smaller
             # residual set, instead of spending minutes searching vias after
             # a valid patch is already available.
+            exhausted_gaps = set()
+            repair_deadline = time.monotonic() + repair_seconds
             while (
                 accepted_gaps
                 and accepted_gap_count == original_gap_count
+                and time.monotonic() < repair_deadline
             ):
                 gap = next(
                     (
                         candidate
                         for candidate in accepted_gaps
                         if candidate["net"] in plane_nets
+                        and json.dumps(candidate, sort_keys=True) not in exhausted_gaps
                     ),
                     None,
                 )
                 if gap is None:
                     break
                 improved = False
+                # One inaccessible MCU pad must not starve every other rail
+                # island. Bound that gap, then inspect the remaining gaps.
+                gap_deadline = min(repair_deadline, time.monotonic() + 20)
                 # Most rail islands need only one via to reach the newly
                 # materialized plane. Try those cheap monotonic candidates
                 # before a bounded two-ended fallback.
                 candidate_fanouts = [
                     [(endpoint_index, offset)]
-                    for endpoint_index in (0, 1)
                     for offset in offsets
+                    for endpoint_index in (0, 1)
                 ]
+                # Escape along a real SMD pad's major axis before turning;
+                # diagonal rays alone cross adjacent fine-pitch pads.
+                if fanout_approval:
+                    from fanout_policy import pad_escape_axis
+                    bent = []
+                    for endpoint_index, endpoint in enumerate(gap["endpoints"]):
+                        for footprint in board.GetFootprints():
+                            for pad in footprint.Pads():
+                                pos = pad.GetPosition()
+                                if (pad.GetNetname() != gap["net"] or pad.GetAttribute() != pcbnew.PAD_ATTRIB_SMD
+                                        or math.dist((pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y)),
+                                                     (endpoint['x'], endpoint['y'])) > 1e-4):
+                                    continue
+                                center, size = footprint.GetPosition(), pad.GetSize()
+                                axis = pad_escape_axis((size.x, size.y), pad.GetOrientationDegrees(),
+                                                       (pos.x-center.x, pos.y-center.y))
+                                escape = max(.5, pcbnew.ToMM(max(size.x, size.y))/2
+                                             + via_diameter_mm/2 + clearance_mm + .025)
+                                for length in (escape, escape+.25):
+                                    bend = (axis[0]*length, axis[1]*length)
+                                    for lateral in (.6, -.6, .8, -.8):
+                                        offset = (bend[0]-axis[1]*lateral, bend[1]+axis[0]*lateral)
+                                        bent.append([(endpoint_index, offset, bend)])
+                    candidate_fanouts = bent + candidate_fanouts
                 candidate_fanouts.extend(
                     [
                         [(0, left_offset), (1, right_offset)]
@@ -402,6 +574,8 @@ def main() -> None:
                     ]
                 )
                 for fanouts in candidate_fanouts:
+                    if time.monotonic() >= gap_deadline:
+                        break
                     candidate_path = temp_root / "candidate.kicad_pcb"
                     shutil.copy2(accepted_path, candidate_path)
                     if accepted_project.is_file():
@@ -410,7 +584,8 @@ def main() -> None:
                             candidate_path.with_suffix(".kicad_pro"),
                         )
                     candidate_board = pcbnew.LoadBoard(str(candidate_path))
-                    for endpoint_index, offset in fanouts:
+                    for fanout in fanouts:
+                        endpoint_index, offset = fanout[:2]
                         _add_fanout(
                             candidate_board,
                             net_name=gap["net"],
@@ -419,6 +594,8 @@ def main() -> None:
                             track_width_mm=track_width_mm,
                             via_diameter_mm=via_diameter_mm,
                             via_drill_mm=via_drill_mm,
+                            fanout_approval=fanout_approval,
+                            bend_offset=fanout[2] if len(fanout) > 2 else None,
                         )
                     pcbnew.ZONE_FILLER(candidate_board).Fill(
                         candidate_board.Zones()
@@ -444,7 +621,7 @@ def main() -> None:
                         improved = True
                         break
                 if not improved:
-                    break
+                    exhausted_gaps.add(json.dumps(gap, sort_keys=True))
 
             result["unconnected"] = accepted_gap_count
             result["closed_gaps"] = max(

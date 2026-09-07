@@ -10,7 +10,6 @@ Excluded from ruff/mypy in pyproject: it targets a foreign interpreter.
 """
 import json
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -18,6 +17,7 @@ from pathlib import Path
 import pcbnew
 
 from routing_rules import apply_dsn_classes, persist_project_classes
+from router_process import routing_command, run_router
 
 
 def _router_timeout(layer_count):
@@ -181,13 +181,24 @@ def main():
         classes = rules.get("classes", [])
         if classes:
             persist_project_classes(Path(pcb), classes)
+        deadline = time.monotonic() + _router_timeout(layer_count)
+        from fanout_policy import load_fanout_approval
+        from _plane_stitch_worker import prepare_power_fanouts
+        approval = load_fanout_approval(Path(pcb), rules.get("requirement_digest", ""))
+        result["fanout"] = prepare_power_fanouts(
+            Path(pcb), classes, rules.get("power_nets", []), approval,
+            deadline=min(deadline - 60, time.monotonic() + 120),
+        )
+        board = pcbnew.LoadBoard(pcb)
+        prepared_board = Path(pcb).read_bytes()
         critical = set(rules.get("critical_nets", []))
         stages = [critical, None] if critical and classes else [None]
+        normalization_fallback_used = False
         if os.path.isfile(ses):
             os.remove(ses)  # A failed critical pass must not reuse yesterday's full SES.
-        deadline = time.monotonic() + _router_timeout(layer_count)
         result["routing_stages"] = []
-        for subset in stages:
+        while stages:
+            subset = stages.pop(0)
             stage_dsn = dsn if subset is None else dsn + ".critical.dsn"
             stage_ses = ses if subset is None else ses + ".critical.ses"
             pcbnew.ExportSpecctraDSN(board, stage_dsn)
@@ -196,24 +207,42 @@ def main():
             # Do not accept a stale SES from a previous invocation.
             if os.path.isfile(stage_ses):
                 os.remove(stage_ses)
-            router_args = [fr_exe, "-de", stage_dsn, "-do", stage_ses, "-mp", str(max_passes)]
-            if random_seed:
-                router_args.extend(["-random_seed", random_seed])
-            proc = subprocess.run(router_args, capture_output=True, text=True,
-                                  timeout=max(1, deadline - time.monotonic()))
+            router_args = routing_command(fr_exe, stage_dsn, stage_ses, str(max_passes))
+            # Freerouting does not expose -random_seed. Never claim an ignored
+            # option makes repeated identical routing attempts independent.
+            proc = run_router(router_args, timeout=max(1, deadline - time.monotonic()))
             result["routing_stages"].append({"nets": sorted(subset) if subset else "all",
-                                             "exit_code": proc.returncode})
-            if proc.returncode or not os.path.isfile(stage_ses):
+                                             "exit_code": proc.returncode,
+                                             "failure_kind": proc.failure_kind,
+                                             "observed_completed_passes": proc.completed_passes,
+                                             "normalization_warnings": proc.normalization_warnings,
+                                             "log_tail": proc.stdout[-12000:]})
+            if (proc.failure_kind == "router_normalization_livelock" and critical
+                    and not normalization_fallback_used
+                    and deadline - time.monotonic() > 60):
+                # Critical-pass traces can trigger a router split/combine cycle
+                # when re-imported. Retry the same prepared board as one search;
+                # never replan placement or change the circuit for a tool defect.
+                normalization_fallback_used = True
+                Path(pcb).write_bytes(prepared_board)
+                board = pcbnew.LoadBoard(pcb)
+                stages = [None]
+                result["routing_stages"][-1]["recovery"] = "same_board_single_stage"
+                continue
+            if proc.failure_kind or proc.returncode or not os.path.isfile(stage_ses):
                 break
             if subset is not None:
                 if _import_ses(board, stage_ses) is False:
                     raise RuntimeError("critical-net SES import failed")
                 pcbnew.SaveBoard(pcb, board)
         with open(os.path.join(workdir, "routing-rules-receipt.json"), "w", encoding="utf-8") as stream:
-            json.dump({"classes": classes, "stages": result["routing_stages"]}, stream, indent=2)
-        combined = "\n".join((proc.stdout + "\n" + proc.stderr).splitlines()[-6:])
+            json.dump({"classes": classes, "stages": result["routing_stages"],
+                       "fanout": result["fanout"],
+                       "seed": {"requested": random_seed or None, "applied": False,
+                                "reason": "Freerouting has no supported random_seed option"}}, stream, indent=2)
+        combined = "\n".join(proc.stdout.splitlines()[-6:])
         result["fr_tail"] = combined
-        if (proc.returncode == 0 and result["routing_stages"][-1]["nets"] == "all"
+        if (not proc.failure_kind and proc.returncode == 0 and result["routing_stages"][-1]["nets"] == "all"
                 and os.path.exists(ses) and os.path.getsize(ses) > 0):
             board2 = pcbnew.LoadBoard(pcb)  # reload (carries nets)
             if _import_ses(board2, ses) is False:
@@ -239,7 +268,7 @@ def main():
             result["fr_ok"] = True
         else:
             result["error"] = (
-                f"Freerouting failed (exit={proc.returncode}); tail={combined!r}"
+                f"Freerouting failed (exit={proc.returncode}, kind={proc.failure_kind}); tail={combined!r}"
             )
     except Exception as exc:  # noqa: BLE001 - report back to the caller
         result["error"] = f"{type(exc).__name__}: {exc}"

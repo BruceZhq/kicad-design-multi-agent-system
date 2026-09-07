@@ -31,7 +31,7 @@ class EngineeringQuery(ContractModel):
     lib_id: str = Field(default="", max_length=240)
     reference: str = Field(default="", max_length=32)
     net: str = Field(default="", max_length=240)
-    section: Literal["footprints", "pads", "tracks", "zones", "nets", "outline"] = "footprints"
+    section: Literal["footprints", "pads", "tracks", "zones", "nets", "outline", "obstacles"] = "footprints"
     offset: int = Field(default=0, ge=0, le=100_000)
     limit: int = Field(default=30, ge=1, le=100)
 
@@ -90,6 +90,9 @@ class EngineeringWorkspace:
             "read_file (relative path, offset/limit are zero-based lines); artifact "
             "(step and JSON pointer, arrays/objects paginated); symbol/footprint (lib_id); "
             "pcb (section=footprints/pads/tracks/zones/nets/outline, optional reference/net); "
+            "pcb section=obstacles requires net and layers=F.Cu or B.Cu: paginated "
+            "other-net copper collision primitives (start/end/radius in mm). These "
+            "are planning geometry, not a DRC waiver; inspect both layers before a via jump. "
             "render (path to a real .kicad_sch/.kicad_pcb, optional layers): receive an "
             "actual CAD image to inspect crossings, grouping and placement. Maximum two images. "
             f"source (path is one of {', '.join(_SOURCE_FILES)}, line offset/limit). "
@@ -191,6 +194,14 @@ class EngineeringWorkspace:
             value = board.footprint_pads(query.reference)
         elif query.section == "tracks":
             value = board.list_tracks(net=query.net or None)
+        elif query.section == "obstacles":
+            if not query.net or query.layers not in {"F.Cu", "B.Cu"}:
+                raise ValueError("obstacles require a net and one copper layer")
+            from ratsnestpro.orchestration.pipeline import _copper_obstacles
+
+            value = [{"start": item.start, "end": item.end, "radius": item.radius,
+                      "layer": query.layers}
+                     for item in _copper_obstacles(board, net_name=query.net, layer=query.layers)]
         elif query.section == "zones":
             value = board.list_zones()
             if query.net:
@@ -255,10 +266,13 @@ def complete_with_observations(
             if workspace.step not in {"schematic_connections", "schematic_layout", "schematic_materialize", "erc"}:
                 paths = [artifacts.get("layout_write", {}).get("pcb_path") or cad_files.get("pcb")]
             for path in filter(None, paths):
-                query = EngineeringQuery(tool="render", path=str(path))
-                observations.append(workspace.observe(query))
-                seen.add(query.model_dump_json())
-                remaining -= 1
+                layers = (["F.Cu,F.Silkscreen,Edge.Cuts", "B.Cu,B.Silkscreen,Edge.Cuts"]
+                          if str(path).endswith(".kicad_pcb") else ["F.Cu,F.Silkscreen,Edge.Cuts"])
+                for layer in layers:
+                    query = EngineeringQuery(tool="render", path=str(path), layers=layer)
+                    observations.append(workspace.observe(query))
+                    seen.add(query.model_dump_json())
+                    remaining -= 1
     # Each turn must spend at least one query slot, even on invalid/repeated tools.
     for turn in range(max_queries + 1):
         if before_call is not None:
@@ -280,6 +294,13 @@ def complete_with_observations(
             payload = json.loads(extract_json(raw))
         except (ValueError, TypeError):
             return raw
+        # A planner sometimes places read-only queries in tool_args alongside
+        # its proposed action. Execute those observations first and request a
+        # fresh decision; never silently discard them and act without evidence.
+        if isinstance(payload, dict) and "engineering_queries" not in payload:
+            arguments = payload.get("tool_args")
+            if isinstance(arguments, dict) and "engineering_queries" in arguments:
+                payload = {"engineering_queries": arguments["engineering_queries"]}
         if workspace is None or not isinstance(payload, dict) or "engineering_queries" not in payload:
             return raw
         if remaining <= 0 or turn == max_queries:

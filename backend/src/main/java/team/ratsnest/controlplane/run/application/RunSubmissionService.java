@@ -97,7 +97,8 @@ public class RunSubmissionService {
                 request.evaluationContext(),
                 request.reasoningEffort(),
                 request.visionModel(),
-                request.visionReasoningEffort());
+                request.visionReasoningEffort(),
+                request.strongModel(), request.strongReasoningEffort());
         String fingerprint = fingerprints.start(
                 tenantId,
                 projectId,
@@ -190,7 +191,8 @@ public class RunSubmissionService {
         Map<String, Object> config = runtimeConfiguration.create(
                 request.teamMembers(), profile, harness, null, Map.of(),
                 request.reasoningEffort(), request.visionModel(),
-                request.visionReasoningEffort());
+                request.visionReasoningEffort(),
+                request.strongModel(), request.strongReasoningEffort());
 
         Creation creation;
         try {
@@ -453,7 +455,8 @@ public class RunSubmissionService {
                 Map.of(),
                 request.reasoningEffort(),
                 request.visionModel(),
-                request.visionReasoningEffort());
+                request.visionReasoningEffort(),
+                request.strongModel(), request.strongReasoningEffort());
         String fingerprint = forkFingerprint(
                 source,
                 request,
@@ -590,7 +593,8 @@ public class RunSubmissionService {
                         request.evaluationContext(),
                         request.reasoningEffort(),
                         request.visionModel(),
-                        request.visionReasoningEffort()));
+                        request.visionReasoningEffort(),
+                        request.strongModel(), request.strongReasoningEffort()));
         return matching(existing, replayFingerprint).run();
     }
 

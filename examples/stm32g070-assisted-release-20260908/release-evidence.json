@@ -1,0 +1,362 @@
+{
+  "example": "stm32g070-assisted-release-20260908",
+  "provenance": "agent workflow with Codex-assisted physical repair; not an autonomous benchmark",
+  "release_ready": true,
+  "completed_steps": 17,
+  "total_steps": 17,
+  "release_identity": {
+    "schema_version": 1,
+    "project_name": "stm32g070rbt6-board",
+    "requirement_source_digest": "415ea89159fc976c7bd6b2095fec418bdff1912214e82c6ef2ea9fb5fb987465",
+    "pcb_relpath": "stm32g070rbt6-board.kicad_pcb",
+    "pcb_sha256": "74bb89ecdbf14f626e90eb1d44583bc390c88364b817442eacc511f7294aacf1"
+  },
+  "verification": {
+    "erc": {
+      "applicable": true,
+      "available": true,
+      "ran": true,
+      "errors": 0,
+      "warnings": 1,
+      "report_path": "./stm32g070rbt6-board.erc.json",
+      "by_type": {
+        "lib_symbol_mismatch": 1
+      },
+      "warning_classifications": {
+        "lib_symbol_mismatch": {
+          "count": 1,
+          "category": "library_provenance",
+          "disposition": "normalized_structure_evidence_required",
+          "basis": "The embedded schematic symbol differs from KiCad's library cache comparison.",
+          "suppressed": false,
+          "resolution": {
+            "status": "auto_equivalent",
+            "reason": "every reported embedded symbol is structurally identical to its currently installed KiCad library definition",
+            "schematic_sha256": "5b7b5b8b207e8cffacc7f3d59b77435244368e32811c4c7d99d3b47c92f46e41",
+            "report_sha256": "4306f9433281e2a8dbcfda337d5dd974698e0ad8cbafbd723d8927e06aa34e24",
+            "evidence": {
+              "equivalent": true,
+              "normalization_version": "ratsnestpro.symbol-structure.v1",
+              "symbols": [
+                {
+                  "ref": "U2",
+                  "lib_id": "Regulator_Linear:AP2112K-3.3",
+                  "embedded_structure_sha256": "7b83f18fba1636c5a180b74b9247b2833e1d513c93be8c3c4480c44bedc2cc00",
+                  "library_structure_sha256": "7b83f18fba1636c5a180b74b9247b2833e1d513c93be8c3c4480c44bedc2cc00"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "drc": {
+      "applicable": true,
+      "available": true,
+      "ran": true,
+      "errors": 0,
+      "warnings": 0,
+      "unconnected": 0,
+      "report_path": "./stm32g070rbt6-board.drc.json",
+      "by_type": {},
+      "warning_classifications": {}
+    }
+  },
+  "routing": {
+    "method": "freerouting",
+    "unconnected": 0,
+    "routed_nets": 18,
+    "total_nets": 18,
+    "routed_connections": 86,
+    "total_connections": 86
+  },
+  "files": [
+    {
+      "path": "stm32g070rbt6-board.kicad_pcb",
+      "sha256": "74bb89ecdbf14f626e90eb1d44583bc390c88364b817442eacc511f7294aacf1",
+      "bytes": 533150
+    },
+    {
+      "path": "stm32g070rbt6-board.kicad_sch",
+      "sha256": "5b7b5b8b207e8cffacc7f3d59b77435244368e32811c4c7d99d3b47c92f46e41",
+      "bytes": 143198
+    },
+    {
+      "path": "stm32g070rbt6-board.kicad_pro",
+      "sha256": "c0ac6090998eec384c2e4f8483c758325947a51d9896c6111f900cb259e574b1",
+      "bytes": 9265
+    },
+    {
+      "path": "stm32g070rbt6-board.placement_constraints.json",
+      "sha256": "5b77917a7e17b7baa3c61d9eaca52f057523afe11d119574ecb1a985cbb196ea",
+      "bytes": 7523
+    },
+    {
+      "path": "stm32g070rbt6-board.erc.json",
+      "sha256": "89bd7cc7751d37cd8d5fe7433c0da2ef0ac47cd45caf9ebd4741457ac8c9a91c",
+      "bytes": 1027
+    },
+    {
+      "path": "stm32g070rbt6-board.drc.json",
+      "sha256": "cfdd2c85b05d7008ed0091f1bcdfbf911bef3c252d5093102d5b67ebd0454948",
+      "bytes": 285
+    },
+    {
+      "path": "stm32g070rbt6-board_production_bom.csv",
+      "sha256": "dd9a5f5bd2c5ce019a8d0ac3e7d12be2177bac2afea96cbac05b29aa2e46177f",
+      "bytes": 8600
+    },
+    {
+      "path": "stm32g070rbt6-board_procurement_bom.csv",
+      "sha256": "75390b1e61d1f44fcab83c451b0ca14a90adc60b40e260fd2b0d63306f783248",
+      "bytes": 2144
+    },
+    {
+      "path": "stm32g070rbt6-board_cpl.csv",
+      "sha256": "24dee090d3f72f152513efd087340f2fb20744e59b1cb53a1f7e918f4a5360df",
+      "bytes": 986
+    },
+    {
+      "path": "fp-lib-table",
+      "sha256": "fa96d51951dde7d0c44db2caff7c5803fb0681814e30ea1bcf7e06612af3a553",
+      "bytes": 1551
+    },
+    {
+      "path": "sym-lib-table",
+      "sha256": "f515721d86e4544b2d7ca0e3bbd37c6b0c176605656d7d892f5c208a104dfd9a",
+      "bytes": 1178
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-B_Adhesive.gba",
+      "sha256": "ee61f664c5d0a25c43650dcb6793901f3549d3849918c234642205f4a11b70ff",
+      "bytes": 475
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-B_Courtyard.gbr",
+      "sha256": "8731f3b2e55aa58cd1005bc4732ce6cb6e6f388a4ff272cbd99abac13b00ab0b",
+      "bytes": 449
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-B_Cu.gbl",
+      "sha256": "be7ed423ede79e642f8084c0ff0c0cc0641b0e7ec0162a92fc44ffc4423c8899",
+      "bytes": 114751
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-B_Fab.gbr",
+      "sha256": "0744b65db8225f4def223aab2323b30c25ffa2941ff4d421e6de7314bd6ed7b9",
+      "bytes": 458
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-B_Mask.gbs",
+      "sha256": "8a053c974cf4b3db2bf2c763283a1758bec51804dda5dc6637c30c21b79274d6",
+      "bytes": 1546
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-B_Paste.gbp",
+      "sha256": "693d1b95dc4fdd192decea1b9deb4717b183fcd5b336cac3c9d220a13e84be27",
+      "bytes": 476
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-B_Silkscreen.gbo",
+      "sha256": "86bdfb6f80c8651b62964931f334c74dd8cd2ffc5d2fb60061aa76134a8cbef3",
+      "bytes": 477
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-Edge_Cuts.gm1",
+      "sha256": "696d5c2e1da79aa34514caa2b8ef25fa1c555d6b78ddaa70d8b869f8a946b8dc",
+      "bytes": 638
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-F_Adhesive.gta",
+      "sha256": "d62ba1fe27019b0aece9bed753fa971c2b84d24d782bc6bb848edec1e7c4ec74",
+      "bytes": 475
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-F_Courtyard.gbr",
+      "sha256": "f51dd3704aa6b2a6a18cc3bcd1fedb67693ace732caced9c4c7583a92566a70d",
+      "bytes": 9851
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-F_Cu.gtl",
+      "sha256": "715677986c33d20647989ee4f1e1dc791ca411b42136955160f6113bf56deae5",
+      "bytes": 128986
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-F_Fab.gbr",
+      "sha256": "7a9f63eac831ae537fdce689fd4f13bf9522184baef6302812f75409230301dc",
+      "bytes": 181473
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-F_Mask.gts",
+      "sha256": "2cc673ab8ec2e4700c643cdae8562099276dc2a10fb7c831d3d6f722b4b5f84b",
+      "bytes": 6843
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-F_Paste.gtp",
+      "sha256": "7f6dbbb50e62f0c157d331612fc6f1f233ec4442e1f14b78e26c59ff79f58d73",
+      "bytes": 5560
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-F_Silkscreen.gto",
+      "sha256": "754e57f38569992b0b8800c6faa50d8b471837ad114e86d6f8f625e6a58599b3",
+      "bytes": 24683
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-job.gbrjob",
+      "sha256": "dde1b725cea7f6bea7f22edc8997dfc19558b8848bbaea3e9b28fe500674fc2d",
+      "bytes": 3616
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-Margin.gbr",
+      "sha256": "8731f3b2e55aa58cd1005bc4732ce6cb6e6f388a4ff272cbd99abac13b00ab0b",
+      "bytes": 449
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-NPTH-drl_map.gbr",
+      "sha256": "c6bf1cd69bbde658983d6e6806819487eca092b1df43a90932c6b1d4434437c8",
+      "bytes": 21468
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-NPTH.drl",
+      "sha256": "71b72efb0c2c9471b436e0bd7ca3d927cb42277bef295f0a80726995b8e168fb",
+      "bytes": 391
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-PTH-drl_map.gbr",
+      "sha256": "4652d6b9075ca699acaad95a42f71c7df38c296aa8c51df286b8ec017a38005c",
+      "bytes": 50456
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-PTH.drl",
+      "sha256": "92ae0830392bffaaf02b54e3680464516a73d1f3f631c2697e6f086a818f2bbe",
+      "bytes": 1662
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-User_Comments.gbr",
+      "sha256": "933f59f7d3acbc3ea64d01dced10ce4f4b9854037dcc5efe81e89c95def59cf8",
+      "bytes": 1094
+    },
+    {
+      "path": "gerber/stm32g070rbt6-board-User_Drawings.gbr",
+      "sha256": "136ac42fddbbd13ab1332dfcc088cf2d80a9548fffe92af25d4ac51e62c2d684",
+      "bytes": 459
+    },
+    {
+      "path": ".ratsnest-libs/footprints/Button_Switch_SMD.pretty/SW_Push_1P1T_NO_CK_KSC6xxJ.kicad_mod",
+      "sha256": "8350b921547940d5ffd8a59c33d8f8067c7b402ff751c12f5ca169f353101eea",
+      "bytes": 4793
+    },
+    {
+      "path": ".ratsnest-libs/footprints/Capacitor_SMD.pretty/C_0603_1608Metric.kicad_mod",
+      "sha256": "6817e127719273e03bb0a41f8d885aaa677ba6bbce6ee8292b2f18223e2ec419",
+      "bytes": 2427
+    },
+    {
+      "path": ".ratsnest-libs/footprints/Connector_PinHeader_1.27mm.pretty/PinHeader_2x05_P1.27mm_Vertical.kicad_mod",
+      "sha256": "820b07daeb16a6926cce11e3b9112bd4b9a632342f6a27475f972607a04ed7b7",
+      "bytes": 4383
+    },
+    {
+      "path": ".ratsnest-libs/footprints/Connector_PinHeader_2.54mm.pretty/PinHeader_1x02_P2.54mm_Vertical.kicad_mod",
+      "sha256": "d99c4d03937f72768bbafadda5817203e12c47cb823f3f40a55823bbdfe1e1b6",
+      "bytes": 2940
+    },
+    {
+      "path": ".ratsnest-libs/footprints/Connector_PinHeader_2.54mm.pretty/PinHeader_1x03_P2.54mm_Vertical.kicad_mod",
+      "sha256": "8da2165c83f7795b2f6f7485ca313ad45d701afd12af5b0875595b40d8545244",
+      "bytes": 3068
+    },
+    {
+      "path": ".ratsnest-libs/footprints/Connector_PinHeader_2.54mm.pretty/PinHeader_1x04_P2.54mm_Vertical.kicad_mod",
+      "sha256": "89dd15132b2ad0d4f59fdb37878b65ebcd4d587422fc90fed5db30bee18c24e8",
+      "bytes": 3182
+    },
+    {
+      "path": ".ratsnest-libs/footprints/LED_SMD.pretty/LED_0603_1608Metric.kicad_mod",
+      "sha256": "2934537c493eb9c462d847d5ac87cef2d19f1f052a5a724ea31e0ec29636313c",
+      "bytes": 2612
+    },
+    {
+      "path": ".ratsnest-libs/footprints/MountingHole.pretty/MountingHole_2.2mm_M2.kicad_mod",
+      "sha256": "3ac1576b6ab02080ac7c2c716030f13550ab602a7a0f61ae0c461ead5263ecc7",
+      "bytes": 1070
+    },
+    {
+      "path": ".ratsnest-libs/footprints/Package_QFP.pretty/LQFP-64_10x10mm_P0.5mm.kicad_mod",
+      "sha256": "f2469b4012f9335d58475824e59f428e42ddb568f735dee88f75503fd9c4af99",
+      "bytes": 13120
+    },
+    {
+      "path": ".ratsnest-libs/footprints/Package_TO_SOT_SMD.pretty/SOT-23-5.kicad_mod",
+      "sha256": "e063acf8bcf318f5ebebddb6eeb493da6614b1f2cee19dd7dd8df0d5943f241a",
+      "bytes": 4142
+    },
+    {
+      "path": ".ratsnest-libs/footprints/Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod",
+      "sha256": "26fc677c5d1ee32f5f59895b2cd29b884b4a60b08f66427c2fb9759e69c030c4",
+      "bytes": 2460
+    },
+    {
+      "path": ".ratsnest-libs/footprints/TestPoint.pretty/TestPoint_Pad_D2.5mm.kicad_mod",
+      "sha256": "c4cac600efa3107218ebc7d814e28d76c85ef16e212dab68f4236266a11e902d",
+      "bytes": 1715
+    },
+    {
+      "path": ".ratsnest-libs/symbols/Connector.kicad_sym",
+      "sha256": "fbda358830849f8ac5afd6bb6e001c8ea5ac8ad4dac273569552fb75a6c4bf82",
+      "bytes": 1760,
+      "source_sha256": "55b7966df0aad09528ab2985a8d07513aec834658be6a8fdad708d86372ee528",
+      "transformation": "selected symbol definitions and inherited parents; semantic content unchanged"
+    },
+    {
+      "path": ".ratsnest-libs/symbols/Connector_Generic.kicad_sym",
+      "sha256": "be951df5782a1b67dd8de05699325a14d111f8bfb1265a194bb70aee11253cee",
+      "bytes": 14367,
+      "source_sha256": "c44a0a561694b37a58027539b4e215067f64b5789cd7855bc001890dc484d51b",
+      "transformation": "selected symbol definitions and inherited parents; semantic content unchanged"
+    },
+    {
+      "path": ".ratsnest-libs/symbols/Device.kicad_sym",
+      "sha256": "2dfde627c96e98ff7d936e956818b13c155ebdb27da5684a007531d3a8c2c3cc",
+      "bytes": 7119,
+      "source_sha256": "f605999e711a8cd31f8b754741dc1a68e3099968ce89c16e9902e103c37925a8",
+      "transformation": "selected symbol definitions and inherited parents; semantic content unchanged"
+    },
+    {
+      "path": ".ratsnest-libs/symbols/Mechanical.kicad_sym",
+      "sha256": "94e326832cb45fd563bff770e9608e9384eb091756cb1c5b3c582377b3c72a19",
+      "bytes": 1425,
+      "source_sha256": "4c7870f43d33655734456135bc3bdf7b0ae9dc75746b01aa565c28362892aa6b",
+      "transformation": "selected symbol definitions and inherited parents; semantic content unchanged"
+    },
+    {
+      "path": ".ratsnest-libs/symbols/power.kicad_sym",
+      "sha256": "c7f5b9d330f8ab8a4425dfd8339aad12006e1259103acb6c4873dc8f0df9b831",
+      "bytes": 1761,
+      "source_sha256": "541c49bdad55134b5f6379e80c6d18f165c1d9e98ca7df36ad6ec2a316a6d11b",
+      "transformation": "selected symbol definitions and inherited parents; semantic content unchanged"
+    },
+    {
+      "path": ".ratsnest-libs/symbols/RatsNestGenerated.kicad_sym",
+      "sha256": "b8cfddd5bf1044be9aaaba9ef0a58af37ce2265ec921b477c6fb83999b75a892",
+      "bytes": 8898,
+      "source_sha256": "1f97670be6915e7cd4bd62aa602f3daf6dd662b75f1229e9dd0069ac17cd6365",
+      "transformation": "selected symbol definitions and inherited parents; semantic content unchanged"
+    },
+    {
+      "path": ".ratsnest-libs/symbols/Regulator_Linear.kicad_sym",
+      "sha256": "adbc1e2b58de9e170b6c6e2419211abe0d7acf97629f850416a7de6831df9d87",
+      "bytes": 4373,
+      "source_sha256": "a9f650b6c3eec1b9570739d9b348364ca0b48fc272cc857707700e4690ec8336",
+      "transformation": "selected symbol definitions and inherited parents; semantic content unchanged"
+    },
+    {
+      "path": ".ratsnest-libs/symbols/Switch.kicad_sym",
+      "sha256": "a0db9c343947ee2046409075154ee191e788d24b23e2314ec701b0c0fe735584",
+      "bytes": 2426,
+      "source_sha256": "a93607f7bb68bce50996f458d7be86e1e187ac661877548a5119f8b890748fef",
+      "transformation": "selected symbol definitions and inherited parents; semantic content unchanged"
+    }
+  ],
+  "excluded": "private checkpoints, conversations, credentials, raw logs, manufacturer PDFs and stale pre-repair router exchange files"
+}

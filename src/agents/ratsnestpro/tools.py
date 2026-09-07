@@ -1008,9 +1008,20 @@ def _load_pipeline_state(
             from ratsnestpro.orchestration.review_repair import valid_review_resume
 
             if valid_review_resume(path.parent, explicit_invalidation.value):
-                # Existing local checks already passed; rechecking the same
-                # cached proposal cannot fix a new independent-review finding.
-                restored.resume_candidates.pop(explicit_invalidation, None)
+                # A review marker is not proof that the local gate passed.
+                # Preserve an already failing entity (e.g. partially routed
+                # copper); regenerating it erases exactly the repair baseline.
+                from ratsnestpro.orchestration.pipeline import ALL_STEPS
+
+                try:
+                    local_failures = any(
+                        not check.ok and check.severity.value == "error"
+                        for check in ALL_STEPS[step_index].check(restored, candidate)
+                    )
+                except Exception:
+                    local_failures = True  # let the owning runner diagnose it
+                if not local_failures:
+                    restored.resume_candidates.pop(explicit_invalidation, None)
     if (
         explicit_invalidation is None
         and len(restored.results) < persisted_completed_steps
@@ -1392,6 +1403,13 @@ class _ToolkitLlmClient:
             agent="Hardware Engineer" if "hardware" in self._phase else "Reviewer",
             model=active_model_name,
         )
+        # Record actual multimodal submission, not merely a configured vision
+        # model. No image payload or credential is copied to the transcript.
+        record["input_evidence"] = {
+            "image_count": len(images or []),
+            "image_uri_sha256": [hashlib.sha256(uri.encode()).hexdigest() for uri in images or []],
+            "vision_submitted": bool(images),
+        }
         transcript_path = str(self._transcript_path) if self._transcript_path else None
         if self._transcript_path is not None:
             append_llm_output(self._transcript_path, record)
@@ -1410,6 +1428,37 @@ class _ToolkitLlmClient:
             # waiting node tails the transcript and forwards these records.
             pass
         return response_text(response)
+
+
+def _strong_repair_runtime(model_name: str | None, effort: str | None, out: Path):
+    """Lazy dedicated client: never route the selected escalation model elsewhere."""
+    if not model_name:
+        return None
+    effort = effort or "high"
+    from ratsnestpro.repair.contracts import RepairLimits, StrongRepairOptions
+    from ratsnestpro.repair.pipeline_adapter import StrongRepairRuntime
+
+    limits = RepairLimits()
+    options = StrongRepairOptions(model=model_name, reasoning_effort=effort)
+    client = None
+
+    def complete(system: str, user: str, images: list[str], remaining: float) -> str:
+        nonlocal client
+        if client is None:
+            client = _ToolkitLlmClient(
+                model_name=model_name, reasoning_effort=effort,
+                vision_model_name=model_name, vision_reasoning_effort=effort,
+                transcript_path=out / "strong_repair_llm.jsonl",
+                phase="hardware-engineer:strong-repair", max_llm_tokens=limits.max_llm_tokens,
+            )
+            # Explicit model selection is authoritative; no purpose endpoint fallback.
+        direct = client._fallback_model.model_copy(update={"request_timeout": min(120, max(1, remaining)), "max_retries": 0})
+        client._model = client._fallback_model = direct
+        client._vision_model = client._vision_fallback_model = direct
+        return (client.complete_with_images(system, user, images=images)
+                if images else client.complete(system, user))
+
+    return StrongRepairRuntime(options.model, options.reasoning_effort, complete, limits)
 
 
 def _pipeline_mode(requirement: str, requested: LlmMode) -> LlmMode:
@@ -1514,6 +1563,7 @@ def load_reviewed_circuit_module_source(
         "topology": topology,
         "selection": selection,
         "netlist": netlist,
+        "pcb_path": str(pcb_path),
     }
 
 
@@ -2217,6 +2267,7 @@ def _safe_build_circuit_module_candidates(
     selection: SelectionPlan,
     netlist: NetlistIntent,
     release_identity: ReleaseIdentity,
+    pcb_path: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Keep optional cross-run learning from changing a release verdict."""
 
@@ -2227,6 +2278,7 @@ def _safe_build_circuit_module_candidates(
                 selection=selection,
                 netlist=netlist,
                 release_identity=release_identity,
+                pcb_path=pcb_path,
             ),
             "",
         )
@@ -2244,6 +2296,8 @@ def _run_pcb_pipeline_unlocked(
     reasoning_effort: str | None = None,
     vision_model_name: str | None = None,
     vision_reasoning_effort: str | None = None,
+    strong_model_name: str | None = None,
+    strong_reasoning_effort: str | None = None,
     *,
     until_step: str | None = None,
     external_retry_managed: bool = False,
@@ -2332,6 +2386,7 @@ def _run_pcb_pipeline_unlocked(
         ehe_memory = EheMemory(
             _workspace_root() / "ehe",
             governance_scope=governance_scope,
+            integrity_secret=governance_secret,
         )
         saved_issue_payloads: list[dict[str, str]] = []
         if state_path.is_file():
@@ -2371,6 +2426,9 @@ def _run_pcb_pipeline_unlocked(
         )
         if ehe_memory.governance_eligible:
             state.capability_gaps = ehe_memory.active_gaps()
+        from ratsnestpro.repair.pipeline_adapter import recover_pending_commit
+
+        recover_pending_commit(state)
         resumed_steps = len(state.results)
         require_freerouting = _env_flag("RATSNESTPRO_REQUIRE_FREEROUTING")
         repair_release_issues = _env_flag(
@@ -2384,6 +2442,11 @@ def _run_pcb_pipeline_unlocked(
             PipelineContext(
                 mode=mode,
                 client=client,
+                strong_repair=_strong_repair_runtime(
+                    strong_model_name, strong_reasoning_effort, out,
+                ) if mode != LlmMode.OFFLINE else None,
+                verified_layout_modules=[item["module"] for item in
+                    ehe_memory.search_verified_modules(requirement, limit=3)],
                 out_dir=str(out),
                 approved_component_replacements=trusted_replacements,
                 internal_signing_secret=governance_secret,
@@ -2742,6 +2805,7 @@ def _run_pcb_pipeline_unlocked(
                 selection=selection_artifact,
                 netlist=connection_artifact,
                 release_identity=release_identity,
+                pcb_path=str(out / release_identity.pcb_relpath),
             )
         result_path = out / "pipeline_result.json"
         payload = {
@@ -2900,6 +2964,8 @@ def ratsnest_run_pcb_pipeline(
     approved_component_replacements: dict[str, Any] | None = None,
     resume_from_step: str | None = None,
     resume_token: str | None = None,
+    strong_model_name: str | None = None,
+    strong_reasoning_effort: str | None = None,
 ) -> str:
     """Run one checkpointed 17-step PCB pipeline without run-directory races."""
     out = _run_dir(run_name)
@@ -2916,6 +2982,8 @@ def ratsnest_run_pcb_pipeline(
                 vision_model_name=vision_model_name,
                 vision_reasoning_effort=vision_reasoning_effort,
                 ahe_budget=ahe_budget,
+                strong_model_name=strong_model_name,
+                strong_reasoning_effort=strong_reasoning_effort,
                 approved_component_replacements=approved_component_replacements,
                 resume_from_step=resume_from_step,
                 resume_token=resume_token,
@@ -2945,6 +3013,8 @@ def ratsnest_run_pcb_pipeline_until(
     approved_component_replacements: dict[str, Any] | None = None,
     resume_from_step: str | None = None,
     resume_token: str | None = None,
+    strong_model_name: str | None = None,
+    strong_reasoning_effort: str | None = None,
 ) -> str:
     """Advance one checkpointed run through ``until_step``.
 
@@ -2969,6 +3039,8 @@ def ratsnest_run_pcb_pipeline_until(
                 vision_reasoning_effort=vision_reasoning_effort,
                 until_step=until_step,
                 external_retry_managed=True,
+                strong_model_name=strong_model_name,
+                strong_reasoning_effort=strong_reasoning_effort,
                 ahe_budget=ahe_budget,
                 approved_component_replacements=approved_component_replacements,
                 resume_from_step=resume_from_step,

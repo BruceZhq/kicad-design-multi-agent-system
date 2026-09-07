@@ -285,7 +285,9 @@ public class RunController {
             @Size(max = 200) String model,
             @Pattern(regexp = "none|low|medium|high|xhigh|max") String reasoningEffort,
             @Pattern(regexp = "gpt-(?:5\\.5|5\\.6-(?:luna|terra|sol)|6-astra)") String visionModel,
+            @Pattern(regexp = "gpt-(?:5\\.5|5\\.6-(?:luna|terra|sol)|6-astra)") String strongModel,
             @Pattern(regexp = "none|low|medium|high|xhigh|max") String visionReasoningEffort,
+            @Pattern(regexp = "none|low|medium|high|xhigh|max") String strongReasoningEffort,
             @Pattern(regexp = "[A-Za-z0-9._:-]{1,200}") String threadId,
             @NotNull @Valid CapabilityProfileRequest capabilityProfile,
             @Size(max = 8) List<@Valid TeamMemberRequest> teamMembers,
@@ -303,6 +305,8 @@ public class RunController {
                     reasoningEffort,
                     visionModel,
                     visionReasoningEffort,
+                    strongModel,
+                    strongReasoningEffort,
                     threadId,
                     capabilityProfile.toService(),
                     members,
@@ -346,7 +350,9 @@ public class RunController {
             @Size(max = 200) String model,
             @Pattern(regexp = "none|low|medium|high|xhigh|max") String reasoningEffort,
             @Pattern(regexp = "gpt-(?:5\\.5|5\\.6-(?:luna|terra|sol)|6-astra)") String visionModel,
+            @Pattern(regexp = "gpt-(?:5\\.5|5\\.6-(?:luna|terra|sol)|6-astra)") String strongModel,
             @Pattern(regexp = "none|low|medium|high|xhigh|max") String visionReasoningEffort,
+            @Pattern(regexp = "none|low|medium|high|xhigh|max") String strongReasoningEffort,
             @Size(max = 8) List<@Valid TeamMemberRequest> teamMembers) {
 
         ForkRequest toServiceRequest() {
@@ -361,6 +367,8 @@ public class RunController {
                     reasoningEffort,
                     visionModel,
                     visionReasoningEffort,
+                    strongModel,
+                    strongReasoningEffort,
                     members);
         }
     }

@@ -10,6 +10,17 @@ from ratsnestpro.orchestration.ahe import (
 from service.ahe_event import sanitize_ahe_event
 
 
+def test_verbose_strategy_label_does_not_discard_valid_repair():
+    decision = RecoveryDecision.model_validate({
+        "action": "local_repair", "target_step": "route_signals",
+        "strategy": "Inspect and repair actual copper. " * 30,
+        "tool_args": {"repair_instructions": "Preserve all verified geometry."},
+    })
+    assert len(decision.strategy) == 240
+    assert decision.action == RecoveryAction.LOCAL_REPAIR
+    assert decision.tool_args["repair_instructions"] == "Preserve all verified geometry."
+
+
 def test_recovery_contract_defaults_are_fail_closed_and_event_serializable() -> None:
     default_decision = RecoveryDecision.model_validate({})
     assert default_decision.action == RecoveryAction.STOP

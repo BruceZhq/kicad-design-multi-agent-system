@@ -559,7 +559,18 @@ def test_gap_route_width_freezes_explicit_net_minimum() -> None:
     )
 
     assert pipeline._frozen_gap_route_width(state, "GND") == 0.4
-    assert pipeline._frozen_gap_route_width(state, "SWCLK") == 0.2
+    assert pipeline._frozen_gap_route_width(state, "SWCLK") == pipeline.config.process_capability().min_track_width
+
+
+def test_preferred_width_is_not_a_hard_minimum(monkeypatch):
+    state = PipelineState(requirement_text="power track width >=0.40 mm; signal track width >=0.20 mm")
+    state.artifacts[PipelineStep.ROUTE_PLAN] = RoutePlan(layers=2, net_classes=[
+        NetClass(name="power", nets=["3V3"], width=.6, clearance=.2),
+        NetClass(name="signal", nets=["DATA"], width=.3, minimum_width=.25, clearance=.2),
+    ])
+    monkeypatch.setattr(pipeline.RoutePlanStep, "_routing_nets", lambda _: (["3V3", "DATA"], ["3V3"]))
+    assert pipeline._frozen_gap_route_width(state, "3V3") == .4
+    assert pipeline._frozen_gap_route_width(state, "DATA") == .25
 
 
 def test_gap_route_micro_jump_uses_via_pair_after_front_layer_dead_end() -> None:
@@ -590,3 +601,67 @@ def test_gap_route_micro_jump_uses_via_pair_after_front_layer_dead_end() -> None
         ) >= 1.0
         for via in patches[0].vias
     )
+
+
+def test_micro_jump_preserves_bottom_and_cross_layer_endpoints() -> None:
+    for left_layer, right_layer in (("B.Cu", "B.Cu"), ("F.Cu", "B.Cu")):
+        board = PcbBoard.blank()
+        board.set_board_outline(0, 0, 10, 10)
+        gap = pipeline._DrcGap(
+            pipeline._DrcEndpoint(2, 5, "SIGNAL", left_layer),
+            pipeline._DrcEndpoint(8, 5, "SIGNAL", right_layer),
+        )
+        patches = pipeline._micro_jump_copper_patches(
+            board, gap, width=.2, clearance=.15, via_diameter=.6, budget=1,
+        )
+        assert patches
+        assert patches[0].tracks[0][2] == left_layer
+        assert patches[0].tracks[-1][2] == right_layer
+        assert patches[0].tracks[1][2] != left_layer
+
+
+def test_downstream_replan_retains_existing_routed_candidate(monkeypatch):
+    step = pipeline.RouteSignalsStep()
+    artifact = _route_result(unconnected=13)
+    monkeypatch.setattr(step, "check", lambda *args: [])
+    monkeypatch.setattr(step, "repair", lambda *args: (artifact, False))
+    def forbidden(*args):
+        raise AssertionError("must not erase repaired copper through full proposal")
+    monkeypatch.setattr(step, "propose", forbidden)
+    assert step.replan(PipelineState(requirement_text="unchanged"), PipelineContext(),
+                       "", artifact, "repair remaining connectivity") == (artifact, False)
+
+
+def test_stagnant_copper_search_does_not_silently_rebuild_layout(monkeypatch):
+    artifact = _route_result(unconnected=12)
+    for name in ("_repair_drc_connectivity_gaps", "_repair_power_plane_gaps"):
+        monkeypatch.setattr(pipeline, name, lambda state, ctx, item: item)
+    monkeypatch.setattr(pipeline, "_repair_undersized_physical_tracks", lambda state, item: item)
+    called = []
+    monkeypatch.setattr(pipeline, "_repair_route_endpoint_placement",
+                        lambda *args: called.append(True) or artifact)
+    step = pipeline.RouteSignalsStep()
+    assert step.repair(PipelineState(requirement_text="same"), PipelineContext(), "", artifact, []) == (artifact, False)
+    assert not called
+    context = PipelineContext(active_recovery_tool="repair_route_endpoint_placement")
+    assert step.repair(PipelineState(requirement_text="same"), context, "", artifact, []) == (artifact, False)
+    assert called == [True]
+
+
+def test_shared_pad_bridge_width_needs_approval_and_real_pad_endpoints(monkeypatch):
+    from types import SimpleNamespace
+    from ratsnestpro.eda import fanout_policy
+    state = PipelineState(requirement_text="power track width >=0.40 mm")
+    state.artifacts[PipelineStep.LAYOUT_WRITE] = PcbWriteResult(pcb_path="board.kicad_pcb")
+    monkeypatch.setattr(pipeline.RoutePlanStep, "_routing_nets", lambda _: (["3V3"], ["3V3"]))
+    monkeypatch.setattr(pipeline, "_frozen_gap_route_width", lambda *args: .4)
+    approval = {"length_basis": "pad_to_trunk_path", "minimum_width_mm": .2, "max_chain_length_mm": 2}
+    monkeypatch.setattr(fanout_policy, "load_fanout_approval", lambda *args: approval)
+    board = SimpleNamespace(list_footprints=lambda: [{"reference": "U1"}],
+        footprint_pads=lambda _: [{"type": "smd", "net": "3V3", "layers": ["F.Cu"], "x": x, "y": 0}
+                                 for x in (0, .5)])
+    gap = pipeline._DrcGap(pipeline._DrcEndpoint(0, 0, "3V3", "F.Cu"),
+                           pipeline._DrcEndpoint(.5, 0, "3V3", "F.Cu"))
+    assert pipeline._gap_candidate_width(state, board, gap) == .2
+    approval.clear()
+    assert pipeline._gap_candidate_width(state, board, gap) == .4

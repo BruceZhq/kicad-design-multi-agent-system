@@ -147,7 +147,9 @@ _WORKFLOW_IDENTITY_FIELDS: tuple[str, ...] = (
     "model_type",
     "reasoning_effort",
     "vision_model_name",
+    "strong_model_name",
     "vision_reasoning_effort",
+    "strong_reasoning_effort",
     "ahe_budget",
     "approved_component_replacements",
     "tenant_id",
@@ -174,7 +176,9 @@ def hardware_workflow_identity(input: dict[str, Any]) -> dict[str, Any]:
     canonical_input = {
         field: input.get(field)
         for field in _WORKFLOW_IDENTITY_FIELDS
-        if field in input
+        if field in input and not (
+            field in {"strong_model_name", "strong_reasoning_effort"} and input[field] is None
+        )
     }
     canonical = json.dumps(
         canonical_input,

@@ -128,7 +128,9 @@ _PROCEDURAL_MODIFICATION_RE = re.compile(
     r"(?:must|shall|should)\b[^.;\n]{0,160}"
     r"(?:verif|validat|test|rollback)|"
     r"(?:每次|所有|任何)(?:修改|变更|修复)[^。；;\n]{0,160}"
-    r"(?:验证|校验|检查|测试|回滚))",
+    r"(?:验证|校验|检查|测试|回滚)|"
+    r"(?:若|如果|必要时)[^。；;\n]{0,80}(?:故障所有者|故障归属|修复边界)"
+    r"[^。；;\n]{0,80}(?:局部修改|局部变更))",
     re.IGNORECASE,
 )
 _NEGATED_BUILD_RE = re.compile(
@@ -217,8 +219,8 @@ def requests_new_context(text: str) -> bool:
 
     for match in _EXPLICIT_NEW_CONTEXT_RE.finditer(text):
         prefix = text[max(0, match.start() - 45):match.start()]
-        if re.search(r"(?:不|不要|不得|禁止|无需|别)(?:再|重新|另外|另行)?\s*$|"
-                     r"\b(?:do\s+not|don't|must\s+not|without|never|no)\s+(?:start\s+(?:a\s+)?|create\s+(?:a\s+)?)?$",
+        if re.search(r"(?:不|不要|不得|禁止|无需|别|不是|并非|不属于)(?:再|重新|另外|另行)?\s*$|"
+                     r"\b(?:do\s+not|don't|must\s+not|without|never|no|not)\s+(?:start\s+(?:a\s+)?|create\s+(?:a\s+)?|a\s+)?$",
                      prefix, re.I):
             continue
         return True
@@ -267,7 +269,12 @@ def classify_intent(
     # Recovery policy can describe how every candidate modification must be
     # verified or rolled back.  That is an execution constraint, not a user
     # amendment to the board contract.
-    amendment_text = _PROCEDURAL_MODIFICATION_RE.sub("", amendment_text)
+    amendment_text = _PROCEDURAL_MODIFICATION_RE.sub(
+        lambda match: match.group(0) if re.search(
+            r"(?:改成|改为|替换|新增|添加|增加|删除)|\b(?:replace|add|remove)\b",
+            match.group(0), re.I,
+        ) else "", amendment_text,
+    )
     has_amendment = bool(_AMEND_ACTION_RE.search(amendment_text))
     explicit_new_context = requests_new_context(requirement)
     negated_build = bool(_NEGATED_BUILD_RE.search(requirement))

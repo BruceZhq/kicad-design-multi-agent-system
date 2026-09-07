@@ -332,7 +332,10 @@ class PcbBoard:
         frot = Atom(str(at[3])).as_float() if at and len(at) > 3 else 0.0
         out = []
         for pad in self._footprint_pads(fp):
-            dx, dy = rotate_offset(pad["rel"][0], pad["rel"][1], frot)
+            # File-local offsets use board coordinates (Y down). KiCad's
+            # positive footprint angle therefore needs the inverse Cartesian
+            # transform, just like the physical collision/DRC geometry.
+            dx, dy = rotate_offset(pad["rel"][0], pad["rel"][1], -frot)
             out.append({"number": pad["number"], "x": round(fx + dx, 4),
                         "y": round(fy + dy, 4), "layers": pad["layers"],
                         "type": pad["type"],

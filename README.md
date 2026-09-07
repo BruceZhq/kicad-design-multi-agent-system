@@ -8,6 +8,8 @@
 
 [主动工程工具、Reviewer 回访与生成器治理发布](docs/AGENTIC_ENGINEERING_WORKSPACE.md)
 
+[需求到发布完整流程图](docs/REQUIREMENTS_TO_RELEASE_FLOW.md) · [隔离强模型 CAD 执行器](docs/ISOLATED_STRONG_REPAIR.md) · [STM32G070 真实发布工程](examples/stm32g070-assisted-release-20260908/README.md)
+
 > Demo 使用实际运行素材展示浏览器、Agent、Temporal 与 KiCad 的端到端流程；仅对纯等待段做加速剪辑。
 
 ## 项目一览

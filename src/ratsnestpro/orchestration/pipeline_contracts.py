@@ -760,7 +760,8 @@ class NetClass(ProposalModel):
 
     name: str = Field(min_length=1, max_length=60)
     nets: list[str] = Field(default_factory=list, max_length=500)
-    width: float = Field(gt=0)
+    width: float = Field(gt=0, description="Preferred routing width, not a hard minimum.")
+    minimum_width: float | None = Field(default=None, gt=0, description="Explicit engineering minimum; user and process minima also apply.")
     clearance: float = Field(gt=0)
     via_diameter: float = Field(default=0.6, gt=0)
     via_drill: float = Field(default=0.3, gt=0)

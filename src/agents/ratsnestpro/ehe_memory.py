@@ -585,6 +585,7 @@ class EheMemory:
         topology: Any | None = None,
         selection: Any | None = None,
         netlist: Any | None = None,
+        pcb_path: str | None = None,
         **_: Any,
     ) -> Path:
         scope = self.governance_scope
@@ -612,6 +613,7 @@ class EheMemory:
             topology=topology,
             selection=selection,
             netlist=netlist,
+            pcb_path=pcb_path,
         )
         module_features = " ".join(
             str(value)

@@ -42,6 +42,14 @@ class RunRuntimeConfiguration {
             String reasoningEffort,
             String visionModel,
             String visionReasoningEffort) {
+        return create(teamMembers, profile, harness, agentId, evaluationContext,
+                reasoningEffort, visionModel, visionReasoningEffort, null, null);
+    }
+
+    Map<String, Object> create(
+            List<TeamMember> teamMembers, CapabilityProfile profile, HarnessSelection harness,
+            String agentId, Map<String, String> evaluationContext, String reasoningEffort,
+            String visionModel, String visionReasoningEffort, String strongModel, String strongReasoningEffort) {
         return create(
                 teamMembers,
                 profile.id(),
@@ -53,7 +61,7 @@ class RunRuntimeConfiguration {
                 evaluationContext,
                 reasoningEffort,
                 visionModel,
-                visionReasoningEffort);
+                visionReasoningEffort, strongModel, strongReasoningEffort);
     }
 
     Map<String, Object> create(
@@ -103,6 +111,15 @@ class RunRuntimeConfiguration {
             String reasoningEffort,
             String visionModel,
             String visionReasoningEffort) {
+        return create(teamMembers, profileId, profileVersion, profileDigest, harness, harnessChannel,
+                agentId, evaluationContext, reasoningEffort, visionModel, visionReasoningEffort, null, null);
+    }
+
+    Map<String, Object> create(
+            List<TeamMember> teamMembers, String profileId, String profileVersion, String profileDigest,
+            HarnessVersion harness, String harnessChannel, String agentId, Map<String, String> evaluationContext,
+            String reasoningEffort, String visionModel, String visionReasoningEffort,
+            String strongModel, String strongReasoningEffort) {
         List<Map<String, Object>> members = teamMembers.stream()
                 .map(member -> Map.<String, Object>of(
                         "role_id", member.roleId(),
@@ -139,6 +156,12 @@ class RunRuntimeConfiguration {
         }
         if (visionReasoningEffort != null) {
             config.put("vision_reasoning_effort", visionReasoningEffort);
+        }
+        if (strongModel != null) {
+            config.put("strong_model", strongModel);
+        }
+        if (strongReasoningEffort != null) {
+            config.put("strong_reasoning_effort", strongReasoningEffort);
         }
         return Map.copyOf(config);
     }

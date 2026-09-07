@@ -413,9 +413,11 @@ def test_checkpoint_resume_invalidates_only_from_failed_step_and_bumps_revision(
     ).hexdigest()
 
 
+@pytest.mark.parametrize("review_marker", [False, True])
 def test_explicit_resume_retains_failed_artifact_as_repair_candidate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    review_marker: bool,
 ) -> None:
     checkpoint = tmp_path / "pipeline_state.json"
     payload = _checkpoint_payload()
@@ -431,6 +433,8 @@ def test_explicit_resume_retains_failed_artifact_as_repair_candidate(
     ).model_dump(mode="json")
     checkpoint.write_text(json.dumps(payload), encoding="utf-8")
 
+    monkeypatch.setattr("ratsnestpro.orchestration.review_repair.valid_review_resume",
+                        lambda *_args: review_marker)
     monkeypatch.setattr(
         "agents.ratsnestpro.tools.restore_pipeline_state",
         lambda **_kwargs: _prefix_state(route_index),

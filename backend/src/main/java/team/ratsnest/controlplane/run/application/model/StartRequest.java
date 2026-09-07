@@ -9,6 +9,8 @@ public record StartRequest(
         String reasoningEffort,
         String visionModel,
         String visionReasoningEffort,
+        String strongModel,
+        String strongReasoningEffort,
         String threadId,
         ProfileSelector capabilityProfile,
         List<TeamMember> teamMembers,
@@ -28,6 +30,13 @@ public record StartRequest(
             String threadId,
             ProfileSelector capabilityProfile,
             List<TeamMember> teamMembers) {
-        this(message, model, null, null, null, threadId, capabilityProfile, teamMembers, null, Map.of());
+        this(message, model, null, null, null, null, null, threadId, capabilityProfile, teamMembers, null, Map.of());
+    }
+
+    public StartRequest(String message, String model, String reasoningEffort, String visionModel,
+            String visionReasoningEffort, String threadId, ProfileSelector capabilityProfile,
+            List<TeamMember> teamMembers, String agentId, Map<String, String> evaluationContext) {
+        this(message, model, reasoningEffort, visionModel, visionReasoningEffort, null, null,
+                threadId, capabilityProfile, teamMembers, agentId, evaluationContext);
     }
 }

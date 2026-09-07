@@ -4137,8 +4137,12 @@ async def hardware_dispatch_phase(
         "model_type": (type(selected_model).__name__ if selected_model is not None else None),
         "reasoning_effort": _reasoning_effort(config),
         "vision_model_name": config.get("configurable", {}).get("vision_model"),
+        "strong_model_name": config.get("configurable", {}).get("strong_model"),
         "vision_reasoning_effort": config.get("configurable", {}).get(
             "vision_reasoning_effort"
+        ),
+        "strong_reasoning_effort": config.get("configurable", {}).get(
+            "strong_reasoning_effort"
         ),
         "attempt": _next_hardware_attempt_number(state.get("hardware_attempts", [])),
         "ahe_budget": _profile_ahe_budget(state),

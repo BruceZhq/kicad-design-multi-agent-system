@@ -118,6 +118,21 @@ def _validate_model_runtime_config(
                 detail="reasoning_effort is not supported by the selected main model",
             )
 
+    strong_name = result.get("strong_model")
+    strong_effort = result.get("strong_reasoning_effort")
+    if strong_name is not None:
+        try:
+            strong_model = OpenAIModelName(str(strong_name))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="strong_model is not supported") from exc
+        if strong_model not in OPENAI_VISION_MODELS or strong_model not in settings.AVAILABLE_MODELS:
+            raise HTTPException(status_code=422, detail="strong_model is not available in this Runtime")
+        if strong_effort is not None and strong_effort not in OPENAI_REASONING_EFFORTS[strong_model]:
+            raise HTTPException(status_code=422, detail="strong_reasoning_effort is not supported")
+        result["strong_model"] = strong_model.value
+    elif strong_effort is not None:
+        raise HTTPException(status_code=422, detail="strong_reasoning_effort requires strong_model")
+
     vision_name = result.get("vision_model")
     vision_effort = result.get("vision_reasoning_effort")
     if vision_name is None:

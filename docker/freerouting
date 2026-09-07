@@ -2,4 +2,4 @@
 set -eu
 
 exec /usr/bin/java -Djava.awt.headless=true -jar /opt/freerouting/freerouting.jar \
-    --gui.enabled=false "$@"
+    --gui.enabled=false --logging.console.level=DEBUG --logging.file.enabled=false "$@"

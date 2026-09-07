@@ -1,0 +1,30 @@
+{
+    "$schema": "https://schemas.kicad.org/erc.v1.json",
+    "coordinate_units": "mm",
+    "date": "2026-09-07T16:10:02+0000",
+    "kicad_version": "9.0.2",
+    "sheets": [
+        {
+            "path": "/",
+            "uuid_path": "/9b36764e-9a29-4ca9-9ee5-9ae22459abf6",
+            "violations": [
+                {
+                    "description": "Symbol 'AP2112K-3.3' doesn't match copy in library 'Regulator_Linear'",
+                    "items": [
+                        {
+                            "description": "Symbol U2 [AP2112K-3.3]",
+                            "pos": {
+                                "x": 0.3937,
+                                "y": 1.0668
+                            },
+                            "uuid": "bd284b7d-56f6-4ff8-9bde-59d233ce8b2a"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_mismatch"
+                }
+            ]
+        }
+    ],
+    "source": "stm32g070rbt6-board.kicad_sch"
+}

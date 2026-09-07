@@ -24,6 +24,43 @@ class _Artifact(BaseModel):
     value: str
 
 
+def test_recovery_identity_binds_registered_implementation_version():
+    from ratsnestpro.orchestration.pipeline import _recovery_action_fingerprint
+    old = RecoveryDecision(action=RecoveryAction.LOCAL_REPAIR,
+                           target_step="route_signals", tool_name="repair_route_connectivity")
+    new = old.model_copy(update={"tool_args": {"implementation": "layer_owned_v3"}})
+    assert _recovery_action_fingerprint(old) != _recovery_action_fingerprint(new)
+    assert _recovery_action_fingerprint(new) == _recovery_action_fingerprint(new.model_copy())
+
+
+def test_invalid_reflection_does_not_authorize_upstream_redesign(monkeypatch):
+    import json
+    from ratsnestpro.orchestration import pipeline as p
+
+    monkeypatch.setattr(p, "_bind_engineering_workspace", lambda *args: None)
+    monkeypatch.setattr(p, "_cad_action_context", lambda *args: {})
+    def invalid(ctx, **kwargs):
+        schema = json.loads(kwargs["system"].split("\n")[-1])
+        assert "cad_action_batch" in schema["properties"]
+        assert "target_step" in schema["properties"]
+        assert "actions" in schema["$defs"]["CadActionBatch"]["properties"]
+        return kwargs["fallback"](), False
+    monkeypatch.setattr(p, "propose_structured", invalid)
+    decision, used, _, _ = p._plan_agentic_recovery(
+        state=PipelineState(requirement_text="unchanged"),
+        ctx=PipelineContext(mode=LlmMode.AUTO, client=_RecoveryClient(), agentic_recovery_enabled=True),
+        result=p.StepResult(step=PipelineStep.ROUTE_SIGNALS),
+        artifact=None, before_score=(1, 13, 0),
+        allowed_targets=[PipelineStep.LAYOUT_PARTITION],
+        suggested_target=PipelineStep.LAYOUT_PARTITION,
+        local_repair_available=True,
+    )
+    assert not used
+    assert decision.action == RecoveryAction.STOP
+    assert decision.target_step == "route_signals"
+    assert decision.strategy == "recovery_output_unavailable_preserve_checkpoint"
+
+
 class _RequirementsStep(PipelineStepBase):
     step = PipelineStep.REQUIREMENTS
 
@@ -49,7 +86,7 @@ class _RecoverableTopologyStep(PipelineStepBase):
             CheckResult(
                 name="topology_gate",
                 ok=artifact.value == "good",
-                message="topology still violates the source requirement",
+                message="topology still violates the electrical constraint",
             )
         ]
 

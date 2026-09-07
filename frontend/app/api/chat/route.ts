@@ -165,6 +165,16 @@ export async function POST(request: Request): Promise<Response> {
   const reasoningEffort = input.reasoning_effort;
   const visionModel = input.vision_model;
   const visionReasoningEffort = input.vision_reasoning_effort;
+  const strongModel = input.strong_model;
+  const strongReasoningEffort = input.strong_reasoning_effort;
+  if (strongModel !== undefined && strongModel !== null &&
+      (typeof strongModel !== "string" || !OPENAI_VISION_MODELS.includes(strongModel))) {
+    return jsonError(request, "strong_model is not supported.");
+  }
+  if (strongReasoningEffort !== undefined && strongReasoningEffort !== null &&
+      (typeof strongModel !== "string" || !validReasoningEffort(strongModel, strongReasoningEffort))) {
+    return jsonError(request, "strong_reasoning_effort is not supported by strong_model.");
+  }
   const selectedProfile = capabilityProfile(input.capability_profile);
   if (!message || message.length > 100_000) {
     return jsonError(request, "message must contain between 1 and 100000 characters.");
@@ -261,6 +271,8 @@ export async function POST(request: Request): Promise<Response> {
             members,
             {
               reasoningEffort: typeof reasoningEffort === "string" ? reasoningEffort : null,
+              strongModel: typeof strongModel === "string" ? strongModel : null,
+              strongReasoningEffort: typeof strongReasoningEffort === "string" ? strongReasoningEffort : null,
               visionModel: typeof visionModel === "string" ? visionModel : null,
               visionReasoningEffort: typeof visionReasoningEffort === "string"
                 ? visionReasoningEffort
@@ -272,6 +284,8 @@ export async function POST(request: Request): Promise<Response> {
           message,
           model: typeof model === "string" ? model : null,
           reasoningEffort: typeof reasoningEffort === "string" ? reasoningEffort : null,
+          strongModel: typeof strongModel === "string" ? strongModel : null,
+          strongReasoningEffort: typeof strongReasoningEffort === "string" ? strongReasoningEffort : null,
           visionModel: typeof visionModel === "string" ? visionModel : null,
           visionReasoningEffort: typeof visionReasoningEffort === "string"
             ? visionReasoningEffort

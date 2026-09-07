@@ -1,0 +1,40 @@
+# Local/internal pilot only. Broker socket access is administrator authority.
+# Worker and model-created containers NEVER receive this socket or host mounts.
+# Merge after compose.yaml; set the token in the local, ignored .env file.
+services:
+  repair_executor:
+    image: ratsnestpro-agent-runtime:local
+    user: "0:0"
+    command: ["python", "-m", "uvicorn", "repair_executor.service:app", "--host", "0.0.0.0", "--port", "8097"]
+    environment:
+      RATSNEST_REPAIR_EXECUTOR_TOKEN: ${RATSNEST_REPAIR_EXECUTOR_TOKEN:?set a random token of at least 32 characters}
+      RATSNEST_REPAIR_SANDBOX_IMAGE: ${RATSNEST_REPAIR_SANDBOX_IMAGE:-ratsnestpro-agent-runtime:local}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [repair_internal]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8097/health', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+
+  agent_service:
+    networks: [default, repair_internal]
+    environment:
+      RATSNEST_REPAIR_EXECUTOR_URL: http://repair_executor:8097
+      RATSNEST_REPAIR_EXECUTOR_TOKEN: ${RATSNEST_REPAIR_EXECUTOR_TOKEN:?set a random token of at least 32 characters}
+
+  temporal_worker:
+    networks: [default, repair_internal]
+    environment:
+      RATSNEST_REPAIR_EXECUTOR_URL: http://repair_executor:8097
+      RATSNEST_REPAIR_EXECUTOR_TOKEN: ${RATSNEST_REPAIR_EXECUTOR_TOKEN:?set a random token of at least 32 characters}
+
+networks:
+  repair_internal:
+    internal: true

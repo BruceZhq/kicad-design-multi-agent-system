@@ -7,8 +7,8 @@ ENV UV_COMPILE_BYTECODE=1
 ENV KICAD_PYTHON="/usr/bin/python3"
 ENV FREEROUTING_EXE="/usr/local/bin/freerouting"
 
-ARG FREEROUTING_VERSION=2.2.4
-ARG FREEROUTING_SHA256=f5ed374182900ccc78e473518bbb9f6b869f4a07159495f663a76f52bb10523b
+ARG FREEROUTING_VERSION=2.4.1
+ARG FREEROUTING_SHA256=251101c3eeac22d7e7dfcf6796603279e5d1000283eb82d8f093780f7afc6aa9
 
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
         /etc/apt/sources.list.d/debian.sources \
@@ -46,6 +46,7 @@ COPY src/observability/ ./observability/
 COPY src/schema/ ./schema/
 COPY src/service/ ./service/
 COPY src/ratsnestpro/ ./ratsnestpro/
+COPY src/repair_executor/ ./repair_executor/
 COPY src/run_service.py .
 
 RUN groupadd --gid 10001 ratsnest \

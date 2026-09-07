@@ -11,6 +11,8 @@ public record ForkRequest(
         String reasoningEffort,
         String visionModel,
         String visionReasoningEffort,
+        String strongModel,
+        String strongReasoningEffort,
         List<TeamMember> teamMembers) {
 
     public ForkRequest {
@@ -28,6 +30,13 @@ public record ForkRequest(
             String changeRequest,
             String model,
             List<TeamMember> teamMembers) {
-        this(capabilityProfile, replayMode, changeRequest, model, null, null, null, teamMembers);
+        this(capabilityProfile, replayMode, changeRequest, model, null, null, null, null, null, teamMembers);
+    }
+
+    public ForkRequest(ProfileSelector capabilityProfile, ForkReplayMode replayMode, String changeRequest,
+            String model, String reasoningEffort, String visionModel, String visionReasoningEffort,
+            List<TeamMember> teamMembers) {
+        this(capabilityProfile, replayMode, changeRequest, model, reasoningEffort, visionModel,
+                visionReasoningEffort, null, null, teamMembers);
     }
 }

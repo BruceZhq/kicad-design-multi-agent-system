@@ -48,6 +48,8 @@ export function profileForkRequestBody(
     reasoningEffort?: string | null;
     visionModel?: string | null;
     visionReasoningEffort?: string | null;
+    strongModel?: string | null;
+    strongReasoningEffort?: string | null;
   } = {},
 ): Record<string, unknown> {
   return {

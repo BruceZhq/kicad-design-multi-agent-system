@@ -23,6 +23,7 @@ from ratsnestpro.orchestration.release_invariants import (
     audit_pcb_invariants,
     build_release_invariant_manifest,
     extract_requirement_invariants,
+    required_track_width,
 )
 
 
@@ -75,6 +76,26 @@ def test_extracts_explicit_release_invariants_in_both_languages(
     assert invariants.decoupling_max_distance_mm == pytest.approx(3.0)
     assert invariants.mounting_hole_count == 4
     assert invariants.mounting_holes_non_plated
+
+
+@pytest.mark.parametrize("requirement", [
+    "电源主干线宽至少 0.40 mm，普通信号线宽至少 0.20 mm，最小铜间距 0.20 mm。",
+    "Power traces at least 0.40 mm; ordinary signal traces at least 0.20 mm.",
+])
+def test_power_and_signal_widths_keep_independent_scope(requirement):
+    invariants = extract_requirement_invariants(requirement)
+    assert required_track_width(invariants, "3V3") == pytest.approx(.4)
+    assert required_track_width(invariants, "GND") == pytest.approx(.4)
+    assert required_track_width(invariants, "SWCLK") == pytest.approx(.2)
+
+
+def test_global_and_named_net_widths_are_not_conflated():
+    invariants = extract_requirement_invariants(
+        "All traces at least 0.20 mm; 5V and GND trunk traces at least 0.40 mm."
+    )
+    assert required_track_width(invariants, "5V") == pytest.approx(.4)
+    assert required_track_width(invariants, "DATA") == pytest.approx(.2)
+    assert required_track_width(invariants, "3V3") == pytest.approx(.2)
 
 
 def test_original_constraints_win_over_conflicting_hitl_patch() -> None:
