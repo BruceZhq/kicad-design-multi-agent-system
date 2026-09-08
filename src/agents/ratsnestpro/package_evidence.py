@@ -17,10 +17,12 @@ from ratsnestpro.eda import symbols
 class PackageEvidenceFetcher:
     """Cache observations, not release decisions; validators run on every use."""
 
-    def __init__(self, workspace: Path, visual_client=None):
+    def __init__(self, workspace: Path, visual_client=None, *, retry_failed_visual=False):
         self.root = workspace / "technical-evidence"
         self.attempted: set[str] = set()
         self.visual_client = visual_client
+        self.retry_failed_visual = retry_failed_visual
+        self.retried_visual: set[str] = set()
 
     def _visual(self, documents, part):
         if self.visual_client is None:
@@ -35,6 +37,12 @@ class PackageEvidenceFetcher:
                 datasheet=document,
             ) is not None:
                 continue
+            key = str(document.get("source_sha256") or document.get("source_url"))
+            if self.retry_failed_visual and key not in self.retried_visual:
+                # A cached failed parse is not permanent negative evidence.
+                # Final review gets one new observation with its selected model.
+                self.retried_visual.add(key)
+                document.pop("visual_extractor_version", None)
             if document.get("visual_extractor_version") != 9:
                 document.pop("visual_extraction_error", None)
                 try:

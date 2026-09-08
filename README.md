@@ -59,62 +59,50 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    U["用户输入需求；选择主模型、视觉模型"] --> UI["新增：独立选择升级模型与推理强度"]
-    UI --> API["Next.js BFF → Java 控制面<br/>身份、租户、不可变 Run 配置"]
-    API --> LG["Python / LangGraph Supervisor"]
-    LG --> Q{"需求是否存在必须用户决定的歧义？"}
-    Q -- 是 --> HITL["Decision Engine → AG-UI 人工问答"]
-    HITL --> LG
-    Q -- 否 --> AP["Architect + Parts + 可选 Specialist<br/>本地资产、资料、RAG、官方证据"]
-    AP --> CLOSE["选型后锁定 Footprint<br/>Symbol / MPN / Pin-Pad / 资产闭包"]
-    CLOSE --> T["Temporal：原 Run 与检查点<br/>1–5 需求、拓扑、选型、连接、PinMap"]
-    T --> SCH["6–8 原理图布局、实体生成、ERC"]
-    SCH --> L["9–12 分区、关键/普通布局、实体 PCB"]
-    LIB["增强：经 Reviewer 晋级的电路模块<br/>相对布局与内部走线种子"] --> L
-    L --> R["13–15 规则、电源平面、信号布线"]
-    R --> PRE["新增：路由前几何拥塞观察<br/>相邻引脚成组、候选出口"]
-    PRE --> ROUTE["真实 Freerouting / KiCad 工具"]
-    ROUTE --> CHECK{"当前实体检查通过？"}
-    CHECK -- 是 --> FAB["16–17 丝印/制造输出重建<br/>ERC、DRC、连接性、需求不变量"]
-    CHECK -- 否 --> OWNER["结构化失败证据 → 故障所有者"]
-    SCH -- ERC 失败 --> OWNER
-    FAB -- 校验失败 --> OWNER
-    OWNER --> INFRA{"基础设施 / Provider 故障？"}
-    INFRA -- 是 --> RETRY["原检查点有限重试<br/>不重新选型、不把断网当设计错误"]
-    RETRY --> T
-    INFRA -- 否 --> AHE["AHE：观察、计划、真实 CAD 动作<br/>验证、反思、候选回滚"]
-    AHE -- 已改善 --> CHECK
-    AHE -- 布线连续无改善且已启用升级 --> STRONG
-    subgraph STRONG["新增：强模型隔离编程修复会话"]
-      OBS["真实 CAD 渲染 + 焊盘/走线/障碍 + KiCad 报告"]
-      PLAN["强模型规划组合动作<br/>有界联合扇出搜索辅助"]
-      EXEC["无网络、无业务密钥、只读根目录<br/>限额工作副本运行 Python + pcbnew"]
-      VERIFY["宿主重新填铜、DRC、功能布局与需求核验<br/>冻结器件/引脚/板框/规则身份"]
-      BEST{"相对最佳候选确有改善？"}
-      OBS --> PLAN --> EXEC --> VERIFY --> BEST
-      BEST -- 否 --> REFLECT["反馈失败证据；改变策略或恢复最佳副本"]
-      REFLECT --> OBS
-    end
-    BEST -- 是 --> COMMIT["新增：文件指纹 CAS + 原子替换<br/>同步布局状态、写提交恢复日志"]
-    COMMIT --> CHECK
-    AHE -- 非路由问题 --> OWNED["沿现有所有权修复对应工程步骤"]
-    OWNED --> T
-    REFLECT -- 预算耗尽或硬冲突 --> HUMAN["保留证据和检查点；说明阻碍或请求授权"]
-    FAB -- 全部通过 --> REV["独立 Reviewer 复核最终实体与发布身份"]
-    REV -- 未通过 --> OWNER
-    REV -- 通过 --> RELEASE["release_ready<br/>可编辑工程、Gerber、钻孔、BOM、CPL、Manifest"]
-    RELEASE --> LIB
-    OWNER -. 跨项目重复 Harness 缺陷 .-> EV["既有 Governed Evolution<br/>隔离评测 → 人工审批 → 版本化发布"]
-    classDef default fill:#eef4ff,stroke:#517fb5,color:#172d49;
+    U["输入需求；选择主模型、视觉模型、最终修复模型与推理强度"] --> API["Next.js → Java → LangGraph<br/>保存用户约束与 Run 配置"]
+    API --> H["Supervisor / Architect / Parts<br/>必要参数通过 HITL 确认"]
+    H --> D["新增：17 步草案阶段<br/>暂不进行逐步设计修复"]
+    D --> S["1–5 需求、拓扑、选型、连接、PinMap"]
+    S --> SCH["6–8 原理图生成与 ERC"]
+    SCH --> PCB["9–15 布局、PCB 写入、电源平面与信号布线"]
+    PCB --> FAB["16–17 工艺检查与草案制造输出"]
+    S -. 检查缺陷 .-> L["新增：持久化缺陷清单<br/>实体、文件版本、失败证据"]
+    SCH -. 检查缺陷 .-> L
+    PCB -. 检查缺陷 .-> L
+    FAB -. 检查缺陷 .-> L
+    D -. 缺少有效输入或工具无法执行 .-> STOP["保存检查点并说明阻碍<br/>基础设施故障由执行层恢复"]
+    FAB --> F["新增：完整草案集中修复<br/>优先使用用户选择的强模型"]
+    L --> F
+    F --> V["重新运行原始严格检查<br/>定位最早故障所有者"]
+    V --> Q{"仍有缺陷？"}
+    Q -- 否 --> REV["独立 Reviewer + 发布身份校验"]
+    Q -- 是 --> C["现有工程候选事务<br/>保留有效祖先与完整草案快照"]
+    C --> E["证据与电路修复<br/>重新读资料、修改网表或原理图"]
+    C --> B["PCB 强模型隔离编程修复<br/>真实图像、焊盘、走线、KiCad 报告"]
+    B --> K["副本执行 Python / pcbnew<br/>真实检查、保留改善或回滚"]
+    E --> I["新增：按变更失效下游依赖<br/>证据补齐不重做未变化的电路"]
+    K --> I
+    I --> M["重建受影响步骤与最终制造文件"]
+    M --> V
+    C -. 无法改善或预算耗尽 .-> P["恢复完整草案<br/>保留失败证据，等待后续处理"]
+    REV -- 通过 --> R["release_ready<br/>KiCad、Gerber、钻孔、BOM、CPL、Manifest"]
+    REV -- 未通过 --> P
+    T["Temporal：Activity、heartbeat、检查点与恢复<br/>返回调度入口不等于从第 1 步重做"] -. 耐久执行 .-> D
+    T -. 耐久执行 .-> F
+    R --> LIB["既有：经审核的模块与经验沉淀"]
+    L -. 跨项目重复 Harness 缺陷 .-> EV["既有：Governed Evolution<br/>隔离评测、人工审批、版本发布"]
     classDef added fill:#fff0db,stroke:#e28a16,color:#38240c;
+    classDef default fill:#eef4ff,stroke:#517fb5,color:#172d49;
     classDef released fill:#daf3e3,stroke:#21834a,color:#123a23;
-    class UI,LIB,PRE,OBS,PLAN,EXEC,VERIFY,BEST,REFLECT,COMMIT added;
-    class RELEASE released;
+    class D,L,F,I added;
+    class R released;
 ```
 
 图中返回 Temporal 表示从原检查点恢复调度，不代表从第 1 步重做；仅重新执行受修改影响的步骤及下游验证。强模型兜底已验证隔离 CAD 修改与检查通道，不代表已证明任意板型自主发布成功。
 
 详细恢复语义与能力边界见[完整流程说明](docs/REQUIREMENTS_TO_RELEASE_FLOW.md)。
+
+默认采用[先完成草案、再集中修复](docs/DRAFT_THEN_REPAIR.md)：可继续的设计缺陷先记录，17 步草案结束后由所选强模型处理。最终修复、严格检查与独立审查通过后才发布。
 
 ### 相比上游模板的主要新增模块
 

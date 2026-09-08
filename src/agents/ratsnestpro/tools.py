@@ -420,6 +420,7 @@ def _write_pipeline_state(
         "project_name": state.project_name,
         "revision": state.revision,
         "completed_steps": len(state.results),
+        "draft_execution": state.draft_execution,
         "release_readiness": {
             "component_gate_evaluated": isinstance(selection, SelectionPlan),
             "component_release_ready": (
@@ -981,6 +982,8 @@ def _load_pipeline_state(
         release_resume_token_digest=persisted_resume_token_digest,
         invalidate_from_step=invalidate_from_step,
         artifact_first=True,
+        draft_first=_env_flag("RATSNESTPRO_DRAFT_THEN_REPAIR", default=True),
+        draft_execution=payload.get("draft_execution", {}),
     )
     if (
         explicit_invalidation is not None
@@ -2431,15 +2434,14 @@ def _run_pcb_pipeline_unlocked(
         recover_pending_commit(state)
         resumed_steps = len(state.results)
         require_freerouting = _env_flag("RATSNESTPRO_REQUIRE_FREEROUTING")
-        repair_release_issues = _env_flag(
+        draft_first = _env_flag("RATSNESTPRO_DRAFT_THEN_REPAIR", default=True)
+        repair_release_issues = not draft_first and _env_flag(
             "RATSNESTPRO_REPAIR_RELEASE_ISSUES",
             default=True,
         )
         from agents.ratsnestpro.package_evidence import PackageEvidenceFetcher
 
-        Pipeline().run(
-            state,
-            PipelineContext(
+        pipeline_context = PipelineContext(
                 mode=mode,
                 client=client,
                 strong_repair=_strong_repair_runtime(
@@ -2522,6 +2524,7 @@ def _run_pcb_pipeline_unlocked(
                     maximum=2,
                 ),
                 artifact_first=True,
+                draft_first=draft_first,
                 repair_release_issues=repair_release_issues,
                 design_repair_attempts=_env_int(
                     "RATSNESTPRO_DESIGN_REPAIR_STAGNATION_LIMIT",
@@ -2625,9 +2628,34 @@ def _run_pcb_pipeline_unlocked(
                     requirement,
                     current,
                 ),
-            ),
-            until=requested_until,
         )
+        if draft_first:
+            from ratsnestpro.repair.draft import recover_draft_transaction
+
+            recover_draft_transaction(state, pipeline_context)
+        Pipeline().run(state, pipeline_context, until=requested_until)
+        if draft_first and not state.execution_blocked and len(state.artifacts) == 17 and len(state.results) == 17 and (
+            requested_until is None or requested_until == PipelineStep.MANUFACTURE
+        ):
+            from ratsnestpro.repair.draft import finalize_draft
+
+            if mode != LlmMode.OFFLINE and strong_model_name:
+                final_client = _ToolkitLlmClient(
+                    model_name=strong_model_name,
+                    reasoning_effort=strong_reasoning_effort or "high",
+                    vision_model_name=vision_model_name or strong_model_name,
+                    vision_reasoning_effort=vision_reasoning_effort,
+                    transcript_path=transcript_path,
+                    phase="hardware-engineer:final-repair",
+                    max_llm_tokens=max_llm_tokens,
+                )
+                final_client._model = final_client._fallback_model
+                pipeline_context.client = final_client
+                pipeline_context.package_evidence_fetcher = PackageEvidenceFetcher(
+                    out, visual_client=final_client, retry_failed_visual=True,
+                )
+            state.draft_execution["repair_model"] = strong_model_name or model_name
+            finalize_draft(state, pipeline_context)
         target_reached = requested_until is not None and requested_until in state.completed
         if (
             requested_until is not None
@@ -2654,6 +2682,8 @@ def _run_pcb_pipeline_unlocked(
                     "step_target_reached": True,
                     "execution_blocked": False,
                     "execution_complete": False,
+                    "execution_phase": "draft" if draft_first else "engineering",
+                    "deferred_issue_count": sum(len(r.error_checks) for r in state.results),
                     "release_ready": False,
                     "resumed_steps": resumed_steps,
                     "requested_llm_mode": requested_mode.value,
@@ -2747,6 +2777,8 @@ def _run_pcb_pipeline_unlocked(
         if len(state.results) != 17:
             release_blockers.append("17-step pipeline did not complete")
         release_blockers = list(dict.fromkeys(release_blockers))
+        if draft_first and state.draft_execution.get("phase") != "verified":
+            release_blockers.append("final engineering repair and strict revalidation have not passed")
         issue_ledger = [
             {
                 "step": step["name"],
@@ -2828,6 +2860,8 @@ def _run_pcb_pipeline_unlocked(
             "verification_blockers": verification_blockers,
             "release_blockers": release_blockers,
             "issue_ledger": issue_ledger,
+            "execution_phase": state.draft_execution.get("phase", "engineering"),
+            "draft_execution": state.draft_execution,
             "execution_complete": execution_complete,
             "execution_blocked": state.execution_blocked,
             "release_ready": outcome == "release_ready",

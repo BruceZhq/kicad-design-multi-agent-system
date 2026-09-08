@@ -296,6 +296,8 @@ class PipelineState:
     # explicit rollback legitimately shortens the completed-step prefix.
     checkpoint_generation: int = 0
     checkpoint_state_sha256: str = ""
+    # Durable execution policy and final-review admission survive Activity restarts.
+    draft_execution: dict[str, Any] = field(default_factory=dict)
 
     def artifact(self, step: PipelineStep) -> BaseModel | None:
         return self.artifacts.get(step)
@@ -456,6 +458,8 @@ class PipelineContext:
     engineering_step_instructions: str = ""
     # Optional, independently configured project-local programming executor.
     strong_repair: object | None = None
+    draft_first: bool = False
+    final_review_context: str = ""
     verified_layout_modules: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -1779,6 +1783,8 @@ class PipelineStepBase(ABC):
             knowledge += "\nVerified module seeds (rebind exact assets; preserve current hard constraints):\n"
             knowledge += circuit_module_search_text(ctx.verified_layout_modules)
             knowledge_ids.extend(str(item["module_digest"]) for item in ctx.verified_layout_modules)
+        if ctx.final_review_context:
+            knowledge += "\nFinal repair evidence from the complete draft:\n" + ctx.final_review_context
         resumed = state.resume_candidates.pop(self.step, None)
         if resumed is None:
             artifact, used_llm = self.propose(state, ctx, knowledge)
@@ -1925,6 +1931,7 @@ class PipelineStepBase(ABC):
         # bounded repair implementation. The total task budget prevents loops.
         can_repair = (
             blocked
+            and not ctx.draft_first
             and any(
                 not check.ok and check.origin != FailureOrigin.EXTERNAL_EVIDENCE
                 for check in best_checks
@@ -2235,11 +2242,12 @@ class PipelineStepBase(ABC):
             state.capability_gaps = unresolved
         upstream_replan_available = (
             blocked
+            and not ctx.draft_first
             and repair_scope
             and ctx.ahe_enabled
             and self.rollback_target(state, artifact, checks) is not None
         )
-        if blocked and repair_scope and not upstream_replan_available:
+        if blocked and repair_scope and not upstream_replan_available and not ctx.draft_first:
             for failure in failures:
                 attribution = attribute_failure(failure)
                 event_name = {
@@ -2255,7 +2263,7 @@ class PipelineStepBase(ABC):
                     failure=failure,
                     attribution=attribution,
                 )
-        elif blocked and design_recovery_scope:
+        elif blocked and design_recovery_scope and not ctx.draft_first:
             for failure in failures:
                 attribution = attribute_failure(failure)
                 event_name = (
@@ -2282,6 +2290,10 @@ class PipelineStepBase(ABC):
             summary=self.summarize(artifact),
         )
         state.results.append(result)
+        if ctx.draft_first:
+            from ratsnestpro.repair.draft import defer_result
+
+            defer_result(state, result, artifact, ctx.on_ahe_event)
         return result
 
     def summarize(self, artifact: BaseModel) -> str:
@@ -6093,7 +6105,7 @@ def _prepare_and_persist_components(
         inputs=directives,
         mutate_selection=True,
     )
-    if ctx.package_evidence_fetcher is not None:
+    if ctx.package_evidence_fetcher is not None and not ctx.draft_first:
         missing = {
             record.ref for record in prepared.manifest.records
             if "independent_package_evidence_missing" in record.electrical_blockers
@@ -21729,9 +21741,9 @@ class ManufactureStep(PipelineStepBase):
                 pcb_path,
                 drc_report_path,
             )
-            if not drc and _repair_redundant_copper_entities(state, cli, pcb_path, drc_report_path):
+            if not ctx.draft_first and not drc and _repair_redundant_copper_entities(state, cli, pcb_path, drc_report_path):
                 drc = list(_read_drc_snapshot(drc_report_path).findings)
-            if not drc and _repair_silkscreen_entities(
+            if not ctx.draft_first and not drc and _repair_silkscreen_entities(
                 cli,
                 pcb_path,
                 drc_report_path,
@@ -22812,6 +22824,8 @@ def restore_pipeline_state(
     release_resume_token_digest: str = "",
     invalidate_from_step: PipelineStep | None = None,
     artifact_first: bool = False,
+    draft_first: bool = False,
+    draft_execution: dict[str, Any] | None = None,
 ) -> PipelineState:
     """Restore the longest contiguous prefix that still passes current gates.
 
@@ -22830,6 +22844,7 @@ def restore_pipeline_state(
         restored_connection_report = None
     state = PipelineState(
         requirement_text=requirement_text,
+        draft_execution=dict(draft_execution or {}),
         project_name=project_name,
         revision=max(0, revision),
         repair_history=[
@@ -22970,7 +22985,7 @@ def restore_pipeline_state(
         saved_execution_blocked = saved.get("execution_blocked")
         if bool(saved.get("blocked")) and (
             not artifact_first or saved_execution_blocked is not False
-        ):
+        ) and not draft_first:
             state.resume_candidates[expected] = (
                 artifact,
                 bool(saved.get("used_llm")),
@@ -22981,6 +22996,10 @@ def restore_pipeline_state(
         execution_invalid = False
         try:
             current_checks = validator.check(state, artifact)
+            if draft_first:
+                from ratsnestpro.repair.draft import deferred_checks
+
+                current_checks = deferred_checks(expected, artifact, current_checks)
             invalid = any(
                 not check.ok and check.severity == Severity.ERROR
                 for check in current_checks
@@ -23125,6 +23144,9 @@ class Pipeline:
         until: PipelineStep | None = None,
     ) -> PipelineState:
         ctx = ctx or PipelineContext()
+        if ctx.draft_first:
+            state.draft_execution.setdefault("policy", "draft-then-repair.v1")
+            state.draft_execution.setdefault("phase", "draft")
         limit = _ORDER_INDEX[until] if until is not None else len(self.steps) - 1
         durable_scheduled = [
             record
@@ -23454,7 +23476,7 @@ class Pipeline:
                 not result.blocked
                 or (
                     ctx.artifact_first
-                    and not ctx.repair_release_issues
+                    and (ctx.draft_first or not ctx.repair_release_issues)
                     and not result.execution_blocked
                 )
             )
@@ -23471,6 +23493,13 @@ class Pipeline:
                 completed_set.add(step.step)
                 index += 1
                 continue
+
+            if ctx.draft_first:
+                # No usable successor input: retain the failure and checkpoint.
+                # Design repair belongs to finalization, never a per-step loop.
+                if ctx.on_progress_checkpoint is not None:
+                    ctx.on_progress_checkpoint(state)
+                break
 
             if result.blocked:
                 extend_candidate = bool(
