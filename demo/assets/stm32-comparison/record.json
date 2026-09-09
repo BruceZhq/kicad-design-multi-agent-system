@@ -1,0 +1,39 @@
+{
+  "case_id": "stm32g070-envmonitor-single-case",
+  "published_date": "2026-09-09",
+  "prompt": "prompt.txt",
+  "token_source": "Project author-provided run totals; raw usage logs not independently audited for this page.",
+  "token_scope": ["input", "output", "packaging"],
+  "rendering": {
+    "tool": "KiCad CLI 10.0.4",
+    "layers": ["F.Cu", "F.SilkS", "Edge.Cuts"],
+    "method": "SVG export with page-size-mode 2, exclude-drawing-sheet and mode-single; browser rasterization on identical background.",
+    "image_pixels": [1600, 1100],
+    "source_boards_modified": false,
+    "three_d": {"method": "KiCad pcb render", "side": "top", "quality": "high", "background": "opaque", "model_library": "Installed KiCad 10 library; KiCad 9 and 10 model variables resolved to the same library"}
+  },
+  "runs": [
+    {
+      "label": "GPT-6 Astra",
+      "models": [{"name": "GPT-6 Astra", "tokens": 6813253}],
+      "total_tokens": 6813253,
+      "source_archive": "EnvMonitor-complete.zip",
+      "source_board": "EnvMonitor/EnvMonitor.kicad_pcb",
+      "source_board_sha256": "dad0aecefef5c066614c04cd06f9fc62ee5e7b2d3a063c05db9728a7286b2c24",
+      "image": "gpt6-astra.png",
+      "image_3d": "gpt6-astra-3d.png"
+    },
+    {
+      "label": "KiCad Design Multi-Agent System",
+      "models": [{"name": "DeepSeek V4 Pro", "tokens": 1088606}, {"name": "GPT-5.6 Terra", "tokens": 5314893}],
+      "total_tokens": 6403499,
+      "source_board": "stm32g070rbt6-board.kicad_pcb",
+      "source_board_sha256": "74bb89ecdbf14f626e90eb1d44583bc390c88364b817442eacc511f7294aacf1",
+      "image": "kicad-system.png",
+      "image_3d": "kicad-system-3d.png"
+    }
+  ],
+  "difference_tokens": 409754,
+  "relative_difference_percent": 6.014072866514717,
+  "limitations": "One case with different models and execution methods. Not an isolated architecture comparison, a monetary cost comparison, or proof of equivalent engineering quality. PCB plots do not substitute for engineering validation."
+}
