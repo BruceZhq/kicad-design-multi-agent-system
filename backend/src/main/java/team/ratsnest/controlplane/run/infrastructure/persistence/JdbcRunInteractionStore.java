@@ -37,7 +37,7 @@ public class JdbcRunInteractionStore implements RunInteractionStore {
                             :tenantId, :interactionId, :runId, 'clarification',
                             :interactionVersion, cast(:requestPayload as jsonb)
                         )
-                        on conflict (tenant_id, interaction_id) do nothing
+                        on conflict (tenant_id, run_id, interaction_id) do nothing
                         """)
                 .param("tenantId", run.tenantId())
                 .param("interactionId", interactionId)

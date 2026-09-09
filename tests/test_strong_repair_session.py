@@ -45,6 +45,53 @@ class Host:
         return {"status": "completed"}
 
 
+def test_failed_program_survives_observation_history_window():
+    host, prompts = Host(), []
+    original_execute = host.execute
+    host.execute = lambda script, timeout: (
+        {"status": "failed", "output": "AttributeError: missing API"}
+        if script == "broken" else original_execute(script, timeout))
+    replies = iter([
+        {"action": "execute_python", "rationale": "attempt", "script": "broken"},
+        *[{"engineering_queries": []} for _ in range(7)],
+        {"action": "execute_python", "rationale": "correct API", "script": "finish"},
+    ])
+    def complete(_system, user, *_):
+        prompts.append(json.loads(user))
+        return json.dumps(next(replies))
+    assert run_session(host, complete=complete, limits=RepairLimits(max_turns=9), record=lambda _: None)
+    assert prompts[-1]["last_execution_failure"]["script"] == "broken"
+    assert "missing API" in prompts[-1]["last_execution_failure"]["output"]
+    assert prompts[-1]["remaining_turns"] == 1
+
+
+def test_geometry_defect_can_be_corrected_in_next_action():
+    host, calls = Host(), []
+    def execute(*_):
+        calls.append(host.current.fingerprint)
+        host.current = (CandidateAssessment('needs-sizing', 0, 1, 0,
+                        ('via mismatch',), ('via mismatch',)) if len(calls) == 1
+                        else CandidateAssessment('corrected', 0, 0, 0))
+        return {'status': 'completed'}
+    host.execute = execute
+    assert run_session(host, complete=lambda *_: json.dumps({'action': 'execute_python',
+        'rationale': 'correct via', 'script': 'repair'}),
+        limits=RepairLimits(max_turns=2), record=lambda _: None)
+    assert calls == ['original', 'needs-sizing']
+    assert host.committed and host.current.fingerprint == 'corrected'
+
+
+def test_unfixed_geometry_never_commits():
+    host = Host()
+    def execute(*_):
+        host.current = CandidateAssessment('invalid', 0, 0, 0, ('via mismatch',), ('via mismatch',))
+        return {'status': 'completed'}
+    host.execute = execute
+    assert not run_session(host, complete=lambda *_: json.dumps({'action': 'execute_python',
+        'rationale': 'attempt', 'script': 'repair'}), limits=RepairLimits(max_turns=1), record=lambda _: None)
+    assert not host.committed and host.current.fingerprint == 'original'
+
+
 @pytest.mark.parametrize("last", ["regress", "cheat"])
 def test_best_candidate_survives_failed_joint_edits(last):
     host = Host()
@@ -71,6 +118,47 @@ def test_no_improvement_never_commits():
         record=lambda _: None,
     )
     assert not host.committed and host.current.fingerprint == "original"
+
+
+def test_premature_completion_returns_findings_and_continues_repair():
+    host, events, prompts = Host(), [], []
+    responses = iter([
+        {"action": "report_complete", "rationale": "I believe it is done"},
+        {"action": "execute_python", "rationale": "fix remaining actual gaps", "script": "finish"},
+    ])
+    revalidated = []
+    host.revalidate = lambda: (revalidated.append(True) or host.assess())
+    def complete(_system, user, *_):
+        prompts.append(json.loads(user))
+        return json.dumps(next(responses))
+    assert run_session(host, complete=complete, limits=RepairLimits(max_turns=2), record=events.append)
+    assert revalidated == [True]
+    assert prompts[1]['history'][-1]['candidate_checks_passed'] is False
+    assert host.current.fingerprint == 'finished' and host.committed
+    assert all(e.get('release_ready') is not True for e in events)
+
+
+def test_completion_claim_alone_never_promotes_or_commits():
+    host, events = Host(), []
+    assert not run_session(host, complete=lambda *_: json.dumps({
+        "action": "report_complete", "rationale": "looks good to me"}),
+        limits=RepairLimits(max_turns=1), record=events.append)
+    outcome = next(e for e in events if e['event'] == 'strong_repair.session_finished')
+    assert outcome['agent_reported_complete'] and not outcome['candidate_checks_passed']
+    assert not outcome['release_ready'] and not host.committed
+
+
+def test_failed_executor_cannot_commit_even_if_it_mutated_candidate():
+    host, events = Host(), []
+    def fail(*_):
+        host.current = CandidateAssessment('partial', 0, 0, 0)
+        return {'status': 'failed', 'output': 'program exception'}
+    host.execute = fail
+    assert not run_session(host, complete=lambda *_: json.dumps({
+        'action': 'execute_python', 'rationale': 'repair', 'script': 'fail'}),
+        limits=RepairLimits(max_turns=1), record=events.append)
+    assert host.current.fingerprint == 'original' and not host.committed
+    assert any(e['event'] == 'strong_repair.execution_failed' for e in events)
 
 
 def test_budget_stop_preserves_verified_improvement():

@@ -205,6 +205,7 @@ class TopologyPlan(ProposalModel):
     # before they are accepted by the topology step.
     schema_version: Literal[1, 2] = 2
     blocks: list[TopologyBlock] = Field(default_factory=list, max_length=200)
+    owner_bindings: dict[str, str] = Field(default_factory=dict, max_length=500)
     rails: list[str] = Field(default_factory=list, max_length=50)
     ground_net: str = Field(default="GND", min_length=1, max_length=100)
     ground_domains: list[str] = Field(default_factory=list, max_length=50)

@@ -1637,6 +1637,8 @@ def _current_pipeline_files(
     board = state.artifact(PipelineStep.LAYOUT_WRITE)
     if isinstance(board, PcbWriteResult):
         pcb_path = Path(board.pcb_path)
+        candidates.extend(pcb_path.parent / name for name in
+                          ('terra-repair-delivery.zip', 'terra-repair-delivery.json'))
         candidates.extend(
             [
                 pcb_path,
@@ -2457,16 +2459,14 @@ def _run_pcb_pipeline_unlocked(
             "RATSNESTPRO_REPAIR_RELEASE_ISSUES",
             default=True,
         )
-        # Only a requested continuation grants a new bounded repair window.
-        # Temporal retries share its durable token; automated Reviewer visits
-        # must not replenish budgets. Cumulative counters remain intact.
-        if active_resume is not None and resume_token and ".review." not in resume_token:
-            from ratsnestpro.repair.draft import authorize_repair_continuation
-
-            authorize_repair_continuation(state, resume_token)
+        # Only an acknowledged, explicit HITL grant replenishes the bounded
+        # repair window. Workflow IDs/retries alone never grant paid capacity.
+        from ratsnestpro.repair.continuation import apply_response
+        repair_instruction = apply_response(out, state)
         from agents.ratsnestpro.package_evidence import PackageEvidenceFetcher
 
         pipeline_context = PipelineContext(
+                repair_feedback=repair_instruction,
                 mode=mode,
                 client=client,
                 strong_repair=_strong_repair_runtime(

@@ -4064,7 +4064,10 @@ async def hardware_dispatch_phase(
         existing_ref.get("mode") == "temporal"
         and existing_ref.get("workflow_id")
         and existing_ref.get("request_id") == request_id
-        and existing_ref.get("status") in {"started", "attached", "wait_error"}
+        # hardware_wait_phase persists "completed" even for a blocked design.
+        # Include that real persisted state so HITL cannot redispatch the old
+        # Temporal identity and immediately replay its terminal failure.
+        and existing_ref.get("status") in {"started", "attached", "wait_error", "completed"}
         and existing_ref.get("workspace_run_name", existing_ref.get("run_name"))
         == workspace_run_name
     )
@@ -4964,13 +4967,30 @@ def _after_hardware(state: RatsNestWorkflowState) -> str:
 
 
 def _hardware_human_request(state):
+    hardware = state.get("hardware", {})
+    if hardware.get('user_ended_repair'):
+        return None
+    # Recovery history is an audit trail, not an active request after the
+    # authoritative hardware result has passed. Preserve history for review.
+    if hardware.get("release_ready") is True and not hardware.get("release_blockers"):
+        return None
     history = state.get("hardware", {}).get("ahe", {}).get("agentic_recovery", {}).get("history", [])
     if history and history[-1].get("status") == "awaiting_human":
         return history[-1]
     return None
 
 
-async def hardware_evidence_input(state: RatsNestWorkflowState) -> dict[str, Any]:
+def _hardware_interaction_identity(state, request, config):
+    return hashlib.sha256(json.dumps([
+        _workspace_run_name(state), state.get('run_scope', ''),
+        config.get('configurable', {}).get('request_id', ''),
+        state.get('hardware_dispatch', {}).get('workflow_id', ''),
+        request.get('turn_id'), request.get('revision', 0),
+    ]).encode()).hexdigest()[:32]
+
+
+async def hardware_evidence_input(state: RatsNestWorkflowState, config: RunnableConfig) -> dict[str, Any]:
+    from ratsnestpro.repair.continuation import APPROVE, PAUSE, FINISH, budget_blocked, save_response
     request = _hardware_human_request(state)
     if not request:
         return {}
@@ -4985,7 +5005,36 @@ async def hardware_evidence_input(state: RatsNestWorkflowState) -> dict[str, Any
                                    f"PDF={difference['observed_functions']}; page={difference.get('page')}")
         except (OSError, ValueError, KeyError, TypeError):
             continue
-    identity = hashlib.sha256(json.dumps([_workspace_run_name(state), request.get("turn_id")]).encode()).hexdigest()[:32]
+    # A continuation may create a new control-plane Run for the same workspace.
+    # An interaction belongs to that Run, not globally to an old AHE turn.
+    identity = _hardware_interaction_identity(state, request, config)
+    root = _workspace_root() / "runs" / _workspace_run_name(state)
+    if budget_blocked(root) or (root / 'terra-repair-delivery.zip').is_file():
+        # Explicit consent is independent of engineering evidence and cannot be
+        # inferred from an ordinary "continue" or a new Temporal workflow ID.
+        consent_index = 0
+        while True:
+            consent_index += 1
+            consent_id = identity + "-budget-" + str(consent_index)
+            consent = interrupt({
+                "interactionId": consent_id, "kind": "clarification",
+                "requestedBy": "hardware-engineer", "stateVersion": int(request.get("revision", 0)) + 1,
+                "question": "外部 Terra 本轮修复已停止，仍有未解决问题；本次尚未启动新的修复。"
+                            "可追加一轮修复，或结束并交付当前工程与剩余错误报告。结束不代表可制造；保留检查点及累计消耗。",
+                "options": [APPROVE, FINISH], "allowFreeText": False,
+            })
+            if str(consent).strip() == APPROVE:
+                save_response(root, consent_id, str(consent), grant=True)
+                return {"incremental_resume": True}
+            if str(consent).strip() == FINISH:
+                from ratsnestpro.repair.delivery import finish_with_issues
+                hardware = finish_with_issues(state.get('hardware', {}), root)
+                save_response(root, consent_id, str(consent))
+                return {'hardware': hardware, 'incremental_resume': False}
+            if str(consent).strip() and str(consent).strip() != PAUSE:
+                # A pre-upgrade free-text interrupt may be replayed here.
+                # Preserve its instruction, but never interpret it as consent.
+                save_response(root, consent_id + "-instruction", str(consent))
     answer = interrupt({
         "interactionId": identity, "kind": "clarification", "requestedBy": "hardware-engineer",
         "stateVersion": int(request.get("revision", 0)) + 1,
@@ -4993,6 +5042,7 @@ async def hardware_evidence_input(state: RatsNestWorkflowState) -> dict[str, Any
                     "\n".join(str(b) for b in blockers[:8]) + "\n" + "\n".join(pin_details[:20]),
         "options": [], "allowFreeText": True,
     })
+    save_response(root, identity, str(answer))
     # The response is not a replacement approval or evidence. The same
     # checkpoint must revalidate actual registered documents after resumption.
     return {"incremental_resume": True}
@@ -5004,6 +5054,10 @@ def _after_review(state: RatsNestWorkflowState) -> str:
         return _HARDWARE_NODE
     _handoff_event("reviewer", "supervisor", state.get("review", {}))
     return "final_report"
+
+
+def _after_hardware_input(state):
+    return 'final_report' if state.get('hardware', {}).get('user_ended_repair') else _HARDWARE_NODE
 
 
 def _single_phase_subgraph(
@@ -5067,7 +5121,8 @@ builder.add_node(_HARDWARE_NODE, ratsnestpro_hardware_engineer)
 builder.add_node(_REVIEWER_NODE, ratsnestpro_reviewer)
 builder.add_node("final_report", final_report)
 builder.add_node("hardware_evidence_input", hardware_evidence_input)
-builder.add_edge("hardware_evidence_input", _HARDWARE_NODE)
+builder.add_conditional_edges("hardware_evidence_input", _after_hardware_input,
+                              [_HARDWARE_NODE, 'final_report'])
 
 builder.add_edge(START, _SUPERVISOR_NODE)
 builder.add_conditional_edges(_SUPERVISOR_NODE, _after_initialize)

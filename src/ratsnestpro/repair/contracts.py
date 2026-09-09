@@ -22,7 +22,7 @@ class RepairLimits(BaseModel):
     max_turns: int = Field(default=10, ge=1, le=20)
     max_script_seconds: int = Field(default=90, ge=1, le=120)
     max_total_seconds: int = Field(default=600, ge=30, le=1800)
-    max_llm_tokens: int = Field(default=60_000, ge=1000, le=200_000)
+    max_llm_tokens: int = Field(default=60_000, ge=1000, le=1_200_000)
     stagnation_threshold: int = Field(default=2, ge=1, le=6)
     max_sessions_per_run: int = Field(default=2, ge=1, le=4)
 
@@ -93,18 +93,21 @@ class SandboxResult(BaseModel):
 
 class RepairProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    action: Literal["execute_python", "joint_candidate", "stop"]
+    action: Literal["execute_python", "joint_candidate", "report_complete", "stop"]
     rationale: str = Field(min_length=1, max_length=2000)
     script: str = Field(default="", max_length=64000)
     zone_bindings: dict[str, str] = Field(default_factory=dict, max_length=100)
+    topology_owners: dict[str, str] = Field(default_factory=dict, max_length=100)
     refresh_evidence: bool = False
 
     @model_validator(mode="after")
     def needs_script(self):
+        if self.action in {"report_complete", "stop"} and self.script.strip():
+            raise ValueError("completion and stop cannot carry executable changes")
         if self.action == "execute_python" and not self.script.strip():
             raise ValueError("execute_python requires a real script")
-        if self.action != "joint_candidate" and (self.zone_bindings or self.refresh_evidence):
+        if self.action != "joint_candidate" and (self.zone_bindings or self.topology_owners or self.refresh_evidence):
             raise ValueError("upstream edits require joint_candidate action")
-        if self.action == "joint_candidate" and not (self.script.strip() or self.zone_bindings or self.refresh_evidence):
+        if self.action == "joint_candidate" and not (self.script.strip() or self.zone_bindings or self.topology_owners or self.refresh_evidence):
             raise ValueError("joint_candidate requires a concrete change or evidence refresh")
         return self

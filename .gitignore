@@ -241,3 +241,8 @@ smoke_live_app_failure.png
 # Local agent tooling and generated deployment evidence.
 .claude/
 deploy/evidence/
+
+# Task-local exports and experiments, never runtime source packages.
+/outputs/
+/tmp/
+/examples/**/.history/

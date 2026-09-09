@@ -2197,6 +2197,9 @@ function MessageCard({ message }: { message: DisplayMessage }) {
 
   if (message.type === "custom" && message.custom_data.kind === "ahe_event") {
     const eventName = String(message.custom_data.event ?? "recovery_event");
+    const strong = (message.custom_data.strong_repair ?? {}) as Record<string, unknown>;
+    const progress = (strong.progress ?? strong) as Record<string, unknown>;
+    const score = Array.isArray(progress.score) ? progress.score : null;
     const step = String(message.custom_data.step ?? "unknown");
     const rawRecovery = message.custom_data.recovery;
     const recovery = rawRecovery && typeof rawRecovery === "object"
@@ -2210,12 +2213,22 @@ function MessageCard({ message }: { message: DisplayMessage }) {
       recovery_action_started: "Harness 正在执行恢复动作",
       recovery_observed: "已取得新的确定性检查结果",
       recovery_exhausted: "当前恢复策略已耗尽",
+      strong_repair_a2a_submitted: "已委派外部工程修复",
+      strong_repair_a2a_progress: "外部 Agent 修复进度",
+      strong_repair_a2a_candidate_committed: "候选已通过本地验收并提交，仍需发布检查",
+      strong_repair_a2a_candidate_rejected: "候选未通过本地验收，原工程保留",
+      strong_repair_budget_exhausted: "修复额度不足，已暂停调用",
     };
     return (
       <article className="workflow-event ahe-recovery-event">
         <span className="event-icon">↻</span>
         <div>
           <strong>{labels[eventName] ?? `AHE · ${eventName}`}</strong>
+          {score && <p>候选检查错误 {String(score[0])} · 未连接 {String(score[1])} · 警告 {String(score[2])}</p>}
+          {progress.candidate_rolled_back === true && <p>本次候选已回滚，保留此前最佳工程。</p>}
+          {progress.improved === true && <p>已验证改善。</p>}
+          {Array.isArray(progress.invariant_failures) && progress.invariant_failures.length > 0 &&
+            <p>{progress.invariant_failures.map(String).join("；")}</p>}
           <p>{step} · {action}{target !== step ? ` → ${target}` : ""}</p>
         </div>
         <em className={status.toLowerCase()}>{status}</em>

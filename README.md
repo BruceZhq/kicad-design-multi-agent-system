@@ -8,6 +8,8 @@
 
 [主动工程工具、Reviewer 回访与生成器治理发布](docs/AGENTIC_ENGINEERING_WORKSPACE.md)
 
+[Terra 实体编程修复方法与失败交付](docs/EXTERNAL_REPAIR_METHOD.md)：外部 A2A Agent 读取已有工程、查询官方资料、自主编写 Python 并通过真实工具验证；未修完也返回最佳保留工程与剩余错误，用户可追加修复或结束交付。方法可迁移，不保证不同模型具有相同成功率。
+
 [需求到发布完整流程图](docs/REQUIREMENTS_TO_RELEASE_FLOW.md) · [隔离强模型 CAD 执行器](docs/ISOLATED_STRONG_REPAIR.md) · [STM32G070 真实发布工程](examples/stm32g070-assisted-release-20260908/README.md)
 
 > Demo 使用实际运行素材展示浏览器、Agent、Temporal 与 KiCad 的端到端流程；仅对纯等待段做加速剪辑。
@@ -84,7 +86,12 @@ flowchart TD
     K --> I
     I --> M["重建受影响步骤与最终制造文件"]
     M --> V
-    C -. 无法改善或预算耗尽 .-> P["恢复完整草案<br/>保留失败证据，等待后续处理"]
+    C -. 无法改善或预算耗尽 .-> P["A2A 返回最佳保留工程 ZIP<br/>剩余错误、终止原因；不冒充发布通过"]
+    P --> CH{"HITL：追加一轮或结束交付？"}
+    CH -- 明确追加额度 --> F
+    CH -- 结束交付 --> DI["delivered_with_issues<br/>工程文件与错误报告可下载"]
+    B -. 缺少 API 或器件资料 .-> WEB["官方文档搜索与读取<br/>来源摘要、任务缓存；Python 沙箱不联网"]
+    WEB --> B
     REV -- 通过 --> R["release_ready<br/>KiCad、Gerber、钻孔、BOM、CPL、Manifest"]
     REV -- 未通过 --> P
     T["Temporal：Activity、heartbeat、检查点与恢复<br/>返回调度入口不等于从第 1 步重做"] -. 耐久执行 .-> D

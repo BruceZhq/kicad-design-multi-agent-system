@@ -16,6 +16,41 @@ def test_sandbox_project_outputs_are_narrow():
             SandboxRequest(**args, return_paths=[name])
 
 
+def test_project_program_receives_context_and_reports_but_cannot_return_them(tmp_path, monkeypatch):
+    from ratsnestpro.repair import project_host
+    host = object.__new__(project_host.ProjectHost)
+    host.root = tmp_path
+    host.pcb, host.sch, host.report = [tmp_path / name for name in
+        ('board.kicad_pcb', 'board.kicad_sch', 'board.trusted.drc.json')]
+    for path in (host.pcb, host.sch, host.report, host.sch.with_suffix('.erc.json')):
+        path.write_text('{}')
+    host.state = SimpleNamespace(requirement_text='Keep two copper layers', project_name='original')
+    host.view_state = SimpleNamespace(artifacts={})
+    host.release_findings = [{'step': 'route_signals', 'error': '8 unconnected'}]
+    captured = []
+    class Client:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def post(self, url, json, headers):
+            captured.append(SandboxRequest.model_validate(json))
+            return SimpleNamespace(raise_for_status=lambda: None,
+                json=lambda: {'status': 'failed', 'output': 'inspection only'})
+    monkeypatch.setattr(project_host.httpx, 'Client', Client)
+    monkeypatch.setenv('RATSNEST_REPAIR_EXECUTOR_URL', 'http://executor')
+    monkeypatch.setenv('RATSNEST_REPAIR_EXECUTOR_TOKEN', 'k' * 32)
+    host.execute('print("read current files")', 10)
+    request = captured[0]
+    files = {f.path: base64.b64decode(f.data) for f in request.files}
+    context = json.loads(files['repair-context.json'])
+    assert context['requirement'] == 'Keep two copper layers'
+    assert context['release_findings'] == host.release_findings
+    assert {'board.trusted.drc.json', 'board.erc.json'} <= files.keys()
+    assert 'repair-context.json' not in request.return_paths
+    with pytest.raises(ValueError):
+        SandboxRequest.model_validate({**request.model_dump(), 'return_paths': ['repair-context.json']})
+
+
 def transaction(tmp_path):
     files = []
     for name in ('pcb', 'sch'):

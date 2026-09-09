@@ -233,10 +233,14 @@ runner handles upstream transactions and deterministic verification.
         )
     # Every decision sees the complete initial defect ledger, even when its
     # owning step is earlier than the PCB stage.
-    final.repair_feedback = ""
+    final.repair_feedback = ctx.repair_feedback
     final.final_review_context = "Final engineering repair of an existing draft. " + json.dumps(
         meta.get("issues", {}), ensure_ascii=False, default=str,
     )[:24000]
+    if final.strong_repair is not None and meta.get('explicit_repair_session_limit'):
+        final.strong_repair.limits = final.strong_repair.limits.model_copy(update={
+            'max_sessions_per_run': 1, 'max_llm_tokens': min(1200000, int(meta.get('explicit_repair_token_limit', 120000))),
+            'max_turns': 10, 'max_total_seconds': 600})
 
     def save():
         if final.on_progress_checkpoint:
@@ -263,7 +267,11 @@ runner handles upstream transactions and deterministic verification.
             result.execution_blocked = any(c.blocks_execution for c in errors)
             if errors and first is None:
                 first = index
-        if first is None and meta.get("manufacturing_refresh_required"):
+        # A committed CAD transaction deliberately leaves old manufacturing
+        # output behind. Its stale failures require exports, not a paid repair.
+        refresh_only = bool(meta.get("manufacturing_refresh_required")) and first in (
+            None, p._ORDER_INDEX[p.PipelineStep.MANUFACTURE])
+        if refresh_only:
             first = p._ORDER_INDEX[p.PipelineStep.MANUFACTURE]
         if first is None:
             meta["phase"] = "verified"
@@ -300,8 +308,12 @@ runner handles upstream transactions and deterministic verification.
                        p.PipelineStep.ROUTE_SIGNALS, p.PipelineStep.ROUTE_FAB}
         import os
         if os.getenv('RATSNEST_A2A_REPAIR_URL', '').strip():
-            joint_steps.update({p.PipelineStep.SCH_MATERIALIZE, p.PipelineStep.ERC, p.PipelineStep.MANUFACTURE})
-        if (not pin_conflicts and final.strong_repair is not None and p.CANONICAL_ORDER[first] in joint_steps
+            # The intact project is the repair unit, not the earliest gate name.
+            # The host still enforces immutable requirements and component identity.
+            joint_steps.update(p.CANONICAL_ORDER)
+        # A clean repaired design needs fresh exports, not another paid repair.
+        # The external agent returning "no improvement" is correct in this case.
+        if (not refresh_only and not pin_conflicts and final.strong_repair is not None and p.CANONICAL_ORDER[first] in joint_steps
                 and isinstance(state.artifact(p.PipelineStep.ROUTE_SIGNALS), p.RouteResult)
                 and state.artifact(p.PipelineStep.LAYOUT_WRITE) is not None):
             from ratsnestpro.repair.pipeline_adapter import try_strong_repair

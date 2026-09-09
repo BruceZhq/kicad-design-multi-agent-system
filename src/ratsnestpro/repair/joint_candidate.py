@@ -19,6 +19,24 @@ def apply_upstream(host, proposal):
     partition = state.artifact(p.PipelineStep.LAYOUT_PARTITION)
     selection = state.artifact(p.PipelineStep.SELECTION)
     refs = {part.ref for part in selection.parts}
+    if proposal.topology_owners:
+        topology = state.artifact(p.PipelineStep.TOPOLOGY)
+        if topology is None:
+            raise ValueError("topology is unavailable")
+        owners = {}
+        for block in topology.blocks:
+            for ref in block.implementation_refs:
+                owners.setdefault(ref.casefold(), set()).add(block.name)
+        bindings = dict(topology.owner_bindings)
+        for ref, owner in proposal.topology_owners.items():
+            key = ref.casefold()
+            if key not in {r.casefold() for r in refs} or len(owners.get(key, set())) < 2 or owner not in owners[key]:
+                raise ValueError("topology owner must resolve an existing shared reference to one of its existing blocks")
+            if key in bindings and bindings[key] != owner:
+                raise ValueError("cannot override an already resolved topology owner")
+            bindings[key] = owner
+        # Preserve all functional references; ownership is not membership.
+        state.artifacts[p.PipelineStep.TOPOLOGY] = topology.model_copy(update={"owner_bindings": bindings}, deep=True)
     zones = {zone.name for zone in partition.zones}
     if not set(proposal.zone_bindings) <= refs:
         raise ValueError("joint candidate contains unknown component references")
@@ -41,11 +59,12 @@ def apply_upstream(host, proposal):
         ctx.out_dir = str(host.root)
         ctx.draft_first = False
         before = [(x.ref, x.mpn, x.symbol, x.footprint) for x in selection.parts]
-        updated, _ = p._prepare_and_persist_components(
+        updated, closure = p._prepare_and_persist_components(
             selection.model_copy(deep=True), state, ctx, preserve_requested_identities=True,
         )
         if [(x.ref, x.mpn, x.symbol, x.footprint) for x in updated.parts] != before:
             raise ValueError("joint evidence refresh cannot change locked component identities")
+        updated = p._persist_component_closure(updated, closure, ctx)
         state.artifacts[p.PipelineStep.SELECTION] = updated
 
 
@@ -65,7 +84,7 @@ def synchronize_placements(host):
 def upstream_errors(host):
     p = host.p
     checks = []
-    for step in (p.PipelineStep.SELECTION, p.PipelineStep.LAYOUT_PARTITION,
+    for step in (p.PipelineStep.TOPOLOGY, p.PipelineStep.SELECTION, p.PipelineStep.LAYOUT_PARTITION,
                  p.PipelineStep.LAYOUT_CRITICAL, p.PipelineStep.LAYOUT_GENERAL):
         artifact = host.view_state.artifact(step)
         if artifact is not None:

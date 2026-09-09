@@ -2771,14 +2771,16 @@ class TopologyStep(PipelineStepBase):
         duplicate_owners = {
             ref: [block.name for block in blocks]
             for ref, blocks in owner_blocks.items()
-            if len(blocks) > 1
+            if len(blocks) > 1 and artifact.owner_bindings.get(ref) not in {b.name for b in blocks}
         }
+        invalid_owners = {ref: owner for ref, owner in artifact.owner_bindings.items()
+                          if owner not in {b.name for b in owner_blocks.get(ref, [])}}
         checks.append(CheckResult(
             name="implementation_ref_has_unique_owner",
-            ok=not duplicate_owners,
+            ok=not duplicate_owners and not invalid_owners,
             message=(
                 "each physical reference must have one topology owner; "
-                f"duplicates={duplicate_owners}"
+                f"duplicates={duplicate_owners}; invalid_bindings={invalid_owners}"
             ),
             affected_refs=sorted(duplicate_owners),
         ))
@@ -20333,7 +20335,12 @@ def _net_class_geometry_blockers(state: PipelineState) -> list[str]:
             rule = rules.get(net_names.get(int(str(net[1])))) if net else None
             if rule and (not size or not drill or float(str(size[1])) + 1e-6 < rule["via_diameter"]
                          or abs(float(str(drill[1])) - rule["via_drill"]) > 1e-6):
-                failures.append(f"via on {net_names.get(int(str(net[1])))} does not match its physical class geometry")
+                at, identity = find_first(via, "at"), find_first(via, "uuid")
+                failures.append(f"via {identity[1] if identity else 'unknown'} on {net_names.get(int(str(net[1])))} "
+                                f"at {list(at[1:3]) if at else 'unknown'} mm: "
+                                f"diameter={size[1] if size else 'missing'} mm (minimum {rule['via_diameter']}), "
+                                f"drill={drill[1] if drill else 'missing'} mm (required {rule['via_drill']}); "
+                                "correct candidate via dimensions and rerun DRC")
         return failures[:20]
     except (OSError, ValueError, TypeError, KeyError) as exc:
         return [f"net-class physical audit unavailable: {exc}"]

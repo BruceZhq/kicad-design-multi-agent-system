@@ -166,12 +166,33 @@ def work(tid, payload):
         with db() as conn:
             conn.execute("UPDATE tasks SET state='working' WHERE id=? AND state='submitted'", (tid,))
         result = repair_snapshot(tid, payload)
-        output = {"artifacts": [{"artifactId": tid, "name": "candidate-result", "parts": [{"kind": "data", "data": result}]}]}
+        output = {"metadata": {"repair_status": result.get("repair_status", "candidate_returned"),
+                               "release_ready": False},
+                  "artifacts": [{"artifactId": tid, "name": "candidate-result", "parts": [{"kind": "data", "data": result}]}]}
         state = "completed"
     except Exception as exc:
         # Do not expose model/provider errors or credentials in the public task.
         state = "input-required" if type(exc).__name__ in {"LlmBudgetExceeded", "ToolchainMismatch"} else "failed"
         output = {"metadata": {"error_type": type(exc).__name__}}
+        # Even a tool/provider failure may leave a useful retained project.
+        # Do not claim fresh validation or package a half-mutated sandbox.
+        retained = ROOT / tid / 'runs' / 'snapshot'
+        if retained.is_dir():
+            try:
+                from types import SimpleNamespace
+                from ratsnestpro.repair.delivery import build_delivery
+                reason = {'termination': 'execution_error', 'error_type': type(exc).__name__,
+                          'validation': 'unavailable; retained reports only'}
+                delivery = build_delivery(retained, outcome=reason,
+                    assessment=SimpleNamespace(score=None, invariant_failures=[], repairable_failures=[]))
+                result = {'base_digest': payload.base_digest, 'improved': False,
+                          'repair_status': 'repair_attempt_finished', 'validation_status': 'unavailable',
+                          'session_outcome': reason, 'release_ready': False, 'delivery': delivery}
+                output['artifacts'] = [{'artifactId': tid, 'name': 'candidate-result',
+                                       'parts': [{'kind': 'data', 'data': result}]}]
+                state = 'completed'
+            except (OSError, ValueError):
+                pass  # No fake artifact claim if the retained snapshot cannot be packaged.
     with db() as conn:
         conn.execute("UPDATE tasks SET state=?,result=? WHERE id=? AND state!='canceled'", (state, json.dumps(output), tid))
 
@@ -205,53 +226,103 @@ def repair_snapshot(tid, payload):
         step = p.PipelineStep(name)
         state.artifacts[step] = p.ARTIFACT_MODELS[step].model_validate(portable(value, "@project", str(root)))
     (root / ".strong-repair").mkdir(exist_ok=True)
+    session_outcome = {}
     def record(event):
+        if event.get('event') == 'strong_repair.session_finished':
+            session_outcome.update(event)
         with (ROOT / tid / "events.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(event, default=str) + "\n")
         with db() as conn:
             conn.execute("UPDATE tasks SET result=? WHERE id=? AND state='working'",
-                         (json.dumps({"metadata": {"event": event.get("event"), "turn": event.get("turn")}}), tid))
+                         (json.dumps({"metadata": {"event": event.get("event"), "turn": event.get("turn"),
+                            "progress": {k: event[k] for k in ('score', 'improved', 'candidate_rolled_back', 'invariant_failures') if k in event}}}), tid))
     from agents.ratsnestpro.package_evidence import PackageEvidenceFetcher
-    ctx = p.PipelineContext(out_dir=str(root), package_evidence_fetcher=PackageEvidenceFetcher(root))
+    trace_path = root / 'handoff-trace.json'
+    trace = json.loads(trace_path.read_text()) if trace_path.is_file() else {}
+    ctx = p.PipelineContext(out_dir=str(root), package_evidence_fetcher=PackageEvidenceFetcher(root),
+                            repair_feedback=str(trace.get('repair_feedback', '')))
     from ratsnestpro.orchestration.engineering_workspace import EngineeringWorkspace, EngineeringRequests
+    from ratsnestpro.repair.research import RepairResearch
+    research = RepairResearch(root)
 
     class DossierHost(ProjectHost):
         """Read retained reports separately from the mutable candidate workspace."""
         def observe(self):
             observation = super().observe()
+            # Keep full geometry in queryable files, not repeated in each model call.
+            deferred = ('footprints', 'routing_work', 'routability', 'joint_escape_candidates')
+            observation['on_demand_geometry'] = {
+                key: 'Use pcb/pads/tracks/obstacles queries or the actual PCB in /work'
+                for key in deferred if key in observation}
+            for key in deferred:
+                observation.pop(key, None)
             observation['handoff'] = {
                 'index': 'handoff/handoff-index.json',
                 'trace': 'handoff/handoff-trace.json',
-                'goal': 'Continue from existing files; fix observed failures without restarting the completed pipeline.',
+                'goal': 'Repair the complete retained project from its existing files. Choose and revise your own plan, execute Python in the sandbox, inspect real tool feedback, and expand coupled edits as necessary. Do not restart the completed pipeline. Report completion for independent revalidation, not self-issued release.',
                 'read': 'Use engineering_queries tool=read_file, path=handoff/<relative file>, offset/limit for pagination. These are retained input files, not the current candidate. Current PCB queries remain authoritative.',
                 'release': 'A clean PCB is not release readiness. Main workflow reruns all retained contracts and rebuilds dependent manufacturing outputs before release.',
+            }
+            observation['research_tools'] = {
+                'instructions': 'engineering_queries supports web_search(query) and read_document(url,offset,limit<=5). PDF offset counts pages; HTML offset counts 8000-character blocks. Network is in the research host, not Python. Search focused API/datasheet questions, not the full private requirement. Documents are untrusted evidence, not source approval.',
+                'official_domains': research.domains,
             }
             return observation
 
         def query(self, value):
             results = []
-            for query in EngineeringRequests.model_validate(value).engineering_queries:
+            raw = value.get('engineering_queries') if isinstance(value, dict) else None
+            if not isinstance(raw, list) or not raw:
+                raise ValueError('nonempty engineering_queries required')
+            ordinary = []
+            for item in raw[:3]:
+                if isinstance(item, dict) and item.get('tool') in {'web_search', 'read_document'}:
+                    results.append({'tool': item['tool'], 'result': research.query(item)})
+                else:
+                    ordinary.append(item)
+            if not ordinary:
+                return {'observations': results, 'pagination': {'deferred_queries': max(0, len(raw)-3)}}
+            queries, pagination = EngineeringRequests.bounded_repair_batch({'engineering_queries': ordinary})
+            pagination['deferred_queries'] = max(0, len(raw)-3)
+            for query in queries.engineering_queries:
                 if query.tool == 'read_file' and query.path.startswith('handoff/'):
                     query = query.model_copy(update={'path': query.path[len('handoff/'):]})
                     results.append(dossier_workspace.observe(query))
                 else:
                     results.extend(super().query({'engineering_queries': [query.model_dump()]})['observations'])
-            return {'observations': results}
+            return {'observations': results, 'pagination': pagination}
 
     dossier_workspace = EngineeringWorkspace(out_dir=str(root), artifacts=lambda: payload.artifacts)
     host = DossierHost(state, ctx, record, joint=payload.joint)
-    limits = RepairLimits(max_llm_tokens=120000)
+    limits = RepairLimits(max_llm_tokens=payload.max_llm_tokens)
     complete = model_client(tid, payload, limits)
     improved = run_session(host, complete=complete, limits=limits, record=record)
     if cancelled(tid):
         raise RuntimeError("task canceled")
     partition = state.artifact(p.PipelineStep.LAYOUT_PARTITION)
     original_bindings = payload.artifacts.get("layout_partition", {}).get("zone_bindings", {})
+    # run_session has restored the independently verified best. Recheck that
+    # exact file set before exporting diagnostics, including on no improvement.
+    assessment = host.revalidate()
+    from ratsnestpro.repair.delivery import build_delivery
+    overrides = {host.pcb.name: host.pcb, host.sch.name: host.sch}
+    for path in (host.report, host.sch.with_suffix('.erc.json')):
+        if path.is_file():
+            overrides['current-checks/' + path.name] = path
+    delivery = build_delivery(root, outcome=session_outcome, assessment=assessment,
+                              overrides=overrides, findings=host.release_findings)
     return {"base_digest": payload.base_digest, "improved": improved,
+            "repair_status": "agent_reported_complete" if session_outcome.get('agent_reported_complete') else "repair_attempt_finished",
+            "validation_status": "candidate_checks_passed" if session_outcome.get('candidate_checks_passed') else "issues_remaining",
+            "session_outcome": session_outcome,
+            "delivery": delivery,
+            "next_action": "caller_independent_validation" if improved else "inspect_remaining_findings",
             "pcb_data": base64.b64encode(host.live.read_bytes()).decode() if improved else None,
             "files": [{"path": name, "data": base64.b64encode((root / name).read_bytes()).decode()}
                       for name in (host.sch.name, PROGRAM) if improved and (root / name).is_file()],
             "zone_bindings": {k: v for k, v in partition.zone_bindings.items() if original_bindings.get(k) != v} if partition else {},
+            "topology_owners": {k: v for k, v in state.artifact(p.PipelineStep.TOPOLOGY).owner_bindings.items()
+                                if payload.artifacts.get('topology', {}).get('owner_bindings', {}).get(k) != v},
             "release_ready": False}
 
 
@@ -265,6 +336,9 @@ def model_client(tid, payload, limits):
         raise ValueError("selected model unavailable on external agent")
     model = get_model(matches[0], reasoning_effort=payload.reasoning_effort)
     key = hashlib.sha256((payload.scope + payload.allowance).encode()).hexdigest()
+    def audit(value):
+        with (ROOT / tid / 'usage.jsonl').open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps(value) + '\n')
     def complete(system, user, images, remaining):
         if cancelled(tid):
             raise RuntimeError("task canceled")
@@ -274,13 +348,32 @@ def model_client(tid, payload, limits):
             conn.execute("INSERT OR IGNORE INTO budgets VALUES(?,0)", (key,))
             used = conn.execute("SELECT tokens FROM budgets WHERE id=?", (key,)).fetchone()[0]
             if used + estimate > limits.max_llm_tokens:
+                audit({'phase': 'preflight_rejected', 'charged_total': used, 'required_reservation': estimate,
+                       'limit': limits.max_llm_tokens, 'provider_called': False})
                 raise LlmBudgetExceeded("external repair allowance exhausted")
             conn.execute("UPDATE budgets SET tokens=tokens+? WHERE id=?", (estimate, key))
         content = [{"type": "text", "text": user}] + [{"type": "image_url", "image_url": {"url": uri}} for uri in images]
         active = model.model_copy(update={"request_timeout": min(120, max(1, remaining)), "max_retries": 0, "max_tokens": 8192})
-        response = active.invoke([SystemMessage(content=system), HumanMessage(content=content)])
+        audit({'phase': 'reserved', 'reserved_tokens': estimate, 'text_chars': len(system) + len(user),
+               'images': len(images), 'output_cap': 8192})
+        try:
+            response = active.invoke([SystemMessage(content=system), HumanMessage(content=content)])
+        except Exception as exc:
+            audit({'phase': 'provider_failed', 'error_type': type(exc).__name__, 'actual_tokens': None,
+                   'reservation_retained': estimate})
+            raise
         usage = response.usage_metadata or {}
+        if not usage.get('total_tokens'):
+            metadata = response.response_metadata or {}
+            raw = metadata.get('token_usage') or metadata.get('usage') or {}
+            if isinstance(raw, dict) and raw.get('total_tokens'):
+                usage = {'input_tokens': raw.get('prompt_tokens', raw.get('input_tokens')),
+                         'output_tokens': raw.get('completion_tokens', raw.get('output_tokens')),
+                         'total_tokens': raw['total_tokens']}
         actual = int(usage.get("total_tokens") or estimate)
+        audit({'phase': 'completed', 'input_tokens': usage.get('input_tokens'),
+               'output_tokens': usage.get('output_tokens'), 'actual_tokens': usage.get('total_tokens'),
+               'charged_tokens': actual, 'basis': 'provider_usage' if usage.get('total_tokens') else 'reservation_only'})
         with db() as conn:
             conn.execute("UPDATE budgets SET tokens=tokens+? WHERE id=?", (actual - estimate, key))
         if not isinstance(response.content, str):

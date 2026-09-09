@@ -11,6 +11,7 @@ services:
       RATSNEST_A2A_REPAIR_TOKEN: ${RATSNEST_A2A_REPAIR_TOKEN:-}
       RATSNEST_A2A_ALLOWED_MODELS: ${RATSNEST_A2A_ALLOWED_MODELS:-}
       RATSNEST_A2A_PUBLIC_URL: http://external_repair_agent:8098/a2a
+      RATSNEST_REPAIR_DOC_DOMAINS: ${RATSNEST_REPAIR_DOC_DOMAINS:-kicad.org,docs.kicad.org,dev-docs.kicad.org,st.com,diodes.com,ti.com,microchip.com,espressif.com,nordicsemi.com,nexperia.com,analog.com,onsemi.com}
       OPENAI_API_KEY: ${RATSNEST_A2A_OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${RATSNEST_A2A_OPENAI_BASE_URL:-https://api.openai.com/v1}
       RATSNEST_REPAIR_EXECUTOR_URL: http://repair_executor:8097

@@ -47,6 +47,24 @@ class EngineeringQuery(ContractModel):
 class EngineeringRequests(ContractModel):
     engineering_queries: list[EngineeringQuery] = Field(min_length=1, max_length=3)
 
+    @classmethod
+    def bounded_repair_batch(cls, value):
+        """Paginate oversized read requests without discarding a reasoning turn."""
+        raw = value.get('engineering_queries') if isinstance(value, dict) else None
+        if not isinstance(raw, list):
+            return cls.model_validate(value), {}
+        bounded = []
+        capped = []
+        for index, query in enumerate(raw[:3]):
+            query = dict(query) if isinstance(query, dict) else query
+            if isinstance(query, dict) and isinstance(query.get('limit'), int) and query['limit'] > 100:
+                capped.append({'query_index': index, 'requested': query['limit'], 'applied': 100})
+                query['limit'] = 100
+            bounded.append(query)
+        return cls.model_validate({**value, 'engineering_queries': bounded}), {
+            'executed_queries': len(bounded), 'deferred_queries': max(0, len(raw)-3),
+            'page_caps': capped, 'instruction': 'Only the first 3 queries ran. Resubmit deferred queries and use offset for subsequent pages.'}
+
 
 _SOURCE_FILES = {
     "pipeline": "orchestration/pipeline.py",

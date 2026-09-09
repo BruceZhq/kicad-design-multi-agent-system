@@ -32,6 +32,29 @@ def host_fixture(tmp_path):
     return host
 
 
+def test_topology_ownership_preserves_membership_and_live_state(tmp_path):
+    from ratsnestpro.orchestration.pipeline_contracts import TopologyBlock
+    host = host_fixture(tmp_path)
+    topology = p.TopologyPlan(blocks=[
+        TopologyBlock(name=name, kind='power', implementation_refs=['U2'])
+        for name in ('supply', 'regulator')
+    ], rails=['3V3'], ground_domains=['GND'])
+    host.state.artifacts[p.PipelineStep.TOPOLOGY] = topology
+    host.view_state.artifacts[p.PipelineStep.TOPOLOGY] = topology.model_copy(deep=True)
+    apply_upstream(host, RepairProposal(action='joint_candidate', rationale='U2 is the regulator',
+                                       topology_owners={'U2': 'regulator'}))
+    candidate = host.view_state.artifact(p.PipelineStep.TOPOLOGY)
+    assert candidate.owner_bindings == {'u2': 'regulator'}
+    assert [b.implementation_refs for b in candidate.blocks] == [['U2'], ['U2']]
+    assert not topology.owner_bindings
+    check = next(c for c in p.TopologyStep().check(host.view_state, candidate)
+                 if c.name == 'implementation_ref_has_unique_owner')
+    assert check.ok
+    for bindings in ({'U2': 'supply'}, {'U9': 'regulator'}, {'U2': 'invented'}):
+        with pytest.raises(ValueError):
+            apply_upstream(host, RepairProposal(action='joint_candidate', rationale='invalid', topology_owners=bindings))
+
+
 def test_explicit_binding_resolves_only_candidate_state(tmp_path):
     host = host_fixture(tmp_path)
     assert "U2" in p._resolved_zone_targets(host.state)[1]
@@ -57,8 +80,15 @@ def test_evidence_is_prepared_by_host_not_model(tmp_path, monkeypatch):
         calls.append(True)
         return selection.model_copy(update={"prepared_manifest_path": str(tmp_path / "verified.json")}), None
     monkeypatch.setattr(p, "_prepare_and_persist_components", prepare)
+    def persist(selection, closure, ctx):
+        assert selection.prepared_manifest_path == str(tmp_path / 'verified.json')
+        assert ctx.out_dir == str(tmp_path)
+        calls.append('closure_persisted')
+        return selection.model_copy(update={'component_closure_path': str(tmp_path / 'component-closure.json')})
+    monkeypatch.setattr(p, '_persist_component_closure', persist)
     apply_upstream(host, RepairProposal(action="joint_candidate", rationale="verify", refresh_evidence=True))
-    assert calls == [True]
+    assert calls == [True, 'closure_persisted']
+    assert host.view_state.artifact(p.PipelineStep.SELECTION).component_closure_path == str(tmp_path / 'component-closure.json')
     assert not host.state.artifact(p.PipelineStep.SELECTION).prepared_manifest_path
     with pytest.raises(ValueError):
         RepairProposal.model_validate({"action": "joint_candidate", "rationale": "fake", "release_ready": True})
@@ -98,7 +128,8 @@ def test_commit_rejects_stale_upstream_state(tmp_path):
         host.commit("unused")
 
 
-def test_full_draft_enters_joint_channel_before_prefix_truncation(tmp_path, monkeypatch):
+@pytest.mark.parametrize('owner', list(p.CANONICAL_ORDER))
+def test_full_draft_enters_joint_channel_before_prefix_truncation(tmp_path, monkeypatch, owner):
     from ratsnestpro.repair import draft, pipeline_adapter
     from ratsnestpro.repair.contracts import RepairLimits
 
@@ -108,9 +139,10 @@ def test_full_draft_enters_joint_channel_before_prefix_truncation(tmp_path, monk
         state.results.append(p.StepResult(step=step))
     state.artifacts[p.PipelineStep.ROUTE_SIGNALS] = p.RouteResult(method="freerouting")
     checks = [SimpleNamespace(step=step, check=lambda *_: []) for step in p.CANONICAL_ORDER]
-    checks[p._ORDER_INDEX[p.PipelineStep.LAYOUT_GENERAL]].check = lambda *_: [
+    checks[p._ORDER_INDEX[owner]].check = lambda *_: [
         p.CheckResult(name="unambiguous_zone_binding", ok=False)]
     monkeypatch.setattr(p, "ALL_STEPS", checks)
+    monkeypatch.setenv('RATSNEST_A2A_REPAIR_URL', 'http://external/a2a')
     entered = []
     def repair(current, ctx, artifact, *, joint):
         assert joint and len(current.artifacts) == 17 and len(current.results) == 17

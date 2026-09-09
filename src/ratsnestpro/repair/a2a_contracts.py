@@ -43,6 +43,7 @@ class RepairTaskInput(BaseModel):
     artifacts: dict
     files: list[ProjectFile] = Field(max_length=512)
     dossier: dict = Field(default_factory=dict)
+    max_llm_tokens: int = Field(default=120000, ge=1000, le=1200000)
     joint: bool = False
     fanout_approval: dict = Field(default_factory=dict)
 
@@ -55,15 +56,23 @@ def portable(value, source, target):
     return json.loads(json.dumps(value, ensure_ascii=False).replace(source, target))
 
 
-def reject_host_paths(value):
+def reject_host_paths(value, *, field=""):
     """Artifacts cannot point the independent service at its host filesystem."""
     if isinstance(value, dict):
-        for item in value.values():
-            reject_host_paths(item)
+        for key, item in value.items():
+            reject_host_paths(item, field=key)
     elif isinstance(value, list):
         for item in value:
             reject_host_paths(item)
     elif isinstance(value, str):
+        # Prepared manifests bind immutable installed-library provenance. This
+        # is not a user-selected workspace or arbitrary host-file capability.
+        # Keep the path bytes intact: changing them breaks the manifest digest.
+        path = PurePosixPath(value)
+        if (field == 'source_path' and '..' not in path.parts and '\\' not in value
+                and ((value.startswith('/usr/share/kicad/symbols/') and path.suffix == '.kicad_sym')
+                     or (value.startswith('/usr/share/kicad/footprints/') and path.suffix == '.kicad_mod'))):
+            return
         if (value.startswith(("/", "\\", "file:")) or ".." in PurePosixPath(value).parts
                 or (value.startswith("@project") and value != "@project" and not value.startswith("@project/"))
                 or (len(value) > 2 and value[1:3] in {":/", ":\\"})):

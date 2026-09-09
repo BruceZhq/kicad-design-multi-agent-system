@@ -76,6 +76,8 @@ def _native_path(path: Path) -> Path:
 
 
 def _artifact_kind(path: Path) -> str:
+    if path.name == 'terra-repair-delivery.zip':
+        return 'project_file'
     suffix = path.suffix.lower()
     return {
         ".kicad_sch": "kicad_schematic",

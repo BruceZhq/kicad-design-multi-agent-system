@@ -54,6 +54,20 @@ def test_embedded_manifest_cannot_read_service_files():
         reject_host_paths({"path": "@project/../../private.json"})
 
 
+def test_installed_asset_provenance_is_not_arbitrary_host_access():
+    record = {'source_path': '/usr/share/kicad/symbols/Device.kicad_sym'}
+    original = json.dumps(record)
+    reject_host_paths({'prepared_manifest_json': original})
+    assert json.dumps(record) == original
+    reject_host_paths({'source_path': '/usr/share/kicad/footprints/Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod'})
+    for path in ('/etc/private.json', '/usr/share/kicad/symbols/../../private.kicad_sym',
+                 '/usr/share/kicad/symbols/key.json', '/usr/share/kicad/symbols-evil/Device.kicad_sym'):
+        with pytest.raises(ValueError):
+            reject_host_paths({'source_path': path})
+    with pytest.raises(ValueError):
+        reject_host_paths({'pcb_path': record['source_path']})
+
+
 def test_a2a_cancel_is_persistent_and_cannot_be_overwritten(tmp_path, monkeypatch):
     from repair_executor import a2a_agent as server
     monkeypatch.setattr(server, "ROOT", tmp_path)
@@ -92,6 +106,44 @@ def test_a2a_client_rejects_stale_remote_candidate(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="base mismatch"):
         a2a_client.delegate(host, runtime)
     assert pcb.read_text() == "original"
+
+
+def test_remote_completion_claim_cannot_bypass_local_revalidation(tmp_path, monkeypatch):
+    import httpx
+    from types import SimpleNamespace
+    from ratsnestpro.repair import a2a_client
+    from ratsnestpro.repair.joint_candidate import fingerprint
+    from ratsnestpro.repair.session import CandidateAssessment
+    from repair_executor import a2a_agent
+    pcb = tmp_path / 'board.kicad_pcb'
+    pcb.write_text('original')
+    events, stages, rollbacks = [], [], []
+    host = SimpleNamespace(live=pcb,
+        state=SimpleNamespace(artifacts={}, requirement_text='board', project_name='board'),
+        joint=False, observe=lambda: {}, record=events.append,
+        assess=lambda: CandidateAssessment('old', 0, 8, 0),
+        revalidate=lambda: CandidateAssessment('bad', 1, 0, 0, ('short circuit',)),
+        stage=lambda *args: stages.append(args), rollback_candidate=lambda: rollbacks.append(True),
+        commit=lambda *_: pytest.fail('remote claim must not bypass local validation'))
+    runtime = SimpleNamespace(allowance_key='a'*64, model='test-model', reasoning_effort='high',
+                              limits=SimpleNamespace(max_total_seconds=30))
+    monkeypatch.setenv('RATSNEST_A2A_REPAIR_URL', 'http://repair/a2a')
+    monkeypatch.setenv('RATSNEST_A2A_REPAIR_TOKEN', 'k'*32)
+    def respond(request):
+        if request.method == 'GET':
+            return httpx.Response(200, json=a2a_agent.card())
+        data = {'base_digest': fingerprint({}), 'improved': True, 'release_ready': True,
+                'repair_status': 'agent_reported_complete', 'validation_status': 'candidate_checks_passed',
+                'pcb_data': base64.b64encode(b'candidate').decode()}
+        return httpx.Response(200, json={'jsonrpc': '2.0', 'id': 'r', 'result': {
+            'kind': 'task', 'id': 'task', 'contextId': 'task', 'status': {'state': 'completed'},
+            'artifacts': [{'artifactId': 'candidate', 'parts': [{'kind': 'data', 'data': data}]}]}})
+    original = httpx.Client
+    monkeypatch.setattr(a2a_client.httpx, 'Client', lambda **kw: original(transport=httpx.MockTransport(respond), **kw))
+    assert a2a_client.delegate(host, runtime) is False
+    assert len(stages) == 1 and rollbacks == [True]
+    assert events[-1]['event'] == 'strong_repair.a2a_candidate_rejected'
+    assert events[-1]['release_ready'] is False
 
 
 def test_a2a_real_envelopes_idempotency_auth_and_persistence(tmp_path, monkeypatch):

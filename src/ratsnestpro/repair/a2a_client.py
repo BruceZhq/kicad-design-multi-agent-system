@@ -25,6 +25,7 @@ def delegate(host, runtime):
         requirement=host.state.requirement_text, project_name=host.state.project_name,
         artifacts=portable({k.value: a.model_dump(mode="json") for k, a in host.state.artifacts.items()}, str(root), "@project"),
         files=files, dossier=dossier, joint=host.joint,
+        max_llm_tokens=getattr(runtime.limits, 'max_llm_tokens', 120000),
         fanout_approval=host.observe().get("verified_fanout_approval", {}),
     )
     message_id = request.digest()
@@ -44,7 +45,7 @@ def delegate(host, runtime):
             chunks, size = [], 0
             for chunk in response.iter_bytes():
                 size += len(chunk)
-                if size > 40_000_000:
+                if size > 80_000_000:
                     raise ValueError("external repair response too large")
                 chunks.append(chunk)
         result = json.loads(b"".join(chunks))
@@ -68,7 +69,8 @@ def delegate(host, runtime):
             progress = (task.status.state.value, metadata.get("event"), metadata.get("turn"))
             if progress != previous:
                 host.record({"event": "strong_repair.a2a_progress", "task_id": task.id, "status": task.status.state.value,
-                             "turn": metadata.get("turn"), "external_event": metadata.get("event")})
+                             "turn": metadata.get("turn"), "external_event": metadata.get("event"),
+                             "progress": metadata.get("progress", {})})
                 previous = progress
             if time.monotonic() >= deadline:
                 raise TimeoutError("external repair is still running; retry attaches to the same task")
@@ -83,6 +85,15 @@ def delegate(host, runtime):
         result = task.artifacts[0].parts[0].root.data
         if result.get("base_digest") != request.base_digest:
             raise ValueError("external candidate base mismatch")
+        if result.get('delivery'):
+            from ratsnestpro.repair.delivery import persist_delivery
+            persist_delivery(root, result['delivery'])
+            host.record({'event': 'strong_repair.delivery_available', 'task_id': task.id,
+                         'release_ready': False, 'archive': 'terra-repair-delivery.zip'})
+        host.record({"event": "strong_repair.a2a_candidate_returned", "task_id": task.id,
+                     "agent_reported_complete": result.get("repair_status") == "agent_reported_complete",
+                     "remote_validation_status": result.get("validation_status", "unknown"),
+                     "release_ready": False})
         if not result.get("improved"):
             return False
         # The remote result is only a candidate. Reuse local trusted grading
@@ -93,14 +104,25 @@ def delegate(host, runtime):
             raise ValueError("candidate too large")
         if host.joint:
             from ratsnestpro.repair.contracts import RepairProposal
-            host.execute_joint(RepairProposal(action="joint_candidate", rationale="A2A candidate",
+            applied = host.execute_joint(RepairProposal(action="joint_candidate", rationale="A2A candidate",
                                               zone_bindings=result.get("zone_bindings", {}),
+                                              topology_owners=result.get("topology_owners", {}),
                                               refresh_evidence=True), 1)
+            if applied.get('status') != 'completed':
+                host.rollback_candidate()
+                return False
         from ratsnestpro.repair.contracts import SandboxFile
         host.stage(result['pcb_data'], [SandboxFile.model_validate(f) for f in result.get('files', [])])
         host.last = None
-        if not host.assess().improves(before):
+        after = host.revalidate() if hasattr(host, 'revalidate') else host.assess()
+        if not after.improves(before):
             host.rollback_candidate()
+            host.record({"event": "strong_repair.a2a_candidate_rejected", "task_id": task.id,
+                         "score": after.score, "invariant_failures": after.invariant_failures,
+                         "release_ready": False})
             return False
         host.commit(before.fingerprint)
+        host.record({"event": "strong_repair.a2a_candidate_committed", "task_id": task.id,
+                     "before": before.score, "after": after.score,
+                     "next_action": "main_release_validation", "release_ready": False})
         return True

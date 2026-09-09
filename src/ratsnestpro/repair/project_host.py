@@ -45,11 +45,20 @@ class ProjectHost(_BoardHost):
         if materialized is None or materialized.sch_path != str(self.live.with_suffix('.kicad_sch')):
             raise ValueError('project repair requires a paired existing schematic')
         shutil.copy2(materialized.sch_path, self.sch)
+        evidence = self.live.parent / 'technical-evidence'
+        if evidence.is_dir():
+            if evidence.is_symlink() or any(f.is_symlink() for f in evidence.rglob('*')):
+                raise ValueError('evidence snapshot must not contain symlinks')
+            shutil.copytree(evidence, self.root / 'technical-evidence', dirs_exist_ok=True)
         self.view_state.artifacts = {s: type(a).model_validate(portable(a.model_dump(mode='json'), str(self.live.parent), str(self.root)))
                                      for s, a in state.artifacts.items()}
-        self.tracked_names = (self.pcb.name, self.sch.name, PROGRAM, 'prepared-components.json',
+        self.tracked_names = (self.pcb.name, self.sch.name, PROGRAM, 'prepared-components.json', 'component-closure.json',
                               self.sch.with_suffix('.erc.json').name, self.sch.with_suffix('.netlist.xml').name, self.report.name)
         self.source_files = {name: digest(self.live.parent / name) for name in self.tracked_names}
+        for name in ('prepared-components.json', 'component-closure.json'):
+            source = self.live.parent / name
+            if source.is_file():
+                shutil.copy2(source, self.root / name)
         source_program = self.live.parent / PROGRAM
         if source_program.is_file():
             (self.root / PROGRAM).parent.mkdir(exist_ok=True)
@@ -72,16 +81,29 @@ class ProjectHost(_BoardHost):
     def observe(self):
         value = super().observe()
         value['project_repair'] = {
+            'repair_instruction': getattr(self.ctx, 'repair_feedback', ''),
+            'topology': self.view_state.artifact(self.p.PipelineStep.TOPOLOGY).model_dump(mode='json'),
             'schematic': self.sch.name, 'generator': PROGRAM,
             'release_findings': self.release_findings,
-            'instructions': 'Your Python script may jointly edit the schematic and PCB in /work. You may create/edit programs/repair_generator.py and run it there. Inspect /app/ratsnestpro source if needed; never alter production source. Preserve locked component identities and the required pin/net contract. Fix actual wires/labels/placement/copper, not reports. All file changes roll back together. Main system independently rebuilds publication outputs.',
+            'instructions': 'Your Python script may jointly edit the schematic and PCB in /work. Read repair-context.json and the supplied ERC/DRC reports; all describe the current candidate, not a fresh design. You may create/edit programs/repair_generator.py and run it there. Inspect /app/ratsnestpro source if needed; never alter production source. Preserve locked component identities and the required pin/net contract. Fix actual wires/labels/placement/copper, not reports. All file changes roll back together. Main system independently rebuilds publication outputs.',
         }
         return value
 
     def execute(self, script, timeout):
         paths = [self.pcb, self.sch, self.pcb.with_suffix('.kicad_pro'), self.pcb.with_suffix('.kicad_dru'), self.root / PROGRAM]
+        paths.extend([self.report, self.sch.with_suffix('.erc.json')])
         files = [SandboxFile(path=x.relative_to(self.root).as_posix(), data=base64.b64encode(x.read_bytes()).decode())
                  for x in paths if x.is_file()]
+        context = {'schema': 'repair-context.v1', 'requirement': self.state.requirement_text,
+                   'repair_instruction': getattr(getattr(self, 'ctx', None), 'repair_feedback', ''),
+                   'project_name': self.state.project_name, 'pcb': self.pcb.name,
+                   'schematic': self.sch.name,
+                   'artifacts': portable({s.value: a.model_dump(mode='json')
+                                          for s, a in self.view_state.artifacts.items()}, str(self.root), '/work'),
+                   'release_findings': self.release_findings,
+                   'notice': 'Input evidence only. Modifying this context or a report cannot change independent validation.'}
+        files.append(SandboxFile(path='repair-context.json',
+                                data=base64.b64encode(json.dumps(context, ensure_ascii=False).encode()).decode()))
         request = SandboxRequest(files=files, script=script, pcb_name=self.pcb.name,
                                  timeout_seconds=timeout, return_paths=[self.sch.name, PROGRAM])
         endpoint = os.getenv('RATSNEST_REPAIR_EXECUTOR_URL', '').rstrip('/')
@@ -96,6 +118,36 @@ class ProjectHost(_BoardHost):
             self.stage(result.pcb_data, result.files)
         return {'status': result.status, 'output': result.output, 'exit_code': result.exit_code}
 
+    def record_proposal(self, turn, proposal):
+        directory = self.root / 'attempt-evidence' / str(turn)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / 'proposal.json').write_text(proposal.model_dump_json(), encoding='utf-8')
+        (directory / 'repair.py').write_text(proposal.script or '', encoding='utf-8')
+
+    def record_attempt(self, turn, proposal, assessment):
+        """Retain private, pre-rollback diagnostics; never substitute for grading."""
+        directory = self.root / 'attempt-evidence' / str(turn)
+        self.record_proposal(turn, proposal)
+        findings = []
+        for source in (self.report, self.sch.with_suffix('.erc.json')):
+            if source.exists():
+                shutil.copy2(source, directory / source.name)
+                report = json.loads(source.read_text(encoding='utf-8'))
+                for kind in ('violations', 'unconnected_items'):
+                    for item in report.get(kind, []):
+                        findings.append({'type': item.get('type'), 'description': item.get('description'),
+                                         'items': item.get('items', [])})
+        return {'score': assessment.score, 'findings': findings[:20],
+                'evidence_path': str(directory), 'finding_count': len(findings)}
+
+    def record_rejection(self, proposal, error):
+        # Private candidate diagnostics, excluded from A2A handoff and public
+        # events. Preserve the actual rejected program, not only ValueError.
+        with (self.root / 'candidate-rejections.jsonl').open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps({'proposal': proposal.model_dump(mode='json'),
+                                     'error_type': type(error).__name__, 'error': str(error)[:3000]},
+                                    ensure_ascii=False) + '\n')
+
     def stage(self, pcb_data, files):
         supplied = {f.path: base64.b64decode(f.data, validate=True) for f in files}
         if not pcb_data or self.sch.name not in supplied or not set(supplied) <= {self.sch.name, PROGRAM}:
@@ -109,6 +161,12 @@ class ProjectHost(_BoardHost):
             target.write_bytes(data)
         self.last = None
         self.workspace.images.clear()
+
+    def revalidate(self):
+        """Completion requests cannot reuse cached CAD/tool verdicts."""
+        self._project_cache = None
+        self.last = None
+        return self.assess()
 
     def assess(self):
         # Board grader retains hard invariants; ERC and full retained step gates
@@ -154,10 +212,21 @@ class ProjectHost(_BoardHost):
                             if not c.ok and c.severity == p.Severity.ERROR)
         self.release_findings = findings
         violations = list(board.invariant_failures)
+        # Missing independent documentation still counts as a release error,
+        # but must not discard an otherwise improving CAD candidate. Missing
+        # or incompatible local assets remain immutable admission failures.
+        from ratsnestpro.repair.draft import deferred_checks
+        selected = self.view_state.artifact(p.PipelineStep.SELECTION)
+        selection_checks = p.ALL_STEPS[p._ORDER_INDEX[p.PipelineStep.SELECTION]].check(self.view_state, selected)
+        for check in deferred_checks(p.PipelineStep.SELECTION, selected, selection_checks):
+            if (not check.ok and not check.blocks_execution
+                    and check.name == 'prepared_component_manifest'
+                    and check.reason_code == 'independent_package_evidence_missing'):
+                violations = [v for v in violations if v != 'selection:prepared_component_manifest']
         if self.schematic_identity() != self.sch_identity:
             violations.append('locked schematic component identities changed')
-        fingerprint = hashlib.sha256(json.dumps([digest(self.pcb), digest(self.sch), digest(self.root / PROGRAM)], sort_keys=True).encode()).hexdigest()
-        result = CandidateAssessment(fingerprint, board.errors + len(findings) + int(erc.cli_error_count or 0), board.unconnected, board.warnings, tuple(violations))
+        fingerprint = hashlib.sha256(json.dumps([digest(self.pcb), digest(self.sch), digest(self.root / PROGRAM), state_digest(self.view_state.artifacts)], sort_keys=True).encode()).hexdigest()
+        result = CandidateAssessment(fingerprint, board.errors + len(findings) + int(erc.cli_error_count or 0), board.unconnected, board.warnings, tuple(violations), board.repairable_failures)
         self._project_cache = (cache_key(), result)
         return result
 

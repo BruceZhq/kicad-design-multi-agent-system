@@ -18,6 +18,11 @@ def pin_differences(rows, table):
         pin = observed.get(str(row["number"]), {})
         seen = set().union(*(functions(f) for f in pin.get("functions", []) if isinstance(f, str)))
         expected = functions(str(row["name"]))
+        # Standard voltage-port abbreviations, scoped to the declared power
+        # direction. Do not equate GPIO/analog inputs or interchange rails.
+        aliases = {'power_in': {'vi': 'vin'}, 'power_out': {'vo': 'vout'}}.get(row.get('type'), {})
+        expected = {aliases.get(token, token) for token in expected}
+        seen = {aliases.get(token, token) for token in seen}
         if not expected or not expected.issubset(seen):
             differences.append({"number": str(row["number"]), "symbol_name": row["name"],
                                 "observed_functions": pin.get("functions", []), "page": pin.get("page"),

@@ -47,7 +47,7 @@ def _record_strong_event(root, event, *, revision, model, session, callback):
     )
     payload["strong_repair"] = {
         "session": session,
-        **{key: event[key] for key in ("turn", "improved", "task_id", "status", "external_event") if key in event},
+        **{key: event[key] for key in ("turn", "improved", "task_id", "status", "external_event", "score", "before", "after", "candidate_rolled_back", "invariant_failures", "progress") if key in event},
     }
     try:
         callback(payload)
@@ -182,7 +182,9 @@ class _BoardHost:
                 self.state.artifact(p.PipelineStep.SELECTION).parts,
             )
         )
-        violations.extend(p._net_class_geometry_blockers(self.view_state))
+        geometry_failures = p._net_class_geometry_blockers(self.view_state)
+        violations.extend(geometry_failures)
+        repairable = tuple(f for f in geometry_failures if f.startswith(("via ", "track ")))
         from ratsnestpro.orchestration.placement_constraints import review_pcb_placement_constraints
 
         placement = review_pcb_placement_constraints(self.pcb)
@@ -201,6 +203,7 @@ class _BoardHost:
             snapshot.unconnected,
             len(warnings),
             tuple(violations),
+            repairable,
         )
         return self.last
 
@@ -257,6 +260,7 @@ class _BoardHost:
         invariants = p.extract_requirement_invariants(self.state.requirement_text)
         return {
             "pcb_name": self.pcb.name,
+            "physical_net_class_rules": p._physical_net_class_rules(self.view_state),
             **_repair_requirement_observation(self.view_state),
             "verified_fanout_approval": load_fanout_approval(self.pcb, invariants.source_digest),
             "pcb_sha256": _digest(self.pcb),
@@ -303,8 +307,8 @@ class _BoardHost:
             raise
 
     def query(self, value):
-        queries = EngineeringRequests.model_validate(value)
-        return {"observations": [self.workspace.observe(q) for q in queries.engineering_queries]}
+        queries, pagination = EngineeringRequests.bounded_repair_batch(value)
+        return {"observations": [self.workspace.observe(q) for q in queries.engineering_queries], 'pagination': pagination}
 
     def images(self):
         if not self.workspace.images:
@@ -451,6 +455,7 @@ def try_strong_repair(state, ctx, artifact, *, joint=False):
     value = json.loads(ledger.read_text()) if ledger.is_file() else {"sessions": 0, "attempts": 0}
     if runtime.allowance_key and value.get("allowance_key") != runtime.allowance_key:
         value.update(allowance_key=runtime.allowance_key,
+                     allowance_session_limit=runtime.limits.max_sessions_per_run,
                      budget_exhausted=False,
                      allowance_start_sessions=value["sessions"],
                      allowance_start_failures=value.get("infrastructure_failures", 0))

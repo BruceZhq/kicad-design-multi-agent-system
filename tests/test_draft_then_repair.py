@@ -228,6 +228,49 @@ def test_final_repair_reuses_ancestors_and_rebuilds_dependent_manufacture(monkey
                for name, _ in calls)
 
 
+@pytest.mark.parametrize('stale_manufacture', [False, True])
+def test_clean_joint_candidate_reexports_without_another_a2a_call(monkeypatch, tmp_path, stale_manufacture):
+    from types import SimpleNamespace
+    from ratsnestpro.repair.contracts import RepairLimits
+    from ratsnestpro.repair import pipeline_adapter
+
+    calls = []
+
+    class CleanStep(p.PipelineStepBase):
+        def propose(self, state, ctx, knowledge):
+            calls.append(self.step)
+            return Artifact(value=2), False
+
+        def check(self, state, artifact):
+            return [p.CheckResult(name="clean", ok=not (
+                stale_manufacture and self.step == p.PipelineStep.MANUFACTURE and artifact.value != 2))]
+
+    state = p.PipelineState("clean repaired draft")
+    steps = []
+    for name in p.CANONICAL_ORDER:
+        step = CleanStep()
+        step.step = name
+        steps.append(step)
+        state.artifacts[name] = Artifact()
+        state.results.append(p.StepResult(step=name))
+        monkeypatch.setitem(p.ARTIFACT_MODELS, name, Artifact)
+    monkeypatch.setattr(p, "ALL_STEPS", steps)
+    monkeypatch.setattr(p, "RouteResult", Artifact)
+    monkeypatch.setenv("RATSNEST_A2A_REPAIR_URL", "http://external/a2a")
+
+    def unexpected_repair(*args, **kwargs):
+        pytest.fail("clean candidate must not spend another A2A repair session")
+
+    monkeypatch.setattr(pipeline_adapter, "try_strong_repair", unexpected_repair)
+    state.draft_execution["manufacturing_refresh_required"] = True
+    finalize_draft(state, p.PipelineContext(
+        out_dir=str(tmp_path), strong_repair=SimpleNamespace(limits=RepairLimits()),
+    ))
+    assert calls == [p.PipelineStep.MANUFACTURE]
+    assert state.draft_execution["phase"] == "verified"
+    assert not state.draft_execution.get("manufacturing_refresh_required")
+
+
 def test_interrupted_final_transaction_restores_draft_not_budget(monkeypatch, tmp_path):
     monkeypatch.setitem(p.ARTIFACT_MODELS, p.PipelineStep.REQUIREMENTS, Artifact)
     state = p.PipelineState("draft")

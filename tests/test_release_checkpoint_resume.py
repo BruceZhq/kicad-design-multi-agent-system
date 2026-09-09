@@ -149,11 +149,13 @@ def test_langgraph_uses_durable_checkpoint_when_hardware_summary_is_missing(
 @pytest.mark.parametrize("execution_status,incremental_resume", [
     ("timed_out", False), ("completed", True),
 ])
+@pytest.mark.parametrize("dispatch_status", ["wait_error", "completed"])
 def test_runtime_recovery_continues_terminal_temporal_from_durable_checkpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     execution_status: str,
     incremental_resume: bool,
+    dispatch_status: str,
 ) -> None:
     run_name = "workspace-run"
     run_dir = tmp_path / "runs" / run_name
@@ -196,7 +198,7 @@ def test_runtime_recovery_continues_terminal_temporal_from_durable_checkpoint(
         "capability_profile": {},
         "hardware_dispatch": {
             "mode": "temporal",
-            "status": "wait_error",
+            "status": dispatch_status,
             "request_id": "request-1",
             "workflow_id": "timed-out-workflow",
             "workspace_run_name": run_name,
