@@ -3,11 +3,12 @@
 import hmac
 import os
 import threading
+import httpx
 
 from fastapi import FastAPI, Header, HTTPException, Request
 
 from ratsnestpro.repair.contracts import SandboxRequest, SandboxResult
-from repair_executor.docker_runner import run
+from repair_executor.docker_runner import run, sandbox_available
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 _slot = threading.BoundedSemaphore(1)
@@ -46,11 +47,17 @@ def repair(body: SandboxRequest, authorization: str = Header(default="")):
     if not _slot.acquire(blocking=False):
         raise HTTPException(429, "repair executor busy")
     try:
+        if not sandbox_available(image):
+            raise HTTPException(503, "configured sandbox image unavailable; redeploy the pinned image")
         return run(body, image=image)
+    except httpx.HTTPError as exc:
+        raise HTTPException(503, "sandbox infrastructure unavailable") from exc
     finally:
         _slot.release()
 
 
 @app.get("/health")
 def health():
+    if not sandbox_available(os.environ.get("RATSNEST_REPAIR_SANDBOX_IMAGE", "")):
+        raise HTTPException(503, "configured sandbox image unavailable")
     return {"status": "ok"}

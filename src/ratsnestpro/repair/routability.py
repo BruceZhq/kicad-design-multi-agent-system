@@ -3,7 +3,25 @@
 from __future__ import annotations
 
 import math
+import logging
 from typing import Any, Callable
+
+
+def emit_preflight(callback, evidence, *, revision):
+    from ratsnestpro.orchestration.ahe import ahe_event
+
+    if not callback or not evidence["enclosed_pads"]:
+        return
+    payload = ahe_event("routability_preflight", step="route_signals", revision=revision)
+    payload["routability"] = {
+        "enclosed_pad_count": len(evidence["enclosed_pads"]),
+        "joint_group_count": len(evidence["joint_groups"]),
+    }
+    try:
+        callback(payload)
+    except ValueError:
+        # The complete geometry report is already persisted by write_preflight.
+        logging.getLogger(__name__).warning("Routability progress envelope rejected")
 
 
 def probe(
@@ -15,8 +33,12 @@ def probe(
 ) -> dict[str, Any]:
     groups = []
     enclosed = []
+    smd_count = connected_count = 0
     for fp in board.list_footprints():
-        pads = [p for p in board.footprint_pads(fp["reference"]) if p["type"] == "smd" and p["net"]]
+        smd = [p for p in board.footprint_pads(fp["reference"]) if p["type"] == "smd"]
+        pads = [p for p in smd if p["net"]]
+        smd_count += len(smd)
+        connected_count += len(pads)
         center = (fp["at"]["x"], fp["at"]["y"])
         observations = []
         for pad in pads:
@@ -70,10 +92,13 @@ def probe(
                 )
     return {
         "schema_version": 1,
+        "coverage": {"smd_pads": smd_count, "net_assigned_smd_pads": connected_count},
+        "status": "observed" if connected_count else "insufficient_net_geometry",
+        "connectivity_verified": False,
         "joint_groups": groups[:max_groups],
         "enclosed_pads": enclosed[:64],
         "advisory": True,
-        "limitation": "geometric candidates require exact pad/via DRC and functional placement validation",
+        "limitation": "Local escape probe only, not end-to-end routability. Zero enclosed pads is NOT zero unconnected items. Use authoritative DRC endpoints and exact pad/via checks.",
     }
 
 

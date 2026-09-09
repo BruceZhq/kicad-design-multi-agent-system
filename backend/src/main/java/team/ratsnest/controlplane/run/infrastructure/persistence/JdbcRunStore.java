@@ -257,11 +257,14 @@ public class JdbcRunStore implements RunStore {
                         from ranked latest
                         join first_messages using (thread_id)
                         left join lateral (
-                            select interaction.request_payload
+                            select case when interaction.status = 'RESPONDED'
+                                then interaction.request_payload || jsonb_build_object('resumeAnswer', interaction.answer)
+                                else interaction.request_payload end as request_payload
                             from control_plane.run_interactions interaction
                             where interaction.tenant_id = latest.tenant_id
                               and interaction.run_id = latest.run_id
-                              and interaction.status = 'PENDING'
+                              and latest.state = 'WAITING_FOR_INPUT'
+                              and interaction.status in ('PENDING', 'RESPONDED')
                             order by interaction.created_at desc
                             limit 1
                         ) pending on true

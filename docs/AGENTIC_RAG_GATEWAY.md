@@ -1,6 +1,6 @@
 # 外部 Agentic RAG 接入契约
 
-RatsNestPro 不把知识库实现复制进 Agent Runtime。外部 Agentic RAG 可作为独立、受信的 HTTP 服务接入，Architect、Parts Specialist 与 Reviewer 使用同一个检索契约；本仓库只实现契约且默认未配置，未配置或调用失败时，运行时自动退回内置知识与受控 Web 检索。
+RatsNestPro 不把知识库实现复制进 Agent Runtime。外部 Agentic RAG 可通过 HTTP 或 MCP Streamable HTTP 接入，Architect、Parts Specialist 与 Reviewer 复用同一个检索与证据契约。默认未配置，未配置或调用失败时保留内置知识与受控 Web 检索。MCP 客户端、可选 HTTP→MCP 服务和配置说明见 [MCP 与独立 A2A 修复服务](AGENT_PROTOCOLS.md)。
 
 ## 查询契约
 

@@ -79,6 +79,19 @@ def test_negated_requirement_change_is_a_resume_not_an_amendment() -> None:
         assert decision.context_relation == "resume"
 
 
+def test_joint_repair_method_selection_is_resume() -> None:
+    request = (
+        "继续修复当前 STM32G070 控制板，沿用原始需求、已确认参数和最新工程检查点。"
+        "使用联合候选修复通道；重新核验并更新 U1、U2 的封装证据；"
+        "必要时联合调整布局、拆线、绕障和换层。"
+        "失败时调整方法，不重复无改善动作，直到 release_ready。"
+    )
+    assert classify_intent(request, prior_intent="build", has_active_context=True).context_relation == "resume"
+    for change in ("把板框改为50x40mm。", "新增一个LED。", "修改层数为四层。",
+                   "调整布局至指定坐标(10,20)。"):
+        assert classify_intent(request + change, prior_intent="build", has_active_context=True).context_relation == "amend"
+
+
 def test_positive_change_after_negated_change_remains_an_amendment() -> None:
     decision = classify_intent(
         "Do not change the MCU; continue and add a second LED.",

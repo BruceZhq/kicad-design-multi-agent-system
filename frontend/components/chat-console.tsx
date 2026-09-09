@@ -736,7 +736,8 @@ export function ChatConsole({ team, onEditTeam }: { team: TeamConfig; onEditTeam
     if (humanInput) {
       commitLive();
       setInteraction((current) => current?.request.interactionId === humanInput.interactionId
-        ? { ...current, request: humanInput, runId: event.runId, lastEventId: event.eventId }
+        ? { ...current, request: humanInput, runId: event.runId, lastEventId: event.eventId,
+            status: event.eventId > current.lastEventId ? "waiting" : current.status }
         : {
             request: humanInput,
             runId: event.runId,
@@ -2009,17 +2010,18 @@ function HumanInputCard({
   interaction: InteractionState;
   onRespond: (answer: string, displayAnswer?: string) => Promise<void>;
 }) {
-  const [answer, setAnswer] = useState(interaction.answer ?? "");
+  const retryAnswer = interaction.request.resumeAnswer;
+  const [answer, setAnswer] = useState(interaction.answer ?? retryAnswer ?? "");
   const [decisionAnswers, setDecisionAnswers] = useState<Record<string, { key: string; text: string }>>({});
   const locked = interaction.status === "submitting" || interaction.status === "submitted";
-  const hasDecisionForm = interaction.request.questions.length > 0;
+  const hasDecisionForm = retryAnswer === undefined && interaction.request.questions.length > 0;
   const decisionComplete = hasDecisionForm && interaction.request.questions.every((question) => {
     const selected = decisionAnswers[question.slot];
     if (!selected) return false;
     const option = question.options.find((candidate) => candidate.key === selected.key);
     return Boolean(option) && (!option?.freeText || selected.text.trim().length > 0);
   });
-  const canSubmit = !locked && (hasDecisionForm ? decisionComplete : answer.trim().length > 0);
+  const canSubmit = !locked && (retryAnswer !== undefined || (hasDecisionForm ? decisionComplete : answer.trim().length > 0));
 
   function selectDecision(slot: string, key: string): void {
     setDecisionAnswers((current) => ({
@@ -2030,6 +2032,10 @@ function HumanInputCard({
 
   function submitAnswer(): void {
     if (!canSubmit) return;
+    if (retryAnswer !== undefined) {
+      void onRespond(retryAnswer, "使用已提交的回答重试恢复当前任务");
+      return;
+    }
     if (!hasDecisionForm) {
       void onRespond(answer.trim());
       return;
@@ -2103,7 +2109,7 @@ function HumanInputCard({
           })}
         </div>
       )}
-      {!hasDecisionForm && interaction.request.options.length > 0 && (
+      {retryAnswer === undefined && !hasDecisionForm && interaction.request.options.length > 0 && (
         <div className="human-input-options">
           {interaction.request.options.map((option) => (
             <button
@@ -2118,7 +2124,8 @@ function HumanInputCard({
           ))}
         </div>
       )}
-      {!hasDecisionForm && interaction.request.allowFreeText && (
+      {retryAnswer !== undefined && <p>回答已保存，但任务仍在等待。可使用原回答重试恢复，无需重新填写。</p>}
+      {retryAnswer === undefined && !hasDecisionForm && interaction.request.allowFreeText && (
         <textarea
           value={answer}
           onChange={(event) => setAnswer(event.target.value)}
@@ -2139,7 +2146,7 @@ function HumanInputCard({
         </span>
         {interaction.status !== "submitted" && (
           <button type="button" disabled={!canSubmit} onClick={submitAnswer}>
-            {interaction.status === "submitting" ? "提交中" : interaction.status === "error" ? "重试" : "确认并继续"}
+            {interaction.status === "submitting" ? "提交中" : retryAnswer !== undefined ? "使用已提交回答重试恢复" : interaction.status === "error" ? "重试" : "确认并继续"}
           </button>
         )}
       </footer>

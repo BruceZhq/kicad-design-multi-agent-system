@@ -1929,9 +1929,14 @@ class PipelineStepBase(ABC):
 
         # AHE repairs both LLM proposals and deterministic steps that provide a
         # bounded repair implementation. The total task budget prevents loops.
+        from ratsnestpro.repair.draft import needs_prerequisite_repair
+
+        draft_prerequisite = ctx.draft_first and needs_prerequisite_repair(
+            self.step, best_artifact, best_checks
+        )
         can_repair = (
             blocked
-            and not ctx.draft_first
+            and (not ctx.draft_first or draft_prerequisite)
             and any(
                 not check.ok and check.origin != FailureOrigin.EXTERNAL_EVIDENCE
                 for check in best_checks
@@ -2023,6 +2028,9 @@ class PipelineStepBase(ABC):
                 elif known_scores and max(known_scores) < 0.2:
                     stagnation_budget = max(1, stagnation_budget - 1)
             hard_attempt_limit = min(12, remaining_task_budget)
+            if draft_prerequisite:
+                # No per-step correction spiral while assembling the draft.
+                hard_attempt_limit = min(1, hard_attempt_limit)
             attempt = 0
             consecutive_stagnant = 0
             while (
@@ -2339,6 +2347,7 @@ class RequirementsStep(PipelineStepBase):
                 {
                     **proposal.model_dump(),
                     "raw_text": state.requirement_text,
+                    "engineering_context": "",
                     "project_name": state.project_name,
                     "component_identity_constraints": [
                         item.model_dump()
@@ -6499,6 +6508,9 @@ class SelectionStep(PipelineStepBase):
         artifact: BaseModel,
     ) -> BaseModel:
         assert isinstance(artifact, SelectionPlan)
+        # Recovery may normalize bindings. Never mutate the saved candidate
+        # while still holding the receipt for its previous asset identities.
+        artifact = artifact.model_copy(deep=True)
         _ground_selected_parts(artifact.parts, state.requirement_text)
         _close_component_libraries(
             artifact,
@@ -6519,14 +6531,23 @@ class SelectionStep(PipelineStepBase):
                 manifest = PreparedComponentManifest.model_validate_json(manifest_json)
             except ValueError:
                 manifest = None
-        if manifest is not None and manifest.schema_version == (
-            "ratsnestpro.prepared-components.v2"
+        if (
+            manifest is not None
+            and manifest.schema_version == "ratsnestpro.prepared-components.v2"
+            and not validate_prepared_selection(artifact, manifest).blockers
+            and manifest.requirement_sha256 == component_requirement_digest(state.requirement_text)
+            and all(
+                Path(asset.source_path).is_file()
+                and sha256_file(Path(asset.source_path)) == asset.sha256
+                for record in manifest.records for asset in record.assets
+            )
         ):
             artifact.prepared_manifest_json = manifest_json
             return artifact
 
-        # v1 is readable for migration only. Rebuild the v2 receipt at Selection
-        # using the exact resumed BOM; never accept the legacy receipt at release.
+        # A schema version is not freshness evidence. Rebuild legacy or stale
+        # receipts against the normalized BOM, including asset content changes.
+        # Do not prefer a newer disk file: it may belong to a rejected candidate.
         candidate_dir = (
             Path(artifact.prepared_manifest_path).parent
             if artifact.prepared_manifest_path
@@ -15297,6 +15318,15 @@ def _resolved_zone_targets(
     connected_refs = _connected_refs_by_ref(state)
     eligible_anchor_refs = _functional_anchor_refs(state)
     for ref, role in roles.items():
+        binding = partition.zone_bindings.get(ref)
+        if binding:
+            matches = [zone for zone in zones if zone.name == binding]
+            if len(matches) == 1:
+                zone = matches[0]
+                targets[ref] = ((zone.x1 + zone.x2) / 2, (zone.y1 + zone.y2) / 2)
+            else:
+                ambiguities[ref] = [binding]
+            continue
         explicitly_bound = [
             zone
             for zone in zones
@@ -20392,13 +20422,10 @@ class RouteSignalsStep(PipelineStepBase):
                 default=cap.min_via_drill,
             ),
         }
-        from ratsnestpro.repair.routability import write_preflight
+        from ratsnestpro.repair.routability import emit_preflight, write_preflight
         congestion = write_preflight(pcb_path, clearance=route_rules["clearance_mm"],
                                      width=route_rules["track_width_mm"])
-        if ctx.on_ahe_event and congestion["enclosed_pads"]:
-            ctx.on_ahe_event({"event":"routability.preflight", "step":"route_signals",
-                              "enclosed_pad_count":len(congestion["enclosed_pads"]),
-                              "joint_group_count":len(congestion["joint_groups"])})
+        emit_preflight(ctx.on_ahe_event, congestion, revision=state.revision)
         layers = max(
             planned_layers,
             _requested_layer_count(state.requirement_text),
@@ -22486,6 +22513,9 @@ def _candidate_managed_file(relative: Path) -> bool:
         relative.parts
         and relative.parts[0] != _CANDIDATE_FILE_SNAPSHOT_DIR
         and relative.parts[0] != ".strong-repair"  # budgets/journals are not rollback-able CAD
+        # Observations are cached inputs, not candidate design outputs. Every
+        # reuse revalidates document hashes and pin evidence before acceptance.
+        and relative.parts[0] != "technical-evidence"
         and not relative.parts[0].startswith(_CANDIDATE_FILE_RESTORE_PREFIX)
         and name not in _CANDIDATE_FILE_EXCLUDES
         and not name.startswith("temporal_input")
@@ -22955,10 +22985,13 @@ def restore_pipeline_state(
         requirement_refreshed = (
             expected == PipelineStep.REQUIREMENTS
             and isinstance(artifact, RequirementSpec)
-            and artifact.raw_text != requirement_text
+            and artifact.complete_text != requirement_text
         )
         if requirement_refreshed:
-            artifact = artifact.model_copy(update={"raw_text": requirement_text})
+            artifact = RequirementSpec.model_validate({
+                **artifact.model_dump(), "raw_text": requirement_text,
+                "engineering_context": "",
+            })
         validator = ALL_STEPS[_ORDER_INDEX[expected]]
         saved_fingerprint = _artifact_fingerprint(artifact)
         try:

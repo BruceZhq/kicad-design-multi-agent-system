@@ -1087,7 +1087,7 @@ class ComponentResolutionService:
         pads: Sequence[Mapping[str, Any]],
     ) -> ComponentResolution | None:
         pad_numbers = _pad_numbers(pads)
-        if not pad_numbers:
+        if not pad_numbers and part.role.casefold() not in {"mounting_hole", "fiducial"}:
             return None
         selected = self._bounded_installed_candidate(part, pad_numbers)
         if selected is None:
@@ -1845,7 +1845,7 @@ class ComponentResolutionService:
 
         if (
             pads is not None
-            and _pad_numbers(pads)
+            and (_pad_numbers(pads) or part.role.casefold() in {"mounting_hole", "fiducial"})
             and result.reason_code in {
                 "symbol_not_installed",
                 "pin_pad_incompatible",

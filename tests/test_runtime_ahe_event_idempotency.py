@@ -2,11 +2,42 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 
 from service import service as runtime_service
 from service.ahe_event import ahe_event_record
 from service.redis_run_registry import RedisRunRegistry, RunHandle
+
+
+def test_human_pause_is_published_only_after_graph_segment_finishes(monkeypatch):
+    async def exercise():
+        order = []
+        payload = "data: " + json.dumps({"type": "ag_ui", "content": {
+            "type": "CUSTOM", "name": "ratsnest.human-input-required.v1",
+            "value": {"interactionId": "question-1", "stateVersion": 1},
+        }}) + "\n\n"
+
+        async def graph(*args):
+            yield payload
+            await asyncio.sleep(0)
+            order.append("checkpoint_committed")
+
+        async def set_run_id(*args):
+            pass
+
+        async def pause(*args, **kwargs):
+            assert order == ["checkpoint_committed"]
+            assert kwargs["interaction_id"] == "question-1"
+            order.append("waiting_published")
+
+        monkeypatch.setattr(runtime_service, "message_generator", graph)
+        monkeypatch.setattr(runtime_service, "run_registry", SimpleNamespace(
+            set_run_id=set_run_id, pause_for_input=pause))
+        await runtime_service._produce_stream_events_impl(object(), object(), "test")
+        assert order == ["checkpoint_committed", "waiting_published"]
+
+    asyncio.run(exercise())
 
 
 class _DedupeRedis:

@@ -51,7 +51,7 @@ COPY src/run_service.py .
 
 RUN groupadd --gid 10001 ratsnest \
     && useradd --uid 10001 --gid ratsnest --create-home --shell /usr/sbin/nologin ratsnest \
-    && mkdir -p /data/ratsnestpro \
+    && mkdir -p /data/ratsnestpro /home/ratsnest/external-repair \
     && chown -R ratsnest:ratsnest /data/ratsnestpro /home/ratsnest
 
 ENV HOME=/home/ratsnest

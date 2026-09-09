@@ -207,6 +207,14 @@ public class RunInteractionService {
         }
         String fingerprint = fingerprints.interaction(interactionId, answer, stateVersion);
         if (interaction.status() != RunInteraction.Status.PENDING) {
+            // Recover an acknowledged response whose graph segment re-entered
+            // the exact same interrupt. Reuse its durable response request ID.
+            if (interaction.status() == RunInteraction.Status.RESPONDED
+                    && run.state() == RunState.WAITING_FOR_INPUT
+                    && interaction.stateVersion() == stateVersion
+                    && fingerprint.equals(interaction.responseFingerprint())) {
+                return new InteractionResponse(run, interaction, true);
+            }
             if (idempotencyKey.equals(interaction.responseIdempotencyKey())
                     && fingerprint.equals(interaction.responseFingerprint())) {
                 return new InteractionResponse(

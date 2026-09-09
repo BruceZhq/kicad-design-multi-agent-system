@@ -73,6 +73,79 @@ def test_no_improvement_never_commits():
     assert not host.committed and host.current.fingerprint == "original"
 
 
+def test_budget_stop_preserves_verified_improvement():
+    from ratsnestpro.agents.llm import LlmBudgetExceeded
+
+    host = Host()
+    calls = []
+    def complete(*_):
+        if calls:
+            raise LlmBudgetExceeded("allowance exhausted")
+        calls.append(True)
+        return json.dumps({"action": "execute_python", "rationale": "repair", "script": "improve"})
+    assert run_session(host, complete=complete, limits=RepairLimits(max_turns=2), record=lambda _: None)
+    assert host.committed and host.current.fingerprint == "better"
+
+
+def test_probe_without_net_bindings_is_not_routability_success():
+    from types import SimpleNamespace
+    from ratsnestpro.repair.routability import probe
+
+    board = SimpleNamespace(list_footprints=lambda: [{"reference": "U1", "at": {"x": 0, "y": 0}}],
+                            footprint_pads=lambda _: [{"type": "smd", "net": None}])
+    value = probe(board, clear_segment=lambda *_: True)
+    assert value["status"] == "insufficient_net_geometry"
+    assert value["coverage"]["smd_pads"] == 1
+    assert value["connectivity_verified"] is False
+
+
+def test_pcbnew_adapter_retains_detached_proxy_and_is_idempotent(monkeypatch):
+    import gc
+    import sys
+    import weakref
+    from types import SimpleNamespace
+    from repair_executor.pcbnew_compat import install
+
+    class Board:
+        def Remove(self, item):
+            return "removed"
+    class Item:
+        pass
+    class Via:
+        def SetWidth(self, *args):
+            return args
+    monkeypatch.setitem(sys.modules, "pcbnew", SimpleNamespace(BOARD=Board, PCB_VIA=Via))
+    install()
+    wrapped = Board.Remove
+    install()
+    assert Board.Remove is wrapped
+    board, item = Board(), Item()
+    weak = weakref.ref(item)
+    assert board.Remove(item) == "removed"
+    del item
+    gc.collect()
+    assert weak() is not None
+    with pytest.raises(ValueError, match="requires"):
+        Via().SetWidth(600000)
+    assert Via().SetWidth(0, 600000) == (0, 600000)
+
+
+def test_unchanged_images_are_not_billed_each_query_and_render_can_request_them():
+    host = Host()
+    host.images = lambda: ["data:image/png;base64,unchanged"]
+    received = []
+    responses = iter([
+        {"engineering_queries": [{"tool": "pcb", "section": "pads"}]},
+        {"engineering_queries": [{"tool": "render"}]},
+        {"action": "stop", "rationale": "done"},
+    ])
+    def complete(_system, _user, images, _remaining):
+        received.append(len(images))
+        return json.dumps(next(responses))
+    assert not run_session(host, complete=complete, limits=RepairLimits(max_turns=3), record=lambda _: None)
+    assert received == [1, 0, 1]
+
+
 @pytest.mark.parametrize(
     "path", ["../secret.json", "/board.kicad_pcb", "a\\b.json", ".env", "repair.py"]
 )

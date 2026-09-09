@@ -147,17 +147,20 @@ def search_external_knowledge(
         },
     }
     try:
-        response = httpx.post(
-            endpoint,
-            headers=headers,
-            json=payload,
-            timeout=_bounded_timeout(),
-            follow_redirects=False,
-        )
-        response.raise_for_status()
-        if len(response.content) > _MAX_RESPONSE_BYTES:
-            raise ValueError("knowledge gateway response exceeds 1 MB")
-        raw = response.json()
+        transport = os.getenv("RATSNEST_KNOWLEDGE_TRANSPORT", "http").strip().lower()
+        if transport == "mcp":
+            from agents.ratsnestpro.knowledge_mcp import search_mcp
+            raw = search_mcp(endpoint, token, payload, _bounded_timeout(),
+                             os.getenv("RATSNEST_KNOWLEDGE_MCP_TOOL", "search_knowledge"))
+        elif transport == "http":
+            response = httpx.post(endpoint, headers=headers, json=payload,
+                                  timeout=_bounded_timeout(), follow_redirects=False)
+            response.raise_for_status()
+            if len(response.content) > _MAX_RESPONSE_BYTES:
+                raise ValueError("knowledge gateway response exceeds 1 MB")
+            raw = response.json()
+        else:
+            raise ValueError("unsupported knowledge transport")
         if not isinstance(raw, dict):
             raise ValueError("knowledge gateway response must be a JSON object")
         results = [

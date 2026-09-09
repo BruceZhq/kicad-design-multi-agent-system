@@ -650,9 +650,16 @@ local prior = redis.call('HGET', KEYS[7], response_key)
 local response_identity = ARGV[2] .. ':' .. ARGV[4]
 if prior then
   if prior == response_identity then
-    return {0, tonumber(redis.call('HGET', KEYS[1], 'fencing_token') or '0')}
+    -- Retry only the same still-pending interrupt. Running/completed or a new
+    -- interaction remains idempotent; never create a second active producer.
+    if redis.call('HGET', KEYS[1], 'status') ~= 'waiting_for_input'
+       or redis.call('HGET', KEYS[1], 'interaction_id') ~= ARGV[2]
+       or tonumber(redis.call('HGET', KEYS[1], 'interaction_state_version') or '-1') ~= tonumber(ARGV[4]) then
+      return {0, tonumber(redis.call('HGET', KEYS[1], 'fencing_token') or '0')}
+    end
+  else
+    return {-5, 0}
   end
-  return {-5, 0}
 end
 if redis.call('HGET', KEYS[1], 'status') ~= 'waiting_for_input' then return {-3, 0} end
 if redis.call('HGET', KEYS[1], 'interaction_id') ~= ARGV[2]

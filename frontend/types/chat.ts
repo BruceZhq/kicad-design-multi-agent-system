@@ -132,6 +132,7 @@ export interface HumanDecisionQuestion {
 }
 
 export interface HumanInputRequest {
+  resumeAnswer?: string;
   interactionId: string;
   kind: "clarification";
   question: string;
@@ -846,6 +847,8 @@ export function parseHumanInputRequest(event: RunEvent): HumanInputRequest | nul
   ) return null;
   return {
     interactionId: value.interactionId,
+    ...(typeof value.resumeAnswer === "string" && value.resumeAnswer.length <= 10_000
+      ? { resumeAnswer: value.resumeAnswer } : {}),
     kind: "clarification",
     question: value.question.trim(),
     options,

@@ -128,10 +128,28 @@ class RequirementSpec(ContractModel):
     fields are validated and the raw text is always preserved."""
 
     requirement_id: str = Field(default_factory=lambda: _id("req"))
-    # Architect evidence and retrieved source excerpts are intentionally carried
-    # with the original request. Keep a finite checkpoint bound, but do not force
-    # otherwise valid grounded requests through a 10k bottleneck.
+    # The user-text bound must not also bound appended tool evidence. Preserve
+    # the legacy transport verbatim, but store its two parts independently.
     raw_text: str = Field(min_length=1, max_length=100_000)
+    engineering_context: str = Field(default="", json_schema_extra={"readOnly": True})
+
+    @model_validator(mode="before")
+    @classmethod
+    def separate_legacy_evidence(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or not isinstance(value.get("raw_text"), str):
+            return value
+        marker = "\n\nVALIDATED CAPABILITY PROFILE — this is a scope, evidence, budget, and acceptance boundary, not a fixed circuit answer:\n"
+        source, boundary, context = value["raw_text"].partition(marker)
+        if boundary:
+            # Also migrate old checkpoints before their oversized raw_text is
+            # validated. Never trim source text or drop any evidence bytes.
+            return {**value, "raw_text": source,
+                    "engineering_context": boundary + context}
+        return value
+
+    @property
+    def complete_text(self) -> str:
+        return self.raw_text + self.engineering_context
     project_name: str = Field(default="generated_board", min_length=1, max_length=120)
     constraints: list[str] = Field(default_factory=list, max_length=100)
     acceptance_criteria: list[str] = Field(default_factory=list, max_length=100)

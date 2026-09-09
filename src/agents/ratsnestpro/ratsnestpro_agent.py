@@ -3807,6 +3807,7 @@ def _release_repair_resume_step(
         return None
 
     raw_steps: Any = None
+    draft_execution: dict[str, Any] = {}
     pipeline_result: dict[str, Any] = {}
     try:
         run_directory = (
@@ -3818,6 +3819,7 @@ def _release_repair_resume_step(
         payload = json.loads(checkpoint.read_text(encoding="utf-8"))
         if isinstance(payload, dict):
             raw_steps = payload.get("steps")
+            draft_execution = payload.get("draft_execution", {})
         result_payload = json.loads(
             (run_directory / "pipeline_result.json").read_text(encoding="utf-8")
         )
@@ -3836,7 +3838,7 @@ def _release_repair_resume_step(
     if not isinstance(raw_steps, list):
         return None
 
-    selected = checkpoint_resume_step(raw_steps, pipeline_result)
+    selected = checkpoint_resume_step(raw_steps, pipeline_result, draft_execution)
     if selected:
         return selected
 
@@ -4082,7 +4084,13 @@ async def hardware_dispatch_phase(
             "canceled",
             "not_found",
         }
-        if execution_status == "completed" and state.get("review_repair", {}).get("status") == "requested":
+        # COMPLETED describes Temporal, not engineering release. An acknowledged
+        # HITL interrupt must continue a non-release checkpoint, not replay the
+        # old terminal result. Active executions still attach idempotently.
+        if execution_status == "completed" and (
+            state.get("incremental_resume")
+            or review_ticket.get("status") == "requested"
+        ):
             restartable_terminal = True
         runtime_resume_step = (
             _release_repair_resume_step(state, allow_runtime_recovery=True)
@@ -4101,8 +4109,12 @@ async def hardware_dispatch_phase(
         # continuation its own workflow identity while retaining the original
         # request ID as the LangGraph replay owner.
         continuation_index = int(existing_ref.get("continuation_index", 0) or 0) + 1
+        review_origin = (
+            f".review.{review_ticket.get('attempt', 1)}"
+            if review_ticket.get("status") == "requested" else ""
+        )
         temporal_request_id = (
-            f"{request_id}.continuation.{continuation_index}.{runtime_resume_step}"
+            f"{request_id}{review_origin}.continuation.{continuation_index}.{runtime_resume_step}"
         )
         resume_from_step = runtime_resume_step
         _workflow_event(

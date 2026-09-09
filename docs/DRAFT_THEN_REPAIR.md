@@ -41,3 +41,74 @@ Temporal 仍按原活动与检查点调度，集中修复在最后的制造 Acti
 运行时默认启用。需要回到逐步骤修复时设置 `RATSNESTPRO_DRAFT_THEN_REPAIR=false`；该设置用于部署配置，不由模型修改。前端选择升级模型和推理强度后启动新任务即可使用最终强模型修复。
 
 定向测试覆盖：草案保留错误且不修复、无法继续的输入仍停止、只允许真实兼容资产延后独立资料核验、草案恢复不丢前缀、真实 CAD 原地修改使下游失效、最终修复保留祖先并重建制造、最终次数耗尽不能误放行。测试不等于新策略已完成该复杂板卡的自主 E2E；实际成功率仍需真实运行采集。
+# Independent CAD repair while document evidence is pending
+
+Finalization may repair downstream CAD before selection evidence is complete
+only when the selection failure consists solely of missing independent package
+evidence and every affected component already has a verified local KiCad binding.
+Missing assets, incompatible pins/pads, and other selection failures are not
+eligible. The pending selection remains failed for release purposes.
+
+The independent pass stops at the fabrication audit, preserves verified CAD
+improvements, and requires manufacturing outputs to be refreshed before release.
+It does not publish the retained draft manufacturing files. Subsequent strict
+validation must pass all steps, including the pending evidence checks.
+
+Manufacturer PDF extraction uses package nomenclature rather than a KiCad library
+identifier. It still requires document-supported identity and pin evidence;
+normalizing punctuation does not authorize an unsupported package substitution.
+Document observations in `technical-evidence` survive CAD candidate rollback and
+are revalidated before use. They are not release receipts or trusted solely because
+they were cached.
+
+## Explicit continuation allowances
+
+An explicit checkpoint continuation grants at most three additional final-repair
+passes and a dedicated 120,000-token strong-model allowance. The grant is bound
+to a hashed continuation token persisted in the checkpoint. Replaying that token,
+including a previously consumed token, cannot refresh it. Automated Reviewer
+continuations retain their origin marker and do not grant additional allowances.
+Cumulative pass/session counters and all prior transcripts remain available;
+allowance-specific transcripts recover token consumption after process restart.
+Local budget exhaustion is non-retryable and is not counted or refunded as a
+provider/infrastructure outage. A grant changes scheduling, not release gates.
+
+## Native CAD execution and routing observations
+
+The isolated executor installs `repair_executor.pcbnew_compat` before model code.
+It retains detached BOARD.Remove proxies until job exit, avoiding the reproduced
+KiCad 9.0.2 SWIG lifetime failure when removing tracks from a temporary list.
+This changes object lifetime only; edits still require independent DRC and
+invariant validation. A real sandbox regression loads a board copy, removes
+tracks, accesses drawings, saves and reloads it without touching the live board.
+
+The broker reports unhealthy when its pinned image is missing and returns a
+sanitized infrastructure error instead of concealing Docker failures as script
+failures. Retain a version-specific local image tag as well as the pinned digest.
+
+Local escape probes explicitly report net-assignment coverage and never attest
+connectivity. Strong repair receives a work list of actual DRC gap nets and their
+pad coordinates even when the escape probe finds no enclosed pads. Full script
+diagnostics stay in the local ledger; only a bounded output tail enters subsequent
+model turns. Budget exhaustion may commit an already verified improvement, but
+cannot promote a failing candidate or declare the board release-ready.
+
+## Joint upstream / CAD candidates
+
+Full-draft finalization invokes the selected strong repair model before truncating
+State at a selection or placement gate. `joint_candidate` accepts only existing
+ambiguous zone ownership choices, a host-controlled evidence refresh request,
+and an optional isolated PCB Python program. It cannot supply evidence pass flags,
+replace locked parts, resize zones/board outlines, or rewrite hard constraints.
+`repair/joint_candidate.py` owns typed upstream mutations and checks; the existing
+PCB host owns sandbox execution, snapshots and commit. Evidence preparation runs
+against the candidate directory with requested identities preserved.
+
+The model observes candidate upstream errors as well as DRC/net geometry. Selection,
+partition and placement gates, CAD invariants and DRC assess the combined candidate.
+Candidate checkpoints/rollback pair State with PCB bytes. A commit checks both live
+PCB and source State identity, writes an intent journal containing artifact updates,
+then replaces the PCB. Restart reconciles that journal idempotently; conflicting
+newer State is rejected. Metadata-only edits are supported but must improve the
+validated assessment. Manufacturing outputs are marked stale and rebuilt before
+final strict validation. This engineering commit is not a release-ready claim.

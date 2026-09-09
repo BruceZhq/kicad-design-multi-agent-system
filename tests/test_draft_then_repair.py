@@ -6,10 +6,48 @@ from pydantic import BaseModel
 
 from ratsnestpro.orchestration import pipeline as p
 from ratsnestpro.repair.draft import deferred_checks, dependency_fingerprint, finalize_draft, recover_draft_transaction
+from service.ahe_event import ahe_event_record
+
+
+@pytest.mark.parametrize("event", [
+    "draft_issues_deferred", "draft_final_repair_started",
+    "draft_dependencies_invalidated", "draft_final_repair_verified",
+    "draft_final_repair_needs_attention",
+])
+def test_all_draft_events_survive_real_bridge_without_private_evidence(event):
+    from ratsnestpro.repair.draft import _emit_draft_event
+
+    records = []
+    _emit_draft_event(
+        lambda payload: records.append(ahe_event_record(payload, workflow_id="bridge-test")),
+        event, step="manufacture", revision=3, owner="selection",
+        failures="private design evidence", issue_count=2,
+    )
+    assert records[0]["revision"] == 3
+    assert records[0]["draft"] == {"owner": "selection", "issue_count": 2}
 
 
 class Artifact(BaseModel):
     value: int = 1
+
+
+def test_symbol_only_repair_retains_layout_but_physical_and_net_changes_do_not():
+    import copy
+    from types import SimpleNamespace
+    from ratsnestpro.repair.draft import _layout_inputs_unchanged
+
+    part = SimpleNamespace(ref="U1", value="MCU", mpn="MCU", footprint="QFP:64",
+                           role="mcu", symbol="original")
+    original = {p.PipelineStep.SELECTION: SimpleNamespace(parts=[part]),
+                p.PipelineStep.SCH_CONNECTIONS: Artifact(value=1)}
+    current = SimpleNamespace(artifacts=copy.deepcopy(original))
+    current.artifacts[p.PipelineStep.SELECTION].parts[0].symbol = "verified_pin_type_correction"
+    assert _layout_inputs_unchanged(original, current)
+    current.artifacts[p.PipelineStep.SCH_CONNECTIONS] = Artifact(value=2)
+    assert not _layout_inputs_unchanged(original, current)
+    current.artifacts[p.PipelineStep.SCH_CONNECTIONS] = Artifact(value=1)
+    current.artifacts[p.PipelineStep.SELECTION].parts[0].footprint = "QFP:48"
+    assert not _layout_inputs_unchanged(original, current)
 
 
 class FailingStep(p.PipelineStepBase):
@@ -30,16 +68,20 @@ class FailingStep(p.PipelineStepBase):
 
 
 def test_draft_retains_errors_without_repair_or_false_pass():
+    events = []
     step = FailingStep()
     state = p.PipelineState("draft")
     p.Pipeline([step]).run(state, p.PipelineContext(
         draft_first=True, artifact_first=True, repair_release_issues=True,
         design_repair_attempts=2, repair_attempts=2,
+        on_ahe_event=lambda event: events.append(ahe_event_record(event, workflow_id="draft-test")),
     ))
     assert state.completed == [p.PipelineStep.REQUIREMENTS]
     assert state.blocked and not state.execution_blocked
     assert step.repairs == 0
     assert state.draft_execution["issues"]["requirements"]["checks"][0]["ok"] is False
+    deferred = [e for e in events if e["event"] == "draft_issues_deferred"]
+    assert deferred[0]["draft"] == {"issue_count": 1, "release_ready": False}
 
 
 def test_unusable_input_stops_without_spending_repair_calls():
@@ -106,6 +148,20 @@ def test_finalization_rechecks_without_accepting_draft_flags(monkeypatch):
     assert state.draft_execution["phase"] == "needs_attention"
 
 
+def test_old_continuation_cannot_refresh_allowance():
+    from ratsnestpro.repair.draft import authorize_repair_continuation
+
+    state = p.PipelineState("draft")
+    state.draft_execution["repair_passes"] = 3
+    authorize_repair_continuation(state, "first")
+    state.draft_execution["repair_passes"] = 6
+    authorize_repair_continuation(state, "second")
+    state.draft_execution["repair_passes"] = 9
+    authorize_repair_continuation(state, "first")
+    assert state.draft_execution["allowance_start_passes"] == 6
+    assert state.draft_execution["repair_passes"] == 9
+
+
 def test_draft_resume_rechecks_but_keeps_deferred_prefix(monkeypatch):
     step = FailingStep()
     monkeypatch.setattr(p, "ALL_STEPS", [step])
@@ -121,7 +177,8 @@ def test_draft_resume_rechecks_but_keeps_deferred_prefix(monkeypatch):
     assert restored.blocked and not restored.execution_blocked
 
 
-def test_final_repair_reuses_ancestors_and_rebuilds_dependent_manufacture(monkeypatch, tmp_path):
+@pytest.mark.parametrize("continuation", [False, True])
+def test_final_repair_reuses_ancestors_and_rebuilds_dependent_manufacture(monkeypatch, tmp_path, continuation):
     calls = []
 
     class Repairable(p.PipelineStepBase):
@@ -140,6 +197,15 @@ def test_final_repair_reuses_ancestors_and_rebuilds_dependent_manufacture(monkey
             return Artifact(value=2), False
 
     state = p.PipelineState("draft")
+    if continuation:
+        from ratsnestpro.repair.draft import authorize_repair_continuation
+
+        state.draft_execution["repair_passes"] = 3
+        authorize_repair_continuation(state, "user-confirmation-1")
+        state.draft_execution["repair_passes"] = 4
+        authorize_repair_continuation(state, "user-confirmation-1")
+        assert state.draft_execution["allowance_start_passes"] == 3
+        assert state.draft_execution["repair_passes"] == 4
     steps = []
     for name in p.CANONICAL_ORDER:
         item = Repairable()
@@ -149,7 +215,11 @@ def test_final_repair_reuses_ancestors_and_rebuilds_dependent_manufacture(monkey
         state.artifacts[name] = Artifact()
         state.results.append(p.StepResult(step=name))
     monkeypatch.setattr(p, "ALL_STEPS", steps)
-    finalize_draft(state, p.PipelineContext(out_dir=str(tmp_path)))
+    events = []
+    finalize_draft(state, p.PipelineContext(out_dir=str(tmp_path),
+        on_ahe_event=lambda event: events.append(ahe_event_record(event, workflow_id="final-test"))))
+    assert any(e["event"] == "draft_final_repair_started" for e in events)
+    assert any(e["event"] == "draft_final_repair_verified" for e in events)
     assert state.draft_execution["phase"] == "verified"
     assert not state.blocked
     assert ("route_signals", "repair") in calls
@@ -175,3 +245,81 @@ def test_interrupted_final_transaction_restores_draft_not_budget(monkeypatch, tm
     assert state.completed == [p.PipelineStep.REQUIREMENTS]
     assert state.draft_execution["repair_passes"] == 2
     assert "active_candidate" not in state.draft_execution
+
+
+@pytest.mark.parametrize("real_binding", [True, False])
+def test_independent_cad_owner_never_bypasses_missing_assets(real_binding):
+    from ratsnestpro.repair.draft import _independent_cad_owner
+
+    state = p.PipelineState("draft")
+    for name in p.CANONICAL_ORDER:
+        state.artifacts[name] = Artifact()
+        state.results.append(p.StepResult(step=name))
+    selection = state.results[p._ORDER_INDEX[p.PipelineStep.SELECTION]]
+    selection.checks = [p.CheckResult(
+        name="prepared_component_manifest", ok=False, blocks_execution=True,
+        reason_code="independent_package_evidence_missing",
+        evidence={"component_diagnostics": [{
+            "blockers": ["independent_package_evidence_missing"],
+            "available_source_kinds": ["verified_local_kicad_binding"] if real_binding else [],
+        }]},
+    )]
+    route_index = p._ORDER_INDEX[p.PipelineStep.ROUTE_SIGNALS]
+    state.results[route_index].checks = [p.CheckResult(name="signals_routed", ok=False)]
+    assert _independent_cad_owner(state) == (route_index if real_binding else None)
+
+
+def test_document_observations_survive_cad_rollback(tmp_path):
+    ctx = p.PipelineContext(out_dir=str(tmp_path))
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text("baseline")
+    snapshot = p._snapshot_candidate_files(ctx, "observations")
+    evidence = tmp_path / "technical-evidence" / "receipt.json"
+    evidence.parent.mkdir()
+    evidence.write_text('{"status":"unverified"}')
+    pcb.write_text("candidate")
+    p._restore_candidate_files(ctx, snapshot)
+    assert pcb.read_text() == "baseline"
+    assert evidence.read_text() == '{"status":"unverified"}'
+
+
+def test_final_repair_keeps_cad_improvement_while_evidence_waits(monkeypatch, tmp_path):
+    calls = []
+
+    class Step(p.PipelineStepBase):
+        def propose(self, state, ctx, knowledge):
+            return Artifact(value=2), False
+
+        def check(self, state, artifact):
+            if self.step == p.PipelineStep.SELECTION:
+                return [p.CheckResult(name="prepared_component_manifest", ok=False,
+                    blocks_execution=True, reason_code="independent_package_evidence_missing",
+                    origin=p.FailureOrigin.EXTERNAL_EVIDENCE,
+                    evidence={"component_diagnostics": [{
+                        "blockers": ["independent_package_evidence_missing"],
+                        "available_source_kinds": ["verified_local_kicad_binding"],
+                    }]})]
+            return [p.CheckResult(name="route_gap", ok=(
+                self.step != p.PipelineStep.ROUTE_SIGNALS or artifact.value == 2))]
+
+        def repair(self, state, ctx, knowledge, artifact, checks):
+            calls.append(self.step)
+            return Artifact(value=2), False
+
+    state = p.PipelineState("draft")
+    steps = []
+    for name in p.CANONICAL_ORDER:
+        step = Step()
+        step.step = name
+        steps.append(step)
+        state.artifacts[name] = Artifact()
+        state.results.append(p.StepResult(step=name))
+        monkeypatch.setitem(p.ARTIFACT_MODELS, name, Artifact)
+    monkeypatch.setattr(p, "ALL_STEPS", steps)
+    monkeypatch.setattr(p, "_prepare_and_persist_components", lambda artifact, *a, **k: (artifact, None))
+    finalize_draft(state, p.PipelineContext(out_dir=str(tmp_path)))
+    assert p.PipelineStep.ROUTE_SIGNALS in calls
+    assert state.artifact(p.PipelineStep.ROUTE_SIGNALS).value == 2
+    assert len(state.results) == 17
+    assert state.draft_execution["phase"] == "needs_attention"
+    assert state.draft_execution["manufacturing_refresh_required"]

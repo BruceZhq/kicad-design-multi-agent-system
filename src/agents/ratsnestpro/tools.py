@@ -32,6 +32,7 @@ from ratsnestpro.agents import (
     Reviewer,
     parse_mode,
 )
+from ratsnestpro.agents.llm import LlmBudgetExceeded
 from ratsnestpro.eda import footprints, grounding, symbols
 from ratsnestpro.eda.adapter import kicad_cli_available, run_erc
 from ratsnestpro.eda.local_library import (
@@ -935,6 +936,7 @@ def _load_pipeline_state(
             expected_value = checkpoint_resume_step(
                 steps,
                 terminal_result if isinstance(terminal_result, dict) else {},
+                payload.get("draft_execution", {}),
             )
             expected_resume = PipelineStep(expected_value) if expected_value else None
             if expected_resume != resume_from_step:
@@ -1078,10 +1080,26 @@ def _load_pipeline_state(
 def checkpoint_resume_step(
     steps: list[Any],
     terminal_result: dict[str, Any] | None = None,
+    draft_execution: dict[str, Any] | None = None,
 ) -> str | None:
     """Return the only safe continuation point for a canonical checkpoint."""
 
     canonical = list(PipelineStep)
+    if (terminal_result or {}).get("release_ready") is True:
+        return None
+    # A completed draft is the repair baseline, including its known defects.
+    # Re-enter finalization instead of discarding CAD from the first deferred
+    # issue. The loader still revalidates the prefix; final repair owns any
+    # dependency invalidation and strict release validation.
+    if (
+        _env_flag("RATSNESTPRO_DRAFT_THEN_REPAIR", default=True)
+        and isinstance(draft_execution, dict)
+        and draft_execution.get("policy") == "draft-then-repair.v1"
+        and draft_execution.get("phase") in {"needs_attention", "final_repair"}
+        and [item.get("name") if isinstance(item, dict) else None for item in steps]
+        == [step.value for step in canonical]
+    ):
+        return PipelineStep.MANUFACTURE.value
     completed: list[PipelineStep] = []
     for index, item in enumerate(steps):
         if not isinstance(item, dict) or index >= len(canonical):
@@ -1369,7 +1387,7 @@ class _ToolkitLlmClient:
         messages = [SystemMessage(content=system), HumanMessage(content=content)]
         estimated_input = max(1, (len(system) + len(user)) // 4) + 4096 * len(images or [])
         if self._used_llm_tokens + estimated_input > self._max_llm_tokens:
-            raise LlmError("LLM token budget exhausted before the next pipeline call")
+            raise LlmBudgetExceeded("LLM token budget exhausted before the next pipeline call")
         active_model = model or self._model
         active_fallback = fallback_model or self._fallback_model
         active_model_name = model_name or self._model_name
@@ -1433,7 +1451,7 @@ class _ToolkitLlmClient:
         return response_text(response)
 
 
-def _strong_repair_runtime(model_name: str | None, effort: str | None, out: Path):
+def _strong_repair_runtime(model_name: str | None, effort: str | None, out: Path, *, allowance_key: str = ""):
     """Lazy dedicated client: never route the selected escalation model elsewhere."""
     if not model_name:
         return None
@@ -1441,7 +1459,7 @@ def _strong_repair_runtime(model_name: str | None, effort: str | None, out: Path
     from ratsnestpro.repair.contracts import RepairLimits, StrongRepairOptions
     from ratsnestpro.repair.pipeline_adapter import StrongRepairRuntime
 
-    limits = RepairLimits()
+    limits = RepairLimits(max_llm_tokens=120_000)
     options = StrongRepairOptions(model=model_name, reasoning_effort=effort)
     client = None
 
@@ -1451,7 +1469,7 @@ def _strong_repair_runtime(model_name: str | None, effort: str | None, out: Path
             client = _ToolkitLlmClient(
                 model_name=model_name, reasoning_effort=effort,
                 vision_model_name=model_name, vision_reasoning_effort=effort,
-                transcript_path=out / "strong_repair_llm.jsonl",
+                transcript_path=out / (f"strong_repair_llm-{allowance_key}.jsonl" if allowance_key else "strong_repair_llm.jsonl"),
                 phase="hardware-engineer:strong-repair", max_llm_tokens=limits.max_llm_tokens,
             )
             # Explicit model selection is authoritative; no purpose endpoint fallback.
@@ -1461,7 +1479,7 @@ def _strong_repair_runtime(model_name: str | None, effort: str | None, out: Path
         return (client.complete_with_images(system, user, images=images)
                 if images else client.complete(system, user))
 
-    return StrongRepairRuntime(options.model, options.reasoning_effort, complete, limits)
+    return StrongRepairRuntime(options.model, options.reasoning_effort, complete, limits, allowance_key)
 
 
 def _pipeline_mode(requirement: str, requested: LlmMode) -> LlmMode:
@@ -2439,6 +2457,13 @@ def _run_pcb_pipeline_unlocked(
             "RATSNESTPRO_REPAIR_RELEASE_ISSUES",
             default=True,
         )
+        # Only a requested continuation grants a new bounded repair window.
+        # Temporal retries share its durable token; automated Reviewer visits
+        # must not replenish budgets. Cumulative counters remain intact.
+        if active_resume is not None and resume_token and ".review." not in resume_token:
+            from ratsnestpro.repair.draft import authorize_repair_continuation
+
+            authorize_repair_continuation(state, resume_token)
         from agents.ratsnestpro.package_evidence import PackageEvidenceFetcher
 
         pipeline_context = PipelineContext(
@@ -2446,6 +2471,7 @@ def _run_pcb_pipeline_unlocked(
                 client=client,
                 strong_repair=_strong_repair_runtime(
                     strong_model_name, strong_reasoning_effort, out,
+                    allowance_key=state.draft_execution.get("allowance_key", ""),
                 ) if mode != LlmMode.OFFLINE else None,
                 verified_layout_modules=[item["module"] for item in
                     ehe_memory.search_verified_modules(requirement, limit=3)],

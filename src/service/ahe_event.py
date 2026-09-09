@@ -24,6 +24,11 @@ _MAX_LIST_ITEMS = 128
 _MAX_IDENTIFIER_CHARS = 200
 
 _DETAIL_FIELDS: dict[str, tuple[str, ...]] = {
+    "strong_repair": ("session", "turn", "improved", "task_id", "status", "external_event"),
+    "routability": ("enclosed_pad_count", "joint_group_count"),
+    "draft": (
+        "issue_count", "release_ready", "draft_completed_steps", "owner",
+    ),
     "failure": (
         "failure_id",
         "signature",
@@ -97,6 +102,7 @@ _DETAIL_FIELDS: dict[str, tuple[str, ...]] = {
     ),
 }
 _STRUCTURAL_IDENTIFIER_FIELDS = {
+    "owner",
     "failure_id",
     "signature",
     "step",

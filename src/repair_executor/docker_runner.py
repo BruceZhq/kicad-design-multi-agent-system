@@ -15,14 +15,29 @@ from typing import Any
 
 import httpx
 
-from ratsnestpro.repair.contracts import SandboxRequest, SandboxResult
+from ratsnestpro.repair.contracts import SandboxFile, SandboxRequest, SandboxResult
 
 _MAX_OUTPUT_BYTES = 24_000_000
+
+
+def sandbox_available(image: str, socket_path: str = "/var/run/docker.sock") -> bool:
+    if not image:
+        return False
+    try:
+        with httpx.Client(transport=httpx.HTTPTransport(uds=socket_path),
+                          base_url="http://docker/v1.47", timeout=3) as docker:
+            return docker.get("/images/" + image + "/json").status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
 _BOOTSTRAP = """
 import os, resource, runpy
 resource.setrlimit(resource.RLIMIT_FSIZE,(24_000_000,24_000_000))
 resource.setrlimit(resource.RLIMIT_NOFILE,(256,256))
 os.chdir('/work')
+from repair_executor.pcbnew_compat import install
+install()
 runpy.run_path('/work/repair.py',run_name='__main__')
 """
 
@@ -189,11 +204,35 @@ def run(
                 stream = archive.extractfile(members[0])
                 assert stream is not None
                 pcb = stream.read(_MAX_OUTPUT_BYTES + 1)
+            returned = []
+            for name in request.return_paths:
+                if name == request.pcb_name:
+                    continue
+                with docker.stream('GET', f'/containers/{identifier}/archive', params={'path': '/work/' + name}) as download:
+                    if download.status_code == 404 and name == 'programs/repair_generator.py':
+                        continue
+                    if download.status_code == 404:
+                        return SandboxResult(status='failed', output=output + '\nRequired schematic removed by script.', exit_code=code)
+                    download.raise_for_status()
+                    raw = bytearray()
+                    for chunk in download.iter_bytes():
+                        raw.extend(chunk)
+                        if len(raw) > _MAX_OUTPUT_BYTES + 65536:
+                            raise ValueError('candidate file exceeds output limit')
+                with tarfile.open(fileobj=io.BytesIO(raw)) as archive:
+                    members = archive.getmembers()
+                    if len(members) != 1 or not members[0].isfile() or members[0].size > _MAX_OUTPUT_BYTES:
+                        raise ValueError('candidate must be a regular file')
+                    content = archive.extractfile(members[0]).read(_MAX_OUTPUT_BYTES + 1)
+                returned.append(SandboxFile(path=name, data=base64.b64encode(content).decode()))
+            if sum(len(f.data) for f in returned) + len(pcb) * 4 // 3 > 32_000_000:
+                raise ValueError('combined candidate exceeds output limit')
             return SandboxResult(
                 status="completed",
                 exit_code=0,
                 output=output,
                 pcb_data=base64.b64encode(pcb).decode("ascii"),
+                files=returned,
             )
         finally:
             for owned in (identifier, seed_id):

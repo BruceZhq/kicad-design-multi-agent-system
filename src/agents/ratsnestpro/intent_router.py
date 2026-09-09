@@ -133,6 +133,13 @@ _PROCEDURAL_MODIFICATION_RE = re.compile(
     r"[^。；;\n]{0,80}(?:局部修改|局部变更))",
     re.IGNORECASE,
 )
+_REPAIR_METHOD_CHANGE_RE = re.compile(
+    r"(?:调整|修改|变更)(?:修复)?(?:方法|策略|计划)(?=[，,。；;、\s]|$)|"
+    r"(?:必要时|按需)(?:联合)?(?:调整|修改)布局(?=[、，,。；;]|$)|"
+    r"\b(?:adjust|change|modify)\s+(?:the\s+)?(?:repair\s+)?"
+    r"(?:strategy|method|plan)\b",
+    re.IGNORECASE,
+)
 _NEGATED_BUILD_RE = re.compile(
     r"(?:\b(?:do\s+not|don't|must\s+not|without)\b[^.\n]{0,40}"
     r"\b(?:design|generate|build|create)\b[^.\n]{0,30}\b(?:pcb|board)\b|"
@@ -275,6 +282,11 @@ def classify_intent(
             match.group(0), re.I,
         ) else "", amendment_text,
     )
+    if has_continue:
+        # Choosing a recovery method is not changing the board specification.
+        # Match bounded phrases only: explicit positions, dimensions, parts,
+        # and any other amendment elsewhere in the request remain visible.
+        amendment_text = _REPAIR_METHOD_CHANGE_RE.sub("", amendment_text)
     has_amendment = bool(_AMEND_ACTION_RE.search(amendment_text))
     explicit_new_context = requests_new_context(requirement)
     negated_build = bool(_NEGATED_BUILD_RE.search(requirement))

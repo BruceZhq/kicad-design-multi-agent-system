@@ -682,6 +682,7 @@ class BoardPartition(ProposalModel):
     board_width: float = Field(gt=0, le=10_000)
     board_height: float = Field(gt=0, le=10_000)
     zones: list[BoardZone] = Field(default_factory=list, max_length=100)
+    zone_bindings: dict[str, str] = Field(default_factory=dict, max_length=100)
     placement_constraints: PlacementConstraintSet = Field(
         default_factory=PlacementConstraintSet
     )

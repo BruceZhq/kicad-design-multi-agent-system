@@ -57,6 +57,10 @@ class NonRetryableLlmError(LlmError):
     """Raised when another attempt cannot repair the provider failure."""
 
 
+class LlmBudgetExceeded(NonRetryableLlmError):
+    """Local authorized allowance exhausted; not a provider outage."""
+
+
 @runtime_checkable
 class LLMClient(Protocol):
     """Minimal chat interface. Implementations return assistant text."""

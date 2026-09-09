@@ -110,6 +110,48 @@ def _technical_package(*, pin_count: int = 2):
     )
 
 
+@pytest.mark.parametrize("change", ["none", "symbol", "footprint", "requirement", "asset"])
+def test_resume_rebuilds_stale_receipts_without_mutating_checkpoint(tmp_path, monkeypatch, change):
+    from ratsnestpro.orchestration import pipeline as p
+
+    symbol = tmp_path / "symbol"
+    footprint = tmp_path / "footprint"
+    symbol.write_text("original")
+    footprint.write_text("original")
+    service = _service(symbol, footprint)
+    prepared = service.prepare(_selection(), "original requirement")
+    artifact = prepared.selection
+    artifact.prepared_manifest_json = prepared.manifest.model_dump_json()
+    artifact.prepared_manifest_path = str(tmp_path / "prepared-components.json")
+    before = artifact.model_dump_json()
+    calls = []
+
+    def ground(parts, requirement):
+        if change == "symbol":
+            parts[0].symbol = "Connector:Conn_01x02"
+        if change == "footprint":
+            parts[0].footprint = "Connector:Other_1x02"
+
+    def rebuild(plan, state, ctx, **kwargs):
+        calls.append(plan)
+        result = service.prepare(plan, state.requirement_text)
+        result.selection.prepared_manifest_json = result.manifest.model_dump_json()
+        return result.selection, result.closure
+
+    monkeypatch.setattr(p, "_ground_selected_parts", ground)
+    monkeypatch.setattr(p, "_close_component_libraries", lambda *a, **k: None)
+    monkeypatch.setattr(p, "_prepare_and_persist_components", rebuild)
+    monkeypatch.setattr(p, "_persist_component_closure", lambda plan, *a: plan)
+    if change == "asset":
+        symbol.write_text("changed asset")
+    state = p.PipelineState("changed requirement" if change == "requirement" else "original requirement")
+    recovered = p.SelectionStep().prepare_resumed_artifact(state, artifact)
+    assert bool(calls) == (change != "none")
+    assert artifact.model_dump_json() == before
+    manifest = PreparedComponentManifest.model_validate_json(recovered.prepared_manifest_json)
+    assert not validate_prepared_selection(recovered, manifest).blockers
+
+
 def test_preparation_locks_electrical_assets_without_conflating_procurement(
     tmp_path: Path,
 ) -> None:

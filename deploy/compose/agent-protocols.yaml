@@ -1,0 +1,60 @@
+# Merge AFTER compose.yaml and deploy/compose/strong-repair.yaml.
+# Separate credentials and storage; no production Run mount or Docker socket.
+services:
+  external_repair_agent:
+    profiles: [a2a-repair]
+    image: ratsnestpro-agent-runtime:local
+    command: [python, -m, uvicorn, repair_executor.a2a_agent:app, --host, 0.0.0.0, --port, "8098"]
+    environment:
+      HOME: /tmp
+      RATSNEST_A2A_DATA_DIR: /home/ratsnest/external-repair
+      RATSNEST_A2A_REPAIR_TOKEN: ${RATSNEST_A2A_REPAIR_TOKEN:-}
+      RATSNEST_A2A_ALLOWED_MODELS: ${RATSNEST_A2A_ALLOWED_MODELS:-}
+      RATSNEST_A2A_PUBLIC_URL: http://external_repair_agent:8098/a2a
+      OPENAI_API_KEY: ${RATSNEST_A2A_OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${RATSNEST_A2A_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      RATSNEST_REPAIR_EXECUTOR_URL: http://repair_executor:8097
+      RATSNEST_REPAIR_EXECUTOR_TOKEN: ${RATSNEST_REPAIR_EXECUTOR_TOKEN:-}
+    volumes: [external_repair_data:/home/ratsnest/external-repair]
+    networks: [default, repair_internal]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, python, -c, "import os,urllib.request; r=urllib.request.Request('http://localhost:8098/.well-known/agent-card.json',headers={'Authorization':'Bearer '+os.environ['RATSNEST_A2A_REPAIR_TOKEN']}); urllib.request.urlopen(r,timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+
+  knowledge_mcp:
+    profiles: [rag-mcp]
+    image: ratsnestpro-agent-runtime:local
+    command: [python, -m, uvicorn, agents.ratsnestpro.knowledge_mcp_server:app, --host, 0.0.0.0, --port, "8099"]
+    environment:
+      RATSNEST_KNOWLEDGE_GATEWAY_TOKEN: ${RATSNEST_KNOWLEDGE_GATEWAY_TOKEN:-}
+      RATSNEST_RAG_UPSTREAM_URL: ${RATSNEST_RAG_UPSTREAM_URL:-}
+      RATSNEST_RAG_UPSTREAM_TOKEN: ${RATSNEST_RAG_UPSTREAM_TOKEN:-}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+  agent_service:
+    environment:
+      RATSNEST_A2A_REPAIR_URL: ${RATSNEST_A2A_REPAIR_URL:-}
+      RATSNEST_A2A_REPAIR_TOKEN: ${RATSNEST_A2A_REPAIR_TOKEN:-}
+      RATSNEST_KNOWLEDGE_TRANSPORT: ${RATSNEST_KNOWLEDGE_TRANSPORT:-http}
+      RATSNEST_KNOWLEDGE_GATEWAY_URL: ${RATSNEST_KNOWLEDGE_GATEWAY_URL:-}
+      RATSNEST_KNOWLEDGE_GATEWAY_TOKEN: ${RATSNEST_KNOWLEDGE_GATEWAY_TOKEN:-}
+  temporal_worker:
+    environment:
+      RATSNEST_A2A_REPAIR_URL: ${RATSNEST_A2A_REPAIR_URL:-}
+      RATSNEST_A2A_REPAIR_TOKEN: ${RATSNEST_A2A_REPAIR_TOKEN:-}
+      RATSNEST_KNOWLEDGE_TRANSPORT: ${RATSNEST_KNOWLEDGE_TRANSPORT:-http}
+      RATSNEST_KNOWLEDGE_GATEWAY_URL: ${RATSNEST_KNOWLEDGE_GATEWAY_URL:-}
+      RATSNEST_KNOWLEDGE_GATEWAY_TOKEN: ${RATSNEST_KNOWLEDGE_GATEWAY_TOKEN:-}
+
+volumes:
+  external_repair_data:

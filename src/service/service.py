@@ -1050,6 +1050,8 @@ async def _produce_stream_events_impl(
     """Persist one execution segment, stopping cleanly at a human interrupt."""
 
     result: dict[str, Any] = {}
+    pending_interaction = None
+    stream_failed = False
     async for event in message_generator(user_input, agent_id):
         await run_registry.set_run_id(record, _event_run_id(event))
         interaction = _event_human_interaction(event)
@@ -1060,24 +1062,29 @@ async def _produce_stream_events_impl(
                 "delivery_status": manifest.get("delivery_status"),
             }
         if _is_error_event(event):
+            stream_failed = True
             await run_registry.mark_stream_failed(
                 record,
                 code="agent_stream_error",
                 message="The agent stream reported an error.",
             )
         if interaction is not None:
-            await run_registry.pause_for_input(
-                record,
-                interaction_id=str(interaction["interactionId"]),
-                state_version=int(interaction["stateVersion"]),
-                payload=event,
-            )
-            break
+            # Drain the graph segment before publishing WAITING_FOR_INPUT.
+            # Breaking here closes astream before its pending checkpoint writes
+            # finish, so the next resume can replay the uncommitted interrupt.
+            pending_interaction = (interaction, event)
+            continue
         is_ahe_event, event_key = _event_ahe_event_key(event)
         if is_ahe_event and event_key is None:
             logger.warning("Ignoring AHE event without a valid durable record_id.")
             continue
         await run_registry.append_event(record, event, event_key=event_key)
+    if pending_interaction is not None and not stream_failed:
+        interaction, event = pending_interaction
+        await run_registry.pause_for_input(
+            record, interaction_id=str(interaction["interactionId"]),
+            state_version=int(interaction["stateVersion"]), payload=event,
+        )
     manifest = result.get("artifact_manifest")
     if _long_term_memory is not None and isinstance(manifest, dict):
         runtime_scope = execution_scope(user_input)

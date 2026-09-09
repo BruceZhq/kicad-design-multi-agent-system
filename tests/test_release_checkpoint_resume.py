@@ -24,6 +24,7 @@ from agents.ratsnestpro.tools import (
     _requirement_contract_payload,
     _run_pcb_pipeline_unlocked,
     _write_pipeline_state,
+    checkpoint_resume_step,
 )
 from ratsnestpro.orchestration.pipeline import (
     PipelineState,
@@ -145,9 +146,14 @@ def test_langgraph_uses_durable_checkpoint_when_hardware_summary_is_missing(
     )
 
 
+@pytest.mark.parametrize("execution_status,incremental_resume", [
+    ("timed_out", False), ("completed", True),
+])
 def test_runtime_recovery_continues_terminal_temporal_from_durable_checkpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    execution_status: str,
+    incremental_resume: bool,
 ) -> None:
     run_name = "workspace-run"
     run_dir = tmp_path / "runs" / run_name
@@ -162,7 +168,7 @@ def test_runtime_recovery_continues_terminal_temporal_from_durable_checkpoint(
     captured: dict[str, Any] = {}
 
     async def fake_status(_run_ref: dict[str, Any]) -> str:
-        return "timed_out"
+        return execution_status
 
     async def fake_dispatch(**kwargs: Any) -> dict[str, Any]:
         captured.update(kwargs)
@@ -180,7 +186,7 @@ def test_runtime_recovery_continues_terminal_temporal_from_durable_checkpoint(
     monkeypatch.setattr(ratsnestpro_agent, "_hardware_requirement", lambda _state: "build")
     monkeypatch.setattr(ratsnestpro_agent, "_workflow_event", lambda *_args, **_kwargs: None)
     state = {
-        "incremental_resume": False,
+        "incremental_resume": incremental_resume,
         "run_name": "display-run",
         "workspace_run_name": run_name,
         "execution_scope": "internal",
@@ -215,11 +221,19 @@ def test_runtime_recovery_continues_terminal_temporal_from_durable_checkpoint(
     )
 
 
+@pytest.mark.parametrize("execution_status,incremental_resume,release_ready", [
+    ("running", True, False),
+    ("completed", False, False),
+    ("completed", True, True),
+])
 def test_runtime_recovery_attaches_to_running_temporal(
     monkeypatch: pytest.MonkeyPatch,
+    execution_status: str,
+    incremental_resume: bool,
+    release_ready: bool,
 ) -> None:
     async def fake_status(_run_ref: dict[str, Any]) -> str:
-        return "running"
+        return execution_status
 
     async def unexpected_dispatch(**_kwargs: Any) -> dict[str, Any]:
         raise AssertionError("a running workflow must not be duplicated")
@@ -235,6 +249,8 @@ def test_runtime_recovery_attaches_to_running_temporal(
         "workspace_run_name": "workspace-run",
     }
     state = {
+        "incremental_resume": incremental_resume,
+        "hardware": {"release_ready": release_ready},
         "run_name": "display-run",
         "workspace_run_name": "workspace-run",
         "project_name": "board",
@@ -249,6 +265,14 @@ def test_runtime_recovery_attaches_to_running_temporal(
     )
 
     assert update == {"hardware_dispatch": existing}
+
+
+def test_completed_draft_resumes_final_repair_not_earliest_deferred_issue() -> None:
+    hardware = _release_blocked_hardware()
+    meta = {"policy": "draft-then-repair.v1", "phase": "needs_attention"}
+    assert checkpoint_resume_step(hardware["steps"], hardware, meta) == "manufacture"
+    assert checkpoint_resume_step(hardware["steps"], {"release_ready": True}, meta) is None
+    assert checkpoint_resume_step(hardware["steps"][:3], {}, meta) == CANONICAL_STEPS[3]
 
 
 def test_full_checkpoint_with_final_erc_blocker_resumes_at_erc(

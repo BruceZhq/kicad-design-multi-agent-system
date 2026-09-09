@@ -57,7 +57,7 @@ _SOURCE_FILES = {
     "materialize": "eda/materialize.py",
     "routing": "eda/routing.py",
 }
-_READ_SUFFIXES = {".json", ".md", ".txt", ".net", ".kicad_sch", ".kicad_pcb", ".kicad_dru"}
+_READ_SUFFIXES = {".json", ".md", ".txt", ".csv", ".dsn", ".ses", ".net", ".py", ".kicad_sch", ".kicad_pcb", ".kicad_dru"}
 _PRIVATE_NAMES = (".env", "secret", "credential", "token", "llm_outputs", "private", "cookie")
 _RESULT_CHAR_LIMIT = 16_000
 
