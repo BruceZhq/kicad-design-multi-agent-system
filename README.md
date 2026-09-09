@@ -4,7 +4,7 @@
 
 [在线 Demo](https://brucezhq.github.io/kicad-design-multi-agent-system/) · [GitHub 源码](https://github.com/BruceZhq/kicad-design-multi-agent-system)
 
-[项目与架构详解](docs/PROJECT_DESCRIPTION_ZH.md) · [源码导读](docs/PROJECT_CODE_GUIDE_ZH.md) · [Release-ready 收敛报告](evals/reports/release-ready-convergence-20260829.md) · [Agent 可观测与自动评测](docs/observability-and-evaluation.md)
+[项目与架构详解](docs/PROJECT_DESCRIPTION_ZH.md) · [源码导读](docs/PROJECT_CODE_GUIDE_ZH.md) · [Agent 可观测与自动评测](docs/observability-and-evaluation.md)
 
 [主动工程工具、Reviewer 回访与生成器治理发布](docs/AGENTIC_ENGINEERING_WORKSPACE.md)
 

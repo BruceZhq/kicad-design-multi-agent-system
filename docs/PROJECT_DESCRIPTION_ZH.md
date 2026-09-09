@@ -186,8 +186,6 @@ Java 控制面采用模块化单体和 Port/Adapter 架构，负责 OIDC/JWT、T
 
 黄金评测集收集端到端完成率、`release_ready` 比例、ERC/DRC 通过率、无未连接网络比例、人工盲审接受率、任务耗时、HITL 介入率、工具调用正确率、跨角色交接错误率、Token 和基础设施成本。缺失证据保留为 `null/N/A`，不能补成成功。
 
-截至 2026-08-29，严格 E2E 已得到两个多 Agent `release_ready` 正向样本：NE555 为 ERC 0、DRC 0、unconnected 0、15/15 connections；STM32F030 为 ERC 0、DRC 0、unconnected 0、50/50 connections。当前只有 NE555 具备完整单/多 Agent pair：单 Agent 为 `delivered_with_issues`，多 Agent 为 `release_ready`，所以这一个 pair 的严格成功率为 0% 对 100%。样本量只有 1，不能外推为总体增益；人工盲审、完整 handoff 分母和跨臂工具参数证据仍为 N/A。详见 [release-ready 收敛报告](../evals/reports/release-ready-convergence-20260829.md)。
-
 ## 12. 当前成熟度和边界
 
 代码层已经形成：
